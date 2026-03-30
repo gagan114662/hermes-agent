@@ -165,6 +165,7 @@ def _discover_tools():
         "tools.crm_tool",
         "tools.prospect_tool",
         "tools.desktop_tool",
+        "tools.mcp_autoconfig",
     ]
     import importlib
     for mod_name in _modules:
