@@ -60,7 +60,9 @@ def prospect_add_fn(
     score: int = 5,
 ) -> str:
     """Add a new prospect to the outbound pipeline."""
-    prospect_id = str(uuid.uuid4())[:8]
+    if not (1 <= score <= 10):
+        return f"Error: score must be between 1 and 10, got {score}."
+    prospect_id = str(uuid.uuid4())[:12]
     now = _now()
     data = _load()
     data.setdefault("prospects", {})[prospect_id] = {
@@ -86,6 +88,8 @@ def prospect_update_fn(
     notes: str = "",
 ) -> str:
     """Update status and/or notes for an existing prospect."""
+    if not status and not notes:
+        return "Error: provide at least one of status or notes to update."
     if status and status not in _VALID_STATUSES:
         valid = ", ".join(sorted(_VALID_STATUSES))
         return f"Error: invalid status '{status}'. Valid statuses: {valid}."

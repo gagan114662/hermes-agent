@@ -82,3 +82,19 @@ def test_prospect_list_all_statuses(tmp_prospects):
 def test_prospect_list_empty(tmp_prospects):
     result = tmp_prospects.prospect_list_fn(status="new")
     assert "no prospects" in result.lower()
+
+
+def test_prospect_update_no_op_returns_error(tmp_prospects):
+    tmp_prospects.prospect_add_fn(name="G", source="reddit", pain_point="x")
+    data = json.loads(Path(tmp_prospects._prospects_path()).read_text())
+    pid = list(data["prospects"].keys())[0]
+    result = tmp_prospects.prospect_update_fn(prospect_id=pid)
+    assert "error" in result.lower()
+
+
+def test_prospect_add_rejects_invalid_score(tmp_prospects):
+    result = tmp_prospects.prospect_add_fn(name="H", source="reddit", pain_point="x", score=99)
+    assert "error" in result.lower()
+    p = Path(tmp_prospects._prospects_path())
+    data = json.loads(p.read_text()) if p.exists() else {"prospects": {}}
+    assert len(data["prospects"]) == 0
