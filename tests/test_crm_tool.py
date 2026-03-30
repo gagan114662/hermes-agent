@@ -93,3 +93,16 @@ def test_crm_deal_add(tmp_crm):
     assert "deal" in result.lower() or "eve" in result.lower()
     data = json.loads(Path(tmp_crm._crm_path()).read_text())
     assert len(data["contacts"]["+14155550104"]["deals"]) == 1
+
+
+def test_crm_log_works_for_email_keyed_contact(tmp_crm):
+    """crm_log must work for contacts saved with email only (no phone)."""
+    tmp_crm.crm_save_fn(name="Email Only", email="emailonly@example.com")
+    result = tmp_crm.crm_log_fn(
+        phone="emailonly@example.com",  # using email as the key
+        channel="email",
+        summary="Sent intro email",
+    )
+    assert "logged" in result.lower() or "email only" in result.lower()
+    data = json.loads(Path(tmp_crm._crm_path()).read_text())
+    assert len(data["contacts"]["emailonly@example.com"]["interactions"]) == 1
