@@ -73,6 +73,8 @@ _HERMES_CORE_TOOLS = [
     "ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service",
     # Customer CRM
     "crm_save", "crm_log", "crm_find", "crm_deal",
+    # Prospect tracker (outbound pipeline)
+    "prospect_add", "prospect_update", "prospect_list", "prospect_digest",
 ]
 
 
