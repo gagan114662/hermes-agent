@@ -23,12 +23,13 @@ def _crm_path() -> str:
 
 def _load() -> dict:
     p = Path(_crm_path())
-    if p.exists():
-        try:
-            return json.loads(p.read_text())
-        except Exception:
-            pass
-    return {"contacts": {}}
+    if not p.exists():
+        return {"contacts": {}}
+    try:
+        return json.loads(p.read_text())
+    except (json.JSONDecodeError, OSError) as e:
+        logger.error("CRM file corrupted, cannot load: %s", e)
+        raise
 
 
 def _save(data: dict) -> None:
@@ -39,6 +40,18 @@ def _save(data: dict) -> None:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _find_contact(data: dict, key: str) -> "tuple[str, dict] | tuple[None, None]":
+    """Find a contact by phone or email key. Returns (key, contact) or (None, None)."""
+    contacts = data.get("contacts", {})
+    if key in contacts:
+        return key, contacts[key]
+    # Also search by stored phone/email fields
+    for k, c in contacts.items():
+        if c.get("phone") == key or c.get("email") == key:
+            return k, c
+    return None, None
 
 
 # ---------------------------------------------------------------------------
@@ -99,18 +112,18 @@ def crm_log_fn(phone: str, channel: str, summary: str) -> str:
     """Log an interaction for a contact."""
     phone = (phone or "").strip()
     data = _load()
-    contacts = data.get("contacts", {})
 
-    if phone not in contacts:
+    _key, contact = _find_contact(data, phone)
+    if contact is None:
         return f"Error: no contact found with phone '{phone}'."
 
-    contact = contacts[phone]
+    now = _now()
     contact.setdefault("interactions", []).append({
-        "at": _now(),
+        "at": now,
         "channel": channel,
         "summary": summary,
     })
-    contact["updated_at"] = _now()
+    contact["updated_at"] = now
     _save(data)
 
     name = contact.get("name", phone)
@@ -153,12 +166,10 @@ def crm_deal_fn(
     """Add or update a deal for a contact."""
     phone = (phone or "").strip()
     data = _load()
-    contacts = data.get("contacts", {})
 
-    if phone not in contacts:
+    _key, contact = _find_contact(data, phone)
+    if contact is None:
         return f"Error: no contact found with phone '{phone}'."
-
-    contact = contacts[phone]
     contact.setdefault("deals", [])
     now = _now()
 
@@ -188,7 +199,7 @@ def crm_deal_fn(
 
     name = contact.get("name", phone)
     if action == "added":
-        return f"Deal '{title}' (${value}/mo) added for {name}."
+        return f"Deal '{title}' (${value}) added for {name}."
     return f"Deal '{title}' updated for {name}."
 
 
