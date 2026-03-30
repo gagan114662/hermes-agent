@@ -164,6 +164,7 @@ def _discover_tools():
         "tools.twilio_tool",
         "tools.crm_tool",
         "tools.prospect_tool",
+        "tools.desktop_tool",
     ]
     import importlib
     for mod_name in _modules:

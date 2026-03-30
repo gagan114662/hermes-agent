@@ -3,21 +3,19 @@
 Control Plane Server — runs on the VPS and handles the customer lifecycle.
 
 Env vars:
-    STRIPE_WEBHOOK_SECRET   — Stripe webhook signing secret
+    PAYPAL_WEBHOOK_ID       — PayPal webhook ID (from PayPal developer dashboard)
     TELEGRAM_BOT_TOKEN      — Bot token used to notify customers / owner
     TELEGRAM_OWNER_ID       — Telegram user ID of the owner to notify
     CONTROL_PLANE_PORT      — Port to bind (default 8080)
 """
 import asyncio
-import hashlib
-import hmac
 import json
 import logging
 import os
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from urllib.parse import parse_qs
 
 import httpx
 import uvicorn
@@ -72,68 +70,44 @@ def _save_customers(data: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Stripe signature verification
+# PayPal IPN verification
 # ---------------------------------------------------------------------------
 
-def _verify_stripe_signature(payload: bytes, sig_header: str, secret: str) -> bool:
-    """Verify Stripe webhook signature with replay protection (±300 s)."""
+async def _verify_paypal_ipn(raw_body: bytes) -> bool:
+    """Verify PayPal IPN by posting back to PayPal with cmd=_notify-validate."""
     try:
-        parts = {}
-        for item in sig_header.split(","):
-            k, _, v = item.partition("=")
-            parts.setdefault(k, v)
-
-        timestamp = parts.get("t", "")
-        v1 = parts.get("v1", "")
-        if not timestamp or not v1:
-            return False
-
-        ts_int = int(timestamp)
-        now = int(time.time())
-        if abs(now - ts_int) > 300:
-            return False
-
-        signed_payload = f"{timestamp}.{payload.decode()}"
-        computed = hmac.new(
-            secret.encode(),
-            signed_payload.encode(),
-            hashlib.sha256,
-        ).hexdigest()
-
-        return hmac.compare_digest(v1, computed)
-    except Exception:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                "https://ipnpb.paypal.com/cgi-bin/webscr",
+                content=b"cmd=_notify-validate&" + raw_body,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            return resp.text == "VERIFIED"
+    except Exception as exc:
+        logger.warning("PayPal IPN verification error: %s", exc)
         return False
 
 
-# ---------------------------------------------------------------------------
-# Stripe event parsing
-# ---------------------------------------------------------------------------
+def parse_paypal_ipn(params: dict) -> Optional[dict]:
+    """
+    Parse a PayPal IPN POST and return a customer dict for completed
+    subscription payments. Returns None for other payment types.
+    """
+    # Accept: subscr_payment (recurring charge) or web_accept (one-time)
+    txn_type = params.get("txn_type", "")
+    payment_status = params.get("payment_status", "")
 
-def parse_checkout_session(event: dict) -> Optional[dict]:
-    """
-    Parse a Stripe event and return a customer dict if it is a
-    checkout.session.completed event; otherwise return None.
-    """
-    if event.get("type") != "checkout.session.completed":
+    if txn_type not in ("subscr_payment", "web_accept") or payment_status != "Completed":
         return None
 
-    obj = event.get("data", {}).get("object", {})
-    details = obj.get("customer_details", {})
-
-    email = obj.get("customer_email") or details.get("email", "")
-    name = details.get("name", "")
-    phone = details.get("phone", "")
-    telegram_id = obj.get("metadata", {}).get("telegram_id", "")
-    stripe_session_id = obj.get("id", "")
-    amount = obj.get("amount_total", 0)
-
     return {
-        "email": email,
-        "name": name,
-        "phone": phone,
-        "telegram_id": telegram_id,
-        "stripe_session_id": stripe_session_id,
-        "amount": amount,
+        "email": params.get("payer_email", ""),
+        "name": params.get("first_name", "") + " " + params.get("last_name", ""),
+        "phone": params.get("contact_phone", ""),
+        "telegram_id": params.get("custom", ""),  # pass telegram_id in PayPal custom field
+        "txn_id": params.get("txn_id", ""),
+        "subscr_id": params.get("subscr_id", ""),
+        "amount": params.get("mc_gross", "0"),
     }
 
 
@@ -188,48 +162,44 @@ async def health():
     return {"status": "ok", "service": "hermes-control-plane"}
 
 
-@app.post("/stripe-webhook")
-async def stripe_webhook(request: Request):
-    payload = await request.body()
-    sig = request.headers.get("stripe-signature", "")
-    secret = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
+@app.post("/paypal-ipn")
+async def paypal_ipn(request: Request):
+    """Receive PayPal IPN notifications for new subscriptions."""
+    raw_body = await request.body()
 
-    if not secret:
-        raise HTTPException(status_code=500, detail="Webhook secret not configured")
-    if not _verify_stripe_signature(payload, sig, secret):
-        raise HTTPException(status_code=400, detail="Invalid signature")
+    # Verify with PayPal
+    if not await _verify_paypal_ipn(raw_body):
+        logger.warning("PayPal IPN verification failed")
+        raise HTTPException(status_code=400, detail="IPN verification failed")
 
-    try:
-        event = json.loads(payload)
-    except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=400, detail=f"Invalid JSON: {exc}") from exc
+    # Parse form-encoded params
+    params = {k: v[0] for k, v in parse_qs(raw_body.decode()).items()}
+    logger.info("PayPal IPN: txn_type=%s status=%s email=%s",
+                params.get("txn_type"), params.get("payment_status"), params.get("payer_email"))
 
-    customer = parse_checkout_session(event)
+    customer = parse_paypal_ipn(params)
     if not customer:
-        return Response(status_code=200)
+        return Response(status_code=200)  # Not a completed payment, ignore
 
-    # Persist customer record
+    # Persist — deduplicate by txn_id
     data = _load_customers()
-    session_id = customer["stripe_session_id"]
-
-    # Duplicate session guard — skip re-processing
-    if session_id in data["customers"]:
-        logger.info("Duplicate webhook for session %s — ignoring", session_id)
+    txn_id = customer["txn_id"]
+    if txn_id in data["customers"]:
+        logger.info("Duplicate IPN for txn %s — ignoring", txn_id)
         return {"status": "ok", "duplicate": True}
 
-    data["customers"][session_id] = {
+    data["customers"][txn_id] = {
         **customer,
         "status": "onboarding",
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     _save_customers(data)
-    logger.info("New customer recorded: %s (%s)", customer["name"], customer["email"])
+    logger.info("New customer: %s (%s)", customer["name"].strip(), customer["email"])
 
-    # Fire-and-forget Telegram notifications (errors are logged, not raised)
     asyncio.create_task(_notify_customer(customer))
     asyncio.create_task(_notify_owner(customer))
 
-    return {"status": "ok"}
+    return Response(status_code=200)  # PayPal requires 200 OK
 
 
 # ---------------------------------------------------------------------------
