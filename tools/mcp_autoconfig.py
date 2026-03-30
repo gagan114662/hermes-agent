@@ -11,6 +11,7 @@ and do not require external MCP servers.
 import copy
 import logging
 import os
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -167,8 +168,15 @@ def apply_mcp_configs(configs: dict, config_path: Path = None) -> None:
     mcp_servers = existing.setdefault("mcp_servers", {})
     mcp_servers.update(configs)
 
-    with open(config_path, "w") as f:
-        yaml.dump(existing, f, default_flow_style=False, allow_unicode=True)
+    # Atomic write: write to temp file in the same directory then rename
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=config_path.parent, suffix=".yaml.tmp")
+    try:
+        with os.fdopen(tmp_fd, "w") as f:
+            yaml.dump(existing, f, default_flow_style=False, allow_unicode=True)
+        os.replace(tmp_path, config_path)
+    except Exception:
+        os.unlink(tmp_path)
+        raise
 
     logger.info("Wrote %d MCP server config(s) to %s", len(configs), config_path)
 

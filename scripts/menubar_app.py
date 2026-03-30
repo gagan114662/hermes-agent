@@ -13,18 +13,29 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import rumps
 
-LOG_PATH = Path(os.environ.get("HOME", str(Path.home()))) / ".hermes" / "action_log.json"
-PAUSE_PATH = Path(os.environ.get("HOME", str(Path.home()))) / ".hermes" / ".paused"
+_HERMES_DIR = Path(os.environ.get("HOME", str(Path.home()))) / ".hermes"
+LOG_PATH_JSONL = _HERMES_DIR / "action_log.jsonl"
+LOG_PATH_JSON = _HERMES_DIR / "action_log.json"
+PAUSE_PATH = _HERMES_DIR / ".paused"
 
 
 def _load_recent(n=5) -> list:
-    if not LOG_PATH.exists():
-        return []
-    try:
-        log = json.loads(LOG_PATH.read_text())
-        return list(reversed(log[-n:]))
-    except Exception:
-        return []
+    """Load the n most recent actions. Reads JSONL (new) or JSON array (legacy)."""
+    entries = []
+    if LOG_PATH_JSONL.exists():
+        try:
+            for line in LOG_PATH_JSONL.read_text().splitlines():
+                line = line.strip()
+                if line:
+                    entries.append(json.loads(line))
+        except Exception:
+            pass
+    elif LOG_PATH_JSON.exists():
+        try:
+            entries = json.loads(LOG_PATH_JSON.read_text())
+        except Exception:
+            pass
+    return list(reversed(entries[-n:]))
 
 
 def _time_ago(ts_str: str) -> str:

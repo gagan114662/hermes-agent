@@ -10,7 +10,6 @@ First Run — one-time setup sequence for new installs.
 import logging
 import os
 import sys
-import httpx
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -60,6 +59,7 @@ def _send_welcome(services: list, actions: list) -> None:
 
     text = "\n".join(lines)
     try:
+        import httpx
         httpx.post(
             f"https://api.telegram.org/bot{bot_token}/sendMessage",
             json={"chat_id": owner_id, "text": text},
@@ -88,12 +88,13 @@ def run_first_time_setup() -> None:
     actions = run_all_queues()
     logger.info("First loop completed: %d actions", len(actions))
 
-    # 3. Send the wow message to owner
+    # 3. Mark as done BEFORE the network call — setup is complete regardless of Telegram
+    _mark_setup_done()
+    logger.info("Setup marked complete")
+
+    # 4. Send the wow message (best-effort — won't re-run setup if this fails)
     logger.info("Step 3: Sending welcome message...")
     _send_welcome(services, actions)
-
-    # 4. Mark as done
-    _mark_setup_done()
     logger.info("=== First run complete ===")
 
 

@@ -6,6 +6,7 @@ Each query triggers a macOS system dialog the first time ("Always Allow" = never
 No bulk dumps. No silent access. Credentials used immediately to configure MCP, then discarded.
 """
 import logging
+import re
 import subprocess
 from typing import Optional
 
@@ -75,7 +76,6 @@ def _query_keychain_username(domain: str) -> Optional[str]:
             for line in result.stdout.splitlines():
                 if '"acct"' in line and '<blob>' in line:
                     # Extract: "acct"<blob>="user@example.com"
-                    import re
                     m = re.search(r'"acct"<blob>="([^"]+)"', line)
                     if m:
                         return m.group(1)
@@ -116,7 +116,6 @@ def detect_services_only() -> list:
     Use this for the "I found these tools" detection screen before asking permission.
     """
     found = []
-    import re
     for domain, service, display_name in KNOWN_SERVICES:
         try:
             result = subprocess.run(

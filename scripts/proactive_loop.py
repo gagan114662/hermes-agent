@@ -11,6 +11,7 @@ Queues:
 
 Results logged to ~/.hermes/action_log.json for morning digest.
 """
+import fcntl
 import json
 import logging
 import os
@@ -34,37 +35,51 @@ def _log_path() -> Path:
 
 
 def log_action(action: str, queue: str = "general") -> None:
-    """Append a completed action to the action log."""
+    """Append a completed action to the action log. File-locked to prevent race conditions."""
     path = _log_path()
-    entries = []
-    if path.exists():
-        try:
-            entries = json.loads(path.read_text())
-        except Exception:
-            entries = []
-    entries.append({
+    path.parent.mkdir(parents=True, exist_ok=True)
+    entry = json.dumps({
         "action": action,
         "queue": queue,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     })
-    path.write_text(json.dumps(entries, indent=2))
+    # Open in append mode with exclusive lock — safe for concurrent cron runs
+    with open(path.with_suffix(".jsonl"), "a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            f.write(entry + "\n")
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
 
 
 def load_action_log() -> list:
-    """Load the action log. Returns empty list if file doesn't exist."""
-    path = _log_path()
-    if not path.exists():
-        return []
-    try:
-        return json.loads(path.read_text())
-    except Exception:
-        return []
+    """Load the action log. Supports both JSONL (new) and JSON array (legacy)."""
+    jsonl_path = _log_path().with_suffix(".jsonl")
+    json_path = _log_path()
+    entries = []
+    # Prefer JSONL
+    if jsonl_path.exists():
+        try:
+            for line in jsonl_path.read_text().splitlines():
+                line = line.strip()
+                if line:
+                    entries.append(json.loads(line))
+        except Exception:
+            pass
+    # Fall back to legacy JSON array
+    elif json_path.exists():
+        try:
+            entries = json.loads(json_path.read_text())
+        except Exception:
+            pass
+    return entries
 
 
 def clear_action_log() -> None:
     """Clear the action log (called by morning digest after sending report)."""
-    path = _log_path()
-    path.write_text(json.dumps([]))
+    for path in [_log_path().with_suffix(".jsonl"), _log_path()]:
+        if path.exists():
+            path.write_text("")
 
 
 # ---------------------------------------------------------------------------
@@ -77,9 +92,16 @@ def _list_stale_prospects() -> list:
     if not prospects_path.exists():
         return []
     try:
-        prospects = json.loads(prospects_path.read_text())
+        raw = json.loads(prospects_path.read_text())
     except Exception:
         return []
+
+    # prospect_tool stores {"prospects": {"id1": {...}, ...}}
+    # but a plain list is also valid — handle both
+    if isinstance(raw, dict):
+        prospects = list(raw.get("prospects", raw).values())
+    else:
+        prospects = raw
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=3)
     stale = []
