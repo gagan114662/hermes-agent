@@ -8,6 +8,7 @@ Env vars:
     TELEGRAM_OWNER_ID       — Telegram user ID of the owner to notify
     CONTROL_PLANE_PORT      — Port to bind (default 8080)
 """
+import asyncio
 import hashlib
 import hmac
 import json
@@ -46,13 +47,28 @@ def _load_customers() -> dict:
         try:
             return json.loads(path.read_text())
         except Exception:
-            return {}
-    return {}
+            return {"customers": {}}
+    return {"customers": {}}
 
 
-def _save_customers(customers: dict) -> None:
+def _save_customers(data: dict) -> None:
+    import tempfile
     path = _customers_path()
-    path.write_text(json.dumps(customers, indent=2))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Write to temp file in same directory, then atomic rename
+    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    try:
+        os.write(fd, json.dumps(data, indent=2).encode())
+        os.close(fd)
+        os.chmod(tmp, 0o600)  # owner-only permissions
+        os.replace(tmp, path)
+    except Exception:
+        os.close(fd)
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -178,7 +194,9 @@ async def stripe_webhook(request: Request):
     sig = request.headers.get("stripe-signature", "")
     secret = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
 
-    if secret and not _verify_stripe_signature(payload, sig, secret):
+    if not secret:
+        raise HTTPException(status_code=500, detail="Webhook secret not configured")
+    if not _verify_stripe_signature(payload, sig, secret):
         raise HTTPException(status_code=400, detail="Invalid signature")
 
     try:
@@ -191,18 +209,23 @@ async def stripe_webhook(request: Request):
         return Response(status_code=200)
 
     # Persist customer record
-    customers = _load_customers()
+    data = _load_customers()
     session_id = customer["stripe_session_id"]
-    customers[session_id] = {
+
+    # Duplicate session guard — skip re-processing
+    if session_id in data["customers"]:
+        logger.info("Duplicate webhook for session %s — ignoring", session_id)
+        return {"status": "ok", "duplicate": True}
+
+    data["customers"][session_id] = {
         **customer,
         "status": "onboarding",
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
-    _save_customers(customers)
+    _save_customers(data)
     logger.info("New customer recorded: %s (%s)", customer["name"], customer["email"])
 
     # Fire-and-forget Telegram notifications (errors are logged, not raised)
-    import asyncio
     asyncio.create_task(_notify_customer(customer))
     asyncio.create_task(_notify_owner(customer))
 

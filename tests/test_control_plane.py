@@ -68,6 +68,22 @@ def test_stripe_webhook_accepts_valid_signature(tmp_path, monkeypatch):
     assert resp.status_code == 200
 
 
+def test_stripe_webhook_rejects_missing_secret(tmp_path, monkeypatch):
+    monkeypatch.delenv("STRIPE_WEBHOOK_SECRET", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".hermes").mkdir()
+    payload = json.dumps({"type": "checkout.session.completed"}).encode()
+    from fastapi.testclient import TestClient
+    from scripts.control_plane import app
+    client = TestClient(app)
+    resp = client.post(
+        "/stripe-webhook",
+        content=payload,
+        headers={"stripe-signature": "t=0,v1=fake", "content-type": "application/json"},
+    )
+    assert resp.status_code == 500
+
+
 def test_parse_checkout_session():
     from scripts.control_plane import parse_checkout_session
     event = {
