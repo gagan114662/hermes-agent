@@ -109,3 +109,11 @@ def test_validate_secret_matches(monkeypatch):
     import importlib; importlib.reload(vapi_webhook)
     assert vapi_webhook.validate_secret("mysecret") is True
     assert vapi_webhook.validate_secret("wrongsecret") is False
+
+
+def test_validate_secret_none_does_not_crash(monkeypatch):
+    monkeypatch.setenv("VAPI_WEBHOOK_SECRET", "mysecret")
+    from gateway.platforms import vapi_webhook
+    import importlib; importlib.reload(vapi_webhook)
+    # Should return False, not crash
+    assert vapi_webhook.validate_secret(None) is False
