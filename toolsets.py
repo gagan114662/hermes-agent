@@ -77,6 +77,8 @@ _HERMES_CORE_TOOLS = [
     "crm_save", "crm_log", "crm_find", "crm_deal",
     # Prospect tracker (outbound pipeline)
     "prospect_add", "prospect_update", "prospect_list", "prospect_digest",
+    # MCP Auto-Configurator
+    "mcp_autoconfig",
 ]
 
 
