@@ -44,6 +44,8 @@ _HERMES_CORE_TOOLS = [
     "rss_fetch", "jina_read",
     # Terminal + process management
     "terminal", "process",
+    # Desktop control (visible Terminal.app + Claude Code session)
+    "terminal_run", "terminal_type", "claude_code_send",
     # File manipulation
     "read_file", "write_file", "patch", "search_files",
     # Vision + image generation
