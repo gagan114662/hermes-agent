@@ -31,6 +31,17 @@ from typing import List, Dict, Any, Set, Optional
 _HERMES_CORE_TOOLS = [
     # Web
     "web_search", "web_extract",
+    # Voice calls (Vapi)
+    "vapi_call", "vapi_calls",
+    # Avatar video (HeyGen)
+    "heygen_video",
+    # SMS (Twilio)
+    "sms_send",
+    # Reach tools (YouTube, Twitter/X, Reddit, RSS, Jina)
+    "youtube_get", "youtube_search",
+    "twitter_read", "twitter_search",
+    "reddit_read", "reddit_search",
+    "rss_fetch", "jina_read",
     # Terminal + process management
     "terminal", "process",
     # File manipulation
@@ -60,6 +71,8 @@ _HERMES_CORE_TOOLS = [
     "send_message",
     # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
     "ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service",
+    # Customer CRM
+    "crm_save", "crm_log", "crm_find", "crm_deal",
 ]
 
 
@@ -67,6 +80,15 @@ _HERMES_CORE_TOOLS = [
 # These can include individual tools or reference other toolsets
 TOOLSETS = {
     # Basic toolsets - individual tool categories
+    "reach": {
+        "description": "Platform access tools: YouTube transcripts, Twitter/X search, Reddit, RSS feeds, and clean web reading via Jina",
+        "tools": [
+            "youtube_get", "youtube_search",
+            "twitter_read", "twitter_search",
+            "reddit_read", "reddit_search",
+            "rss_fetch", "jina_read",
+        ],
+    },
     "web": {
         "description": "Web research and content extraction tools",
         "tools": ["web_search", "web_extract"],
