@@ -163,6 +163,7 @@ def _discover_tools():
         "tools.heygen_tool",
         "tools.twilio_tool",
         "tools.crm_tool",
+        "tools.prospect_tool",
     ]
     import importlib
     for mod_name in _modules:
