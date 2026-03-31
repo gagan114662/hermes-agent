@@ -5750,6 +5750,21 @@ class AIAgent:
             except Exception:
                 pass  # Background review is best-effort
 
+        # Auto-extract memories in background (fire-and-forget)
+        if final_response and not interrupted:
+            try:
+                from agent.extract_memories import maybe_extract_memories
+                maybe_extract_memories(messages=messages, agent=self)
+            except Exception:
+                pass
+
+        # Dream: nightly memory consolidation (fire-and-forget, gates checked inside)
+        try:
+            from agent.dream import maybe_dream
+            maybe_dream(agent=self)
+        except Exception:
+            pass
+
         # Plugin hook: on_session_end
         # Fired at the very end of every run_conversation call.
         # Plugins can use this for cleanup, flushing buffers, etc.
