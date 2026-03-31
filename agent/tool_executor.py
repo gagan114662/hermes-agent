@@ -598,11 +598,11 @@ class ToolExecutor:
         self.agent._executing_tools = True
         try:
             if not _should_parallelize_tool_batch(tool_calls):
-                return self.agent._execute_tool_calls_sequential(
+                return self.execute_sequential(
                     assistant_message, messages, effective_task_id, api_call_count
                 )
 
-            return self.agent._execute_tool_calls_concurrent(
+            return self.execute_concurrent(
                 assistant_message, messages, effective_task_id, api_call_count
             )
         finally:
