@@ -107,6 +107,7 @@ from agent.trajectory import (
     save_trajectory as _save_trajectory_to_file,
 )
 from agent.tool_executor import ToolExecutor
+from agent.pipeline import TurnState, TurnPipeline
 from utils import atomic_json_write
 
 
@@ -1426,6 +1427,7 @@ class AIAgent:
                 print(f"📊 Context limit: {self.context_compressor.context_length:,} tokens (auto-compression disabled)")
 
         self._tool_executor = ToolExecutor(self)
+        self._pipeline = TurnPipeline(self)
 
     def reset_session_state(self):
         """Reset all session-scoped token counters to 0 for a fresh session.
