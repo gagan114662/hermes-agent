@@ -2624,6 +2624,13 @@ class AIAgent:
         prompt_parts.append(CRM_INTEGRITY_GUIDANCE)
         prompt_parts.append(PROACTIVE_BEHAVIORS_GUIDANCE)
 
+        # Coordinator: spawn-vs-continue decision framework for delegation
+        try:
+            from agent.coordinator import get_coordinator_prompt_addition
+            prompt_parts.append(get_coordinator_prompt_addition())
+        except Exception:
+            pass
+
         # Tool-use enforcement: tells the model to actually call tools instead
         # of describing intended actions.  Controlled by config.yaml
         # agent.tool_use_enforcement:
@@ -5771,6 +5778,19 @@ class AIAgent:
                 maybe_extract_memories(messages=messages, agent=self)
             except Exception:
                 pass
+
+        # Stop hooks: fire-and-forget actions on conversation end
+        try:
+            from agent.stop_hooks import run_stop_hooks
+            run_stop_hooks(
+                agent=self,
+                messages=messages,
+                final_response=final_response or "",
+                completed=completed,
+                interrupted=interrupted,
+            )
+        except Exception:
+            pass
 
         # Dream: nightly memory consolidation (fire-and-forget, gates checked inside)
         try:
