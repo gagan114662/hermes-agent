@@ -1,4 +1,2 @@
 timestamp	run	commit	score	prev_score	delta	status	description	elapsed_s	pass_count	fail_count
-2026-03-30T22:39:10.758153	0	432309c2	0.7350			baseline	Initial baseline measurement	0.0	7	5
-2026-03-30T22:39:48.697816	1	cd74bf6f	0.7350	0.7350	+0.0000	discard_same	Add explicit step-by-step tool workflows for Twitter posting, LinkedIn posting, DM response checking, and prospect research to match the proven Instagram posting pattern	0.0	7	5
-2026-03-30T22:44:59.977954	0	00c5b75b	0.7615			baseline	Initial baseline measurement	233.5	7	5
+2026-03-30T22:50:22.322030	0	8a02e2d5	0.8912			baseline	Initial baseline measurement	0.009	6	1
