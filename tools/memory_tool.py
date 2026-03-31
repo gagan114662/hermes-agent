@@ -458,6 +458,12 @@ def memory_tool(
         if not content:
             return tool_error("Content is required for 'add' action.", success=False)
         result = store.add(target, content)
+        if result.get("success"):
+            try:
+                from hermes_cli.plugins import emit_hook
+                emit_hook("on_memory_write", content=content, target=target)
+            except Exception:
+                pass
 
     elif action == "replace":
         if not old_text:

@@ -61,9 +61,36 @@ VALID_HOOKS: Set[str] = {
     "post_api_request",
     "on_session_start",
     "on_session_end",
-    "on_session_finalize",
-    "on_session_reset",
+    # New lifecycle hooks (B6)
+    "on_delegation_start",
+    "on_delegation_end",
+    "on_memory_write",
+    "on_tool_error",
+    "on_budget_warning",
+    "on_context_compress",
+    "on_file_changed",
 }
+
+
+@dataclass
+class HookResult:
+    """Structured return value from a hook callback.
+
+    Plugins return this from ``pre_tool_call`` to guard tool execution:
+
+    - ``action="continue"`` (default): proceed normally.
+    - ``action="suppress"``: skip the tool call; ``message`` is returned as
+      the tool result shown to the model.
+    - ``action="stop"``: abort the entire agent turn; ``message`` is shown
+      to the user.
+
+    Optionally set ``updated_args`` to replace the tool call arguments
+    before execution (useful for sanitising inputs).
+    """
+
+    action: str = "continue"   # "continue" | "suppress" | "stop"
+    message: Optional[str] = None
+    updated_args: Optional[Dict[str, Any]] = None
 
 ENTRY_POINTS_GROUP = "hermes_agent.plugins"
 
@@ -279,6 +306,7 @@ class PluginManager:
         self._context_engine = None  # Set by a plugin via register_context_engine()
         self._discovered: bool = False
         self._cli_ref = None  # Set by CLI after plugin discovery
+        self._plugin_mtimes: dict = {}  # plugin_id -> last known mtime
 
     # -----------------------------------------------------------------------
     # Public
@@ -494,6 +522,29 @@ class PluginManager:
         )
 
     # -----------------------------------------------------------------------
+    # Hot reload
+    # -----------------------------------------------------------------------
+
+    def _check_reload(self) -> None:
+        """Reload plugin modules whose source files have changed on disk."""
+        for plugin_id, loaded in list(self._plugins.items()):
+            module = loaded.module if isinstance(loaded, LoadedPlugin) else loaded.get("module") if isinstance(loaded, dict) else None
+            if module is None:
+                continue
+            try:
+                source_file = getattr(module, "__file__", None)
+                if source_file is None:
+                    continue
+                current_mtime = os.path.getmtime(source_file)
+                last_mtime = self._plugin_mtimes.get(plugin_id, 0)
+                if current_mtime > last_mtime:
+                    importlib.reload(module)
+                    self._plugin_mtimes[plugin_id] = current_mtime
+                    logger.info("Hot-reloaded plugin %s (file changed)", plugin_id)
+            except Exception as e:
+                logger.warning("Failed to hot-reload plugin %s: %s", plugin_id, e)
+
+    # -----------------------------------------------------------------------
     # Hook invocation
     # -----------------------------------------------------------------------
 
@@ -517,6 +568,7 @@ class PluginManager:
         are reused.  All injected context is ephemeral — never
         persisted to session DB.
         """
+        self._check_reload()
         callbacks = self._hooks.get(hook_name, [])
         results: List[Any] = []
         for cb in callbacks:
@@ -532,6 +584,46 @@ class PluginManager:
                     exc,
                 )
         return results
+
+    def invoke_pre_tool_hook(
+        self,
+        tool_name: str,
+        args: Dict[str, Any],
+        task_id: Optional[str] = None,
+    ) -> "HookResult":
+        """Invoke ``pre_tool_call`` hooks and return the winning HookResult.
+
+        Priority: first ``suppress`` or ``stop`` result wins.  If all
+        callbacks return ``continue`` (or nothing), returns a default
+        ``HookResult(action="continue")``.
+
+        The ``updated_args`` from the first callback that sets it are used
+        to replace the tool arguments before execution.
+        """
+        callbacks = self._hooks.get("pre_tool_call", [])
+        merged_args: Optional[Dict[str, Any]] = None
+        for cb in callbacks:
+            try:
+                ret = cb(tool_name=tool_name, args=args, task_id=task_id)
+                if isinstance(ret, HookResult):
+                    if ret.updated_args is not None and merged_args is None:
+                        merged_args = ret.updated_args
+                    if ret.action in ("suppress", "stop"):
+                        # Attach any arg override and return immediately
+                        if merged_args is not None and ret.updated_args is None:
+                            return HookResult(
+                                action=ret.action,
+                                message=ret.message,
+                                updated_args=merged_args,
+                            )
+                        return ret
+            except Exception as exc:
+                logger.warning(
+                    "pre_tool_call hook %s raised: %s",
+                    getattr(cb, "__name__", repr(cb)),
+                    exc,
+                )
+        return HookResult(action="continue", updated_args=merged_args)
 
     # -----------------------------------------------------------------------
     # Introspection
@@ -582,6 +674,34 @@ def invoke_hook(hook_name: str, **kwargs: Any) -> List[Any]:
     Returns a list of non-``None`` return values from plugin callbacks.
     """
     return get_plugin_manager().invoke_hook(hook_name, **kwargs)
+
+
+def invoke_pre_tool_hook(
+    tool_name: str,
+    args: Dict[str, Any],
+    task_id: Optional[str] = None,
+) -> "HookResult":
+    """Invoke pre_tool_call hooks and return a structured HookResult.
+
+    Use this instead of ``invoke_hook("pre_tool_call", ...)`` whenever
+    the caller needs to respect suppress/stop decisions from plugins.
+    """
+    return get_plugin_manager().invoke_pre_tool_hook(
+        tool_name=tool_name, args=args, task_id=task_id
+    )
+
+
+def emit_hook(event: str, **kwargs: Any) -> None:
+    """Fire a hook event and ignore all return values. Never raises.
+
+    Use this for fire-and-forget lifecycle events (e.g. ``on_tool_error``,
+    ``on_memory_write``) where the caller does not need plugin return values
+    and must not be disrupted by plugin failures.
+    """
+    try:
+        invoke_hook(event, **kwargs)
+    except Exception:
+        pass
 
 
 def get_plugin_tool_names() -> Set[str]:
