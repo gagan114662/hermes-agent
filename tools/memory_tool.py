@@ -51,6 +51,9 @@ MEMORY_DIR = get_memory_dir()
 
 ENTRY_DELIMITER = "\n§\n"
 
+# Shared team memory file — readable/writable by all agent instances/sessions
+TEAM_MEMORY_FILE = str(get_hermes_home() / "memories" / "team.md")
+
 
 # ---------------------------------------------------------------------------
 # Memory content scanning — lightweight check for injection/exfiltration
@@ -448,11 +451,15 @@ def memory_tool(
 
     Returns JSON string with results.
     """
+    # Team memory target — shared across all agents/sessions, does not need a store
+    if target == "team":
+        return _handle_team_memory(action=action, content=content, old_text=old_text)
+
     if store is None:
         return tool_error("Memory is not available. It may be disabled in config or this environment.", success=False)
 
     if target not in ("memory", "user"):
-        return tool_error(f"Invalid target '{target}'. Use 'memory' or 'user'.", success=False)
+        return json.dumps({"success": False, "error": f"Invalid target '{target}'. Use 'memory', 'user', or 'team'."}, ensure_ascii=False)
 
     if action == "add":
         if not content:
@@ -481,6 +488,61 @@ def memory_tool(
         return tool_error(f"Unknown action '{action}'. Use: add, replace, remove", success=False)
 
     return json.dumps(result, ensure_ascii=False)
+
+
+def _handle_team_memory(action: str, content: Optional[str] = None, old_text: Optional[str] = None) -> str:
+    """Handle team memory operations — shared namespace across agents/sessions."""
+    team_file = TEAM_MEMORY_FILE
+    try:
+        if action == "add":
+            if not content or not content.strip():
+                return json.dumps({"success": False, "error": "Content is required for 'add' action."}, ensure_ascii=False)
+            # Scan for injection before writing
+            scan_error = _scan_memory_content(content.strip())
+            if scan_error:
+                return json.dumps({"success": False, "error": scan_error}, ensure_ascii=False)
+            os.makedirs(os.path.dirname(team_file), exist_ok=True)
+            with open(team_file, "a", encoding="utf-8") as f:
+                f.write(f"- {content.strip()}\n")
+            return json.dumps({"success": True, "target": "team", "written": content.strip()}, ensure_ascii=False)
+
+        elif action in ("replace", "remove"):
+            if not old_text or not old_text.strip():
+                return json.dumps({"success": False, "error": "old_text is required."}, ensure_ascii=False)
+            if not os.path.exists(team_file):
+                return json.dumps({"success": False, "error": "No team memory file found."}, ensure_ascii=False)
+            with open(team_file, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            matches = [i for i, line in enumerate(lines) if old_text.strip() in line]
+            if not matches:
+                return json.dumps({"success": False, "error": f"No team memory entry matched '{old_text}'."}, ensure_ascii=False)
+            if action == "remove":
+                lines.pop(matches[0])
+            else:
+                if not content or not content.strip():
+                    return json.dumps({"success": False, "error": "content is required for 'replace' action."}, ensure_ascii=False)
+                scan_error = _scan_memory_content(content.strip())
+                if scan_error:
+                    return json.dumps({"success": False, "error": scan_error}, ensure_ascii=False)
+                lines[matches[0]] = f"- {content.strip()}\n"
+            with open(team_file, "w", encoding="utf-8") as f:
+                f.writelines(lines)
+            return json.dumps({"success": True, "target": "team"}, ensure_ascii=False)
+
+        elif action == "read":
+            if not os.path.exists(team_file):
+                return json.dumps({"memories": [], "target": "team"}, ensure_ascii=False)
+            with open(team_file, "r", encoding="utf-8") as f:
+                raw = f.read(1000)  # cap at 1000 chars
+            lines = [l.strip().lstrip("- ") for l in raw.splitlines() if l.strip() and l.strip() != "-"]
+            return json.dumps({"memories": lines, "target": "team"}, ensure_ascii=False)
+
+        else:
+            return json.dumps({"success": False, "error": f"Unknown action '{action}'. Use: add, replace, remove, read"}, ensure_ascii=False)
+
+    except Exception as exc:
+        logger.warning("team memory operation failed: %s", exc)
+        return json.dumps({"success": False, "error": f"Team memory error: {exc}"}, ensure_ascii=False)
 
 
 def add_topic(topic_file: str, content: str) -> Dict[str, Any]:
