@@ -1393,33 +1393,10 @@ class AIAgent:
         self.session_estimated_cost_usd = 0.0
         self.session_cost_status = "unknown"
         self.session_cost_source = "none"
-        
-        # ── Ollama num_ctx injection ──
-        # Ollama defaults to 2048 context regardless of the model's capabilities.
-        # When running against an Ollama server, detect the model's max context
-        # and pass num_ctx on every chat request so the full window is used.
-        # User override: set model.ollama_num_ctx in config.yaml to cap VRAM use.
-        self._ollama_num_ctx: int | None = None
-        _ollama_num_ctx_override = None
-        if isinstance(_model_cfg, dict):
-            _ollama_num_ctx_override = _model_cfg.get("ollama_num_ctx")
-        if _ollama_num_ctx_override is not None:
-            try:
-                self._ollama_num_ctx = int(_ollama_num_ctx_override)
-            except (TypeError, ValueError):
-                logger.debug("Invalid ollama_num_ctx config value: %r", _ollama_num_ctx_override)
-        if self._ollama_num_ctx is None and self.base_url and is_local_endpoint(self.base_url):
-            try:
-                _detected = query_ollama_num_ctx(self.model, self.base_url)
-                if _detected and _detected > 0:
-                    self._ollama_num_ctx = _detected
-            except Exception as exc:
-                logger.debug("Ollama num_ctx detection failed: %s", exc)
-        if self._ollama_num_ctx and not self.quiet_mode:
-            logger.info(
-                "Ollama num_ctx: will request %d tokens (model max from /api/show)",
-                self._ollama_num_ctx,
-            )
+
+        # Per-tool cost attribution (C3) — also reset in reset_session_state()
+        self._tool_cost_entries: list = []   # List[ToolCostEntry]
+        self._current_turn_tool_names: list = []   # tools called this API turn
 
         if not self.quiet_mode:
             if compression_enabled:
@@ -6628,7 +6605,27 @@ class AIAgent:
         return compressed, new_system_prompt
 
     def _execute_tool_calls(self, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
-        return self._tool_executor.execute(assistant_message, messages, effective_task_id, api_call_count)
+        tool_calls = assistant_message.tool_calls
+
+        # Track which tools are about to run so cost attribution can
+        # apportion the next API response's token delta across them.
+        self._current_turn_tool_names = [
+            tc.function.name for tc in tool_calls
+            if hasattr(tc, "function") and hasattr(tc.function, "name")
+        ]
+
+        # Allow _vprint during tool execution even with stream consumers
+        self._executing_tools = True
+        try:
+            if not _should_parallelize_tool_batch(tool_calls):
+                return self._execute_tool_calls_sequential(
+                    assistant_message, messages, effective_task_id, api_call_count
+                )
+            return self._execute_tool_calls_concurrent(
+                assistant_message, messages, effective_task_id, api_call_count
+            )
+        finally:
+            self._executing_tools = False
 
     def _invoke_tool(self, function_name: str, function_args: dict, effective_task_id: str) -> str:
         return self._tool_executor.invoke_tool(function_name, function_args, effective_task_id)
