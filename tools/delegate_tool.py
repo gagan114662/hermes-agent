@@ -958,6 +958,86 @@ def _load_config() -> dict:
         return {}
 
 
+def delegate_task_async(
+    goal: str,
+    context: str = None,
+    toolsets: list = None,
+    tasks: list = None,
+    max_iterations: int = None,
+    parent_agent=None,
+) -> str:
+    """Start delegation in a background thread. Returns task_handle_id immediately.
+
+    Parent agent can continue working while the subagent runs.
+    Use check_delegation(task_handle_id) to poll for results.
+    """
+    import threading
+    from agent.mailbox import get_mailbox
+
+    mailbox = get_mailbox()
+    handle = mailbox.reserve()
+
+    def _run():
+        try:
+            result = delegate_task(
+                goal=goal,
+                context=context,
+                toolsets=toolsets,
+                tasks=tasks,
+                max_iterations=max_iterations,
+                parent_agent=parent_agent,
+            )
+            if isinstance(result, str):
+                import json
+                try:
+                    result = json.loads(result)
+                except Exception:
+                    result = {"response": result}
+            mailbox.send(handle, result)
+        except Exception as e:
+            mailbox.send(handle, {"error": str(e), "failed": True})
+
+    thread = threading.Thread(target=_run, daemon=True, name=f"delegate-{handle}")
+    thread.start()
+
+    import json
+    return json.dumps({
+        "task_handle_id": handle,
+        "status": "running",
+        "message": "Delegation started in background. Use check_delegation to poll for results.",
+    })
+
+
+def check_delegation(task_handle_id: str, wait_seconds: float = 0) -> str:
+    """Check if an async delegation has completed.
+
+    Args:
+        task_handle_id: The handle returned by delegate_task_async
+        wait_seconds: How long to wait (0 = non-blocking poll, >0 = wait up to N seconds)
+
+    Returns JSON with status: "pending" | "completed" | "not_found"
+    """
+    import json
+    from agent.mailbox import get_mailbox
+
+    mailbox = get_mailbox()
+
+    if wait_seconds > 0:
+        result = mailbox.receive(task_handle_id, timeout=wait_seconds)
+    else:
+        result = mailbox.poll(task_handle_id)
+
+    if result is None:
+        return json.dumps({"status": "pending", "task_handle_id": task_handle_id})
+
+    mailbox.discard(task_handle_id)
+    return json.dumps({
+        "status": "completed",
+        "task_handle_id": task_handle_id,
+        "result": result,
+    })
+
+
 # ---------------------------------------------------------------------------
 # OpenAI Function-Calling Schema
 # ---------------------------------------------------------------------------
@@ -1098,6 +1178,114 @@ registry.register(
         acp_command=args.get("acp_command"),
         acp_args=args.get("acp_args"),
         parent_agent=kw.get("parent_agent")),
+    check_fn=check_delegate_requirements,
+    emoji="🔀",
+)
+
+DELEGATE_TASK_ASYNC_SCHEMA = {
+    "name": "delegate_task_async",
+    "description": (
+        "Start a delegation in the background and return a task_handle_id immediately. "
+        "The parent agent can continue working while the subagent runs in a background thread. "
+        "Use check_delegation(task_handle_id) to poll for results.\n\n"
+        "Same semantics as delegate_task but non-blocking: returns immediately with a handle "
+        "instead of waiting for the subagent to finish.\n\n"
+        "WHEN TO USE:\n"
+        "- When you want to start a long-running subagent task and continue doing other work\n"
+        "- When running multiple independent subagents concurrently without batch mode\n\n"
+        "IMPORTANT:\n"
+        "- Subagents have NO memory of your conversation. Pass all relevant info via 'context'.\n"
+        "- Use check_delegation with the returned task_handle_id to get results."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "goal": {
+                "type": "string",
+                "description": "What the subagent should accomplish.",
+            },
+            "context": {
+                "type": "string",
+                "description": "Background information the subagent needs.",
+            },
+            "toolsets": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Toolsets to enable for this subagent.",
+            },
+            "tasks": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "goal": {"type": "string"},
+                        "context": {"type": "string"},
+                        "toolsets": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["goal"],
+                },
+                "maxItems": 3,
+                "description": "Batch mode: up to 3 tasks to run in parallel.",
+            },
+            "max_iterations": {
+                "type": "integer",
+                "description": "Max tool-calling turns per subagent (default: 50).",
+            },
+        },
+        "required": [],
+    },
+}
+
+registry.register(
+    name="delegate_task_async",
+    toolset="delegation",
+    schema=DELEGATE_TASK_ASYNC_SCHEMA,
+    handler=lambda args, **kw: delegate_task_async(
+        goal=args.get("goal"),
+        context=args.get("context"),
+        toolsets=args.get("toolsets"),
+        tasks=args.get("tasks"),
+        max_iterations=args.get("max_iterations"),
+        parent_agent=kw.get("parent_agent")),
+    check_fn=check_delegate_requirements,
+    emoji="🔀",
+)
+
+CHECK_DELEGATION_SCHEMA = {
+    "name": "check_delegation",
+    "description": (
+        "Check if an async delegation started with delegate_task_async has completed.\n\n"
+        "Returns status: 'pending' (still running) or 'completed' (result available).\n\n"
+        "Use wait_seconds > 0 to block until the task finishes (up to N seconds).\n"
+        "Use wait_seconds = 0 (default) for a non-blocking poll."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "task_handle_id": {
+                "type": "string",
+                "description": "The handle returned by delegate_task_async.",
+            },
+            "wait_seconds": {
+                "type": "number",
+                "description": (
+                    "How long to wait for results. "
+                    "0 = non-blocking poll (default). "
+                    ">0 = block up to N seconds."
+                ),
+            },
+        },
+        "required": ["task_handle_id"],
+    },
+}
+
+registry.register(
+    name="check_delegation",
+    toolset="delegation",
+    schema=CHECK_DELEGATION_SCHEMA,
+    handler=lambda args, **kw: check_delegation(
+        task_handle_id=args.get("task_handle_id"),
+        wait_seconds=args.get("wait_seconds", 0)),
     check_fn=check_delegate_requirements,
     emoji="🔀",
 )
