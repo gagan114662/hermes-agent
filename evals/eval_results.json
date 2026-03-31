@@ -112,9 +112,9 @@
       "response_preview": ""
     }
   ],
-  "elapsed": 0.009,
+  "elapsed": 0.01,
   "model": "static-analysis",
-  "timestamp": "2026-03-30T22:52:15",
+  "timestamp": "2026-03-30T23:22:41",
   "scenarios_count": 7,
   "pass_count": 7,
   "fail_count": 0,
