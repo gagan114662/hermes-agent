@@ -1239,7 +1239,11 @@ class AIAgent:
         self.session_estimated_cost_usd = 0.0
         self.session_cost_status = "unknown"
         self.session_cost_source = "none"
-        
+
+        # Per-tool cost attribution (C3) — also reset in reset_session_state()
+        self._tool_cost_entries: list = []   # List[ToolCostEntry]
+        self._current_turn_tool_names: list = []   # tools called this API turn
+
         if not self.quiet_mode:
             if compression_enabled:
                 print(f"📊 Context limit: {self.context_compressor.context_length:,} tokens (compress at {int(compression_threshold*100)}% = {self.context_compressor.threshold_tokens:,})")
@@ -5284,7 +5288,27 @@ class AIAgent:
         return compressed, new_system_prompt
 
     def _execute_tool_calls(self, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
-        return self._tool_executor.execute(assistant_message, messages, effective_task_id, api_call_count)
+        tool_calls = assistant_message.tool_calls
+
+        # Track which tools are about to run so cost attribution can
+        # apportion the next API response's token delta across them.
+        self._current_turn_tool_names = [
+            tc.function.name for tc in tool_calls
+            if hasattr(tc, "function") and hasattr(tc.function, "name")
+        ]
+
+        # Allow _vprint during tool execution even with stream consumers
+        self._executing_tools = True
+        try:
+            if not _should_parallelize_tool_batch(tool_calls):
+                return self._execute_tool_calls_sequential(
+                    assistant_message, messages, effective_task_id, api_call_count
+                )
+            return self._execute_tool_calls_concurrent(
+                assistant_message, messages, effective_task_id, api_call_count
+            )
+        finally:
+            self._executing_tools = False
 
     def _invoke_tool(self, function_name: str, function_args: dict, effective_task_id: str) -> str:
         return self._tool_executor.invoke_tool(function_name, function_args, effective_task_id)

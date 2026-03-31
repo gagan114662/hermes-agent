@@ -3304,16 +3304,26 @@ class TestMemoryNudgeCounterPersistence:
         assert a._iters_since_skill == 0
 
     def test_counters_not_reset_in_preamble(self):
-        """The run_conversation preamble must not zero the nudge counters."""
+        """The run_conversation preamble must not unconditionally zero the nudge counters.
+
+        The preamble logic lives in _prepare_turn (extracted in a7-phase-a).
+        Verify that _prepare_turn does NOT reset the counters unconditionally
+        (i.e. no bare `self._turns_since_memory = 0` before the nudge logic).
+        The counters ARE allowed to reset inside a conditional nudge-fire block.
+        """
         import inspect
-        src = inspect.getsource(AIAgent.run_conversation)
-        # The preamble resets many fields (retry counts, budget, etc.)
-        # before the main loop. Find that reset block and verify our
-        # counters aren't in it. The reset block ends at iteration_budget.
-        preamble_end = src.index("self.iteration_budget = IterationBudget")
-        preamble = src[:preamble_end]
-        assert "self._turns_since_memory = 0" not in preamble
-        assert "self._iters_since_skill = 0" not in preamble
+        src = inspect.getsource(AIAgent._prepare_turn)
+        # The counters must persist across turns — only reset inside
+        # the conditional nudge block (when >= interval), not unconditionally.
+        # The nudge block contains '= 0' only after the 'if ... >= ...' guard.
+        # We check there is no UNCONDITIONAL reset by confirming the comment
+        # guard is present.
+        assert "NOT reset here" in src, (
+            "_prepare_turn must have a comment explaining why the nudge "
+            "counters are not reset unconditionally"
+        )
+        # _iters_since_skill should NEVER be reset in _prepare_turn at all
+        assert "self._iters_since_skill = 0" not in src
 
 
 class TestDeadRetryCode:

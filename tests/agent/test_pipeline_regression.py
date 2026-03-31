@@ -24,6 +24,10 @@ def _make_mock_response(content="Hello, world!"):
     choice.message.content = content
     choice.message.tool_calls = None
     choice.message.reasoning_content = None
+    # Explicitly set reasoning fields to None so _extract_reasoning
+    # doesn't pick up auto-generated MagicMock instances.
+    choice.message.reasoning = None
+    choice.message.reasoning_details = None
 
     resp = MagicMock(spec=["choices", "usage"])
     resp.choices = [choice]
