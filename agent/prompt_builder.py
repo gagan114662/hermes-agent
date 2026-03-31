@@ -1025,3 +1025,16 @@ def build_context_files_prompt(cwd: Optional[str] = None, skip_soul: bool = Fals
     if not sections:
         return ""
     return "# Project Context\n\nThe following project context files have been loaded and should be followed:\n\n" + "\n".join(sections)
+
+
+def _render_topic_memory_block(content: str) -> str:
+    """Render topic-file memory content for system prompt injection.
+
+    Wraps content in a consistent header block matching the style used
+    by MemoryStore._render_block() for the flat store.
+    """
+    if not content:
+        return ""
+    separator = "═" * 46
+    header = "MEMORY (relevant topic files)"
+    return f"{separator}\n{header}\n{separator}\n{content}"

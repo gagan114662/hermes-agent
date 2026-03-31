@@ -477,6 +477,203 @@ def memory_tool(
     return json.dumps(result, ensure_ascii=False)
 
 
+def add_topic(topic_file: str, content: str) -> Dict[str, Any]:
+    """Create or append to a topic file and update the MEMORY.md index.
+
+    topic_file: filename like 'contacts.md' or 'project_crm.md' (basename only)
+    content: text to append to the topic file
+
+    Creates the topic file if it doesn't exist, appends otherwise.
+    Updates MEMORY.md index with a one-line entry for the topic.
+    """
+    if not topic_file or not topic_file.strip():
+        return {"success": False, "error": "topic_file cannot be empty."}
+    if not content or not content.strip():
+        return {"success": False, "error": "content cannot be empty."}
+
+    # Safety: only allow simple filenames, no path traversal
+    topic_file = os.path.basename(topic_file.strip())
+    if not topic_file.endswith(".md"):
+        topic_file += ".md"
+
+    # Scan content for injection
+    scan_error = _scan_memory_content(content)
+    if scan_error:
+        return {"success": False, "error": scan_error}
+
+    MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    topic_path = MEMORY_DIR / topic_file
+
+    # Append to topic file
+    try:
+        existing = topic_path.read_text(encoding="utf-8") if topic_path.exists() else ""
+        new_content = (existing.rstrip("\n") + "\n" + content.strip() + "\n") if existing.strip() else content.strip() + "\n"
+        topic_path.write_text(new_content, encoding="utf-8")
+    except (OSError, IOError) as e:
+        return {"success": False, "error": f"Failed to write topic file: {e}"}
+
+    # Update MEMORY.md index
+    _update_memory_index(topic_file, content)
+
+    return {
+        "success": True,
+        "topic_file": topic_file,
+        "message": f"Written to {topic_file} and index updated.",
+    }
+
+
+def list_topics() -> Dict[str, Any]:
+    """Return the contents of the MEMORY.md index file."""
+    index_path = MEMORY_DIR / "MEMORY.md"
+    if not index_path.exists():
+        return {"success": True, "index": "", "message": "No topic index found."}
+    try:
+        content = index_path.read_text(encoding="utf-8")
+        return {"success": True, "index": content}
+    except (OSError, IOError) as e:
+        return {"success": False, "error": f"Failed to read index: {e}"}
+
+
+def read_topic(topic_file: str) -> Dict[str, Any]:
+    """Read a specific topic file from the memories directory."""
+    if not topic_file or not topic_file.strip():
+        return {"success": False, "error": "topic_file cannot be empty."}
+    topic_file = os.path.basename(topic_file.strip())
+    if not topic_file.endswith(".md"):
+        topic_file += ".md"
+
+    topic_path = MEMORY_DIR / topic_file
+    if not topic_path.exists():
+        return {"success": False, "error": f"Topic file '{topic_file}' not found."}
+    try:
+        content = topic_path.read_text(encoding="utf-8")
+        return {"success": True, "topic_file": topic_file, "content": content}
+    except (OSError, IOError) as e:
+        return {"success": False, "error": f"Failed to read topic file: {e}"}
+
+
+def _update_memory_index(topic_file: str, hint_content: str) -> None:
+    """Update MEMORY.md index with an entry for topic_file.
+
+    If an entry for this file already exists, it is not duplicated.
+    Creates a one-line description from the first 60 chars of hint_content.
+    """
+    index_path = MEMORY_DIR / "MEMORY.md"
+    existing = ""
+    if index_path.exists():
+        try:
+            existing = index_path.read_text(encoding="utf-8")
+        except (OSError, IOError):
+            pass
+
+    # Don't duplicate existing entries for this file
+    if f"({topic_file})" in existing:
+        return
+
+    # Build a short description from hint content
+    description = hint_content.strip().replace("\n", " ")[:60]
+    entry = f"- [{topic_file}]({topic_file}): {description}\n"
+
+    try:
+        with open(index_path, "a", encoding="utf-8") as f:
+            f.write(entry)
+    except (OSError, IOError):
+        pass  # Non-fatal: index update failure shouldn't block topic writes
+
+
+def migrate_to_topic_files() -> Dict[str, Any]:
+    """One-time migration: convert flat memory store to topic-file layout.
+
+    Reads the existing MEMORY.md (flat entry format) and USER.md, groups
+    entries by likely topic using simple heuristics, then writes topic files
+    and creates the MEMORY.md index.
+
+    Heuristics:
+    - Entries mentioning a person's name (capitalized word) → contacts.md
+    - Entries mentioning 'project' or common project keywords → projects.md
+    - All other entries → personal.md
+
+    IMPORTANT: Call this manually. It is NOT called automatically.
+    After migration, the existing flat MEMORY.md is renamed to MEMORY.md.bak.
+    """
+    flat_memory_path = MEMORY_DIR / "MEMORY.md"
+    flat_user_path = MEMORY_DIR / "USER.md"
+
+    if not flat_memory_path.exists() and not flat_user_path.exists():
+        return {"success": False, "error": "No flat memory files found to migrate."}
+
+    # Check if already migrated (index format)
+    if flat_memory_path.exists():
+        content = flat_memory_path.read_text(encoding="utf-8")
+        if "- [" in content and "](" in content:
+            return {"success": False, "error": "MEMORY.md appears to already be in topic-index format. Migration skipped."}
+
+    # Read flat entries
+    from tools.memory_tool import MemoryStore  # avoid circular at module level
+    temp_store = MemoryStore()
+
+    memory_entries: List[str] = []
+    user_entries: List[str] = []
+
+    if flat_memory_path.exists():
+        memory_entries = MemoryStore._read_file(flat_memory_path)
+
+    if flat_user_path.exists():
+        user_entries = MemoryStore._read_file(flat_user_path)
+
+    # Classify entries
+    contacts_entries: List[str] = []
+    projects_entries: List[str] = []
+    personal_entries: List[str] = []
+
+    _contact_pattern = re.compile(r'\b[A-Z][a-z]+\s+[A-Z][a-z]+\b')  # "First Last"
+    _project_keywords = {'project', 'repo', 'repository', 'codebase', 'deploy', 'api', 'server', 'database', 'db'}
+
+    for entry in memory_entries + user_entries:
+        entry_lower = entry.lower()
+        if _contact_pattern.search(entry):
+            contacts_entries.append(entry)
+        elif any(kw in entry_lower for kw in _project_keywords):
+            projects_entries.append(entry)
+        else:
+            personal_entries.append(entry)
+
+    # Back up flat files
+    if flat_memory_path.exists():
+        flat_memory_path.rename(MEMORY_DIR / "MEMORY.md.bak")
+    if flat_user_path.exists():
+        flat_user_path.rename(MEMORY_DIR / "USER.md.bak")
+
+    # Write topic files and build index
+    written: List[str] = []
+    index_lines: List[str] = []
+
+    def _write_topic(filename: str, entries: List[str], header: str) -> None:
+        if not entries:
+            return
+        path = MEMORY_DIR / filename
+        content = f"# {header}\n" + "\n".join(entries) + "\n"
+        path.write_text(content, encoding="utf-8")
+        desc = entries[0][:60].replace("\n", " ")
+        index_lines.append(f"- [{filename}]({filename}): {desc}")
+        written.append(filename)
+
+    _write_topic("personal.md", personal_entries, "Personal & Preferences")
+    _write_topic("contacts.md", contacts_entries, "Contacts")
+    _write_topic("projects.md", projects_entries, "Projects")
+
+    # Write the index
+    index_path = MEMORY_DIR / "MEMORY.md"
+    index_path.write_text("\n".join(index_lines) + "\n", encoding="utf-8")
+
+    return {
+        "success": True,
+        "message": f"Migration complete. Created: {', '.join(written)}. Index written to MEMORY.md.",
+        "files_created": written,
+        "entries_migrated": len(memory_entries) + len(user_entries),
+    }
+
+
 def check_memory_requirements() -> bool:
     """Memory tool has no external requirements -- always available."""
     return True
