@@ -1,2 +1,3 @@
 timestamp	run	commit	score	prev_score	delta	status	description	elapsed_s	pass_count	fail_count
 2026-03-30T22:50:22.322030	0	8a02e2d5	0.8912			baseline	Initial baseline measurement	0.009	6	1
+2026-03-30T22:51:16.264686	1	082fe1bd	0.9663	0.9663	+0.0751	keep	Remove 'workaround' phrase and add CRITICAL override section for Instagram posting to fix execution_language score	0.009	7	0

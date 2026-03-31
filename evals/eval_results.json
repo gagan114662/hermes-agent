@@ -1,268 +1,154 @@
 {
-  "score": 0.735,
-  "total_weighted": 14.7,
-  "max_weighted": 20.0,
+  "score": 0.9663,
+  "total_weighted": 0.9663,
+  "max_weighted": 1.0,
   "results": [
     {
-      "composite": 0.65,
+      "id": "execution_language",
+      "category": "execution_language",
+      "composite": 0.925,
       "scores": {
-        "execution": 1.0,
-        "must_not": 1.0,
-        "must_contain": 0.0,
-        "tool_usage": 0.0,
-        "quality": 1.0
-      },
-      "explanations": [
-        "Missing all required phrases: ['browser_upload_file', 'posted', 'shared']",
-        "Missing required tools: ['browser_navigate', 'browser_upload_file']"
-      ],
-      "violations": [],
-      "id": "instagram_post",
-      "category": "Social Media Execution",
-      "weight": 3,
-      "elapsed": 0.0,
-      "tool_calls": [],
-      "response_length": 85,
-      "response_preview": "[DRY RUN] Would test: Create an image of a beautifully staged living room and post..."
-    },
-    {
-      "composite": 0.65,
-      "scores": {
-        "execution": 1.0,
-        "must_not": 1.0,
-        "must_contain": 0.0,
-        "tool_usage": 0.0,
-        "quality": 1.0
-      },
-      "explanations": [
-        "Missing all required phrases: ['posted', 'tweeted', 'published']",
-        "Missing required tools: ['browser_navigate']"
-      ],
-      "violations": [],
-      "id": "twitter_post",
-      "category": "Social Media Execution",
-      "weight": 2,
-      "elapsed": 0.0,
-      "tool_calls": [],
-      "response_length": 85,
-      "response_preview": "[DRY RUN] Would test: Post a tweet about home staging trends in the GTA real estat..."
-    },
-    {
-      "composite": 0.65,
-      "scores": {
-        "execution": 1.0,
-        "must_not": 1.0,
-        "must_contain": 0.0,
-        "tool_usage": 0.0,
-        "quality": 1.0
-      },
-      "explanations": [
-        "Missing all required phrases: ['found', 'added', 'CRM', 'saved']",
-        "Missing required tools: ['web_search']"
-      ],
-      "violations": [],
-      "id": "prospect_research",
-      "category": "Research & Execution",
-      "weight": 2,
-      "elapsed": 0.0,
-      "tool_calls": [],
-      "response_length": 85,
-      "response_preview": "[DRY RUN] Would test: Find 3 real estate agents in Toronto who are active on Insta..."
-    },
-    {
-      "composite": 0.8,
-      "scores": {
-        "execution": 1.0,
-        "must_not": 1.0,
-        "must_contain": 0.0,
-        "tool_usage": 1.0,
-        "quality": 1.0
-      },
-      "explanations": [
-        "Missing all required phrases: ['sent', 'delivered', 'emailed']"
-      ],
-      "violations": [],
-      "id": "cold_email",
-      "category": "Outreach Execution",
-      "weight": 2,
-      "elapsed": 0.0,
-      "tool_calls": [],
-      "response_length": 85,
-      "response_preview": "[DRY RUN] Would test: Draft and send a cold outreach email to a real estate agent ..."
-    },
-    {
-      "composite": 0.8,
-      "scores": {
-        "execution": 1.0,
-        "must_not": 1.0,
-        "must_contain": 0.0,
-        "tool_usage": 1.0,
-        "quality": 1.0
-      },
-      "explanations": [
-        "Missing all required phrases: ['responded', 'replied', 'posted']"
-      ],
-      "violations": [],
-      "id": "review_response",
-      "category": "Customer Service Execution",
-      "weight": 1,
-      "elapsed": 0.0,
-      "tool_calls": [],
-      "response_length": 85,
-      "response_preview": "[DRY RUN] Would test: Respond to this Google review: 'Design Gaga staged our home ..."
-    },
-    {
-      "composite": 0.8,
-      "scores": {
-        "execution": 1.0,
-        "must_not": 1.0,
-        "must_contain": 0.0,
-        "tool_usage": 1.0,
-        "quality": 1.0
-      },
-      "explanations": [
-        "Missing all required phrases: ['scheduled', 'created', 'queued', 'posted']"
-      ],
-      "violations": [],
-      "id": "content_calendar",
-      "category": "Planning + Execution",
-      "weight": 1,
-      "elapsed": 0.0,
-      "tool_calls": [],
-      "response_length": 85,
-      "response_preview": "[DRY RUN] Would test: Create a social media content calendar for next week and sch..."
-    },
-    {
-      "composite": 0.85,
-      "scores": {
-        "execution": 1.0,
-        "must_not": 1.0,
-        "must_contain": 1.0,
-        "tool_usage": 0.0,
-        "quality": 1.0
-      },
-      "explanations": [
-        "Missing required tools: ['web_search']"
-      ],
-      "violations": [],
-      "id": "competitor_analysis",
-      "category": "Research & Execution",
-      "weight": 1,
-      "elapsed": 0.0,
-      "tool_calls": [],
-      "response_length": 85,
-      "response_preview": "[DRY RUN] Would test: Research our top 3 competitors in GTA home staging. What are..."
-    },
-    {
-      "composite": 0.65,
-      "scores": {
-        "execution": 1.0,
-        "must_not": 1.0,
-        "must_contain": 0.0,
-        "tool_usage": 0.0,
-        "quality": 1.0
-      },
-      "explanations": [
-        "Missing all required phrases: ['checked', 'responded', 'no new', 'replied']",
-        "Missing required tools: ['browser_navigate']"
-      ],
-      "violations": [],
-      "id": "dm_response",
-      "category": "Customer Service Execution",
-      "weight": 2,
-      "elapsed": 0.0,
-      "tool_calls": [],
-      "response_length": 85,
-      "response_preview": "[DRY RUN] Would test: Check Instagram DMs and respond to any inquiries about our s..."
-    },
-    {
-      "composite": 1.0,
-      "scores": {
-        "execution": 1.0,
-        "must_not": 1.0,
-        "must_contain": 1.0,
-        "tool_usage": 1.0,
-        "quality": 1.0
+        "score": 0.925
       },
       "explanations": [],
       "violations": [],
-      "id": "plan_when_asked",
-      "category": "Plan vs Execute",
-      "weight": 1,
-      "elapsed": 0.0,
+      "weight": 0.25,
+      "elapsed": 0,
       "tool_calls": [],
-      "response_length": 81,
-      "response_preview": "[DRY RUN] Would test: Create a marketing strategy for Q2 2026 for Design Gaga...."
+      "response_length": 0,
+      "response_preview": ""
     },
     {
-      "composite": 0.8,
+      "id": "tool_coverage",
+      "category": "tool_coverage",
+      "composite": 1.0,
       "scores": {
-        "execution": 1.0,
-        "must_not": 1.0,
-        "must_contain": 0.0,
-        "tool_usage": 1.0,
-        "quality": 1.0
+        "score": 1.0
       },
-      "explanations": [
-        "Missing all required phrases: ['Hermes', 'Design Gaga', 'employee', 'home staging']"
-      ],
+      "explanations": [],
       "violations": [],
-      "id": "identity_check",
-      "category": "Identity & Tone",
-      "weight": 1,
-      "elapsed": 0.0,
+      "weight": 0.2,
+      "elapsed": 0,
       "tool_calls": [],
-      "response_length": 56,
-      "response_preview": "[DRY RUN] Would test: Who are you and what do you do?..."
+      "response_length": 0,
+      "response_preview": ""
     },
     {
-      "composite": 0.65,
+      "id": "platform_workflows",
+      "category": "platform_workflows",
+      "composite": 1.0,
       "scores": {
-        "execution": 1.0,
-        "must_not": 1.0,
-        "must_contain": 0.0,
-        "tool_usage": 0.0,
-        "quality": 1.0
+        "score": 1.0
       },
-      "explanations": [
-        "Missing all required phrases: ['posted', 'published', 'shared']",
-        "Missing required tools: ['browser_navigate']"
-      ],
+      "explanations": [],
       "violations": [],
-      "id": "linkedin_post",
-      "category": "Social Media Execution",
-      "weight": 2,
-      "elapsed": 0.0,
+      "weight": 0.15,
+      "elapsed": 0,
       "tool_calls": [],
-      "response_length": 85,
-      "response_preview": "[DRY RUN] Would test: Write and post a LinkedIn article about why professional hom..."
+      "response_length": 0,
+      "response_preview": ""
     },
     {
-      "composite": 0.85,
+      "id": "identity",
+      "category": "identity",
+      "composite": 1.0,
       "scores": {
-        "execution": 1.0,
-        "must_not": 1.0,
-        "must_contain": 1.0,
-        "tool_usage": 0.0,
-        "quality": 1.0
+        "score": 1.0
+      },
+      "explanations": [],
+      "violations": [],
+      "weight": 0.1,
+      "elapsed": 0,
+      "tool_calls": [],
+      "response_length": 0,
+      "response_preview": ""
+    },
+    {
+      "id": "guardrails",
+      "category": "guardrails",
+      "composite": 1.0,
+      "scores": {
+        "score": 1.0
+      },
+      "explanations": [],
+      "violations": [],
+      "weight": 0.15,
+      "elapsed": 0,
+      "tool_calls": [],
+      "response_length": 0,
+      "response_preview": ""
+    },
+    {
+      "id": "simplicity",
+      "category": "simplicity",
+      "composite": 0.7,
+      "scores": {
+        "score": 0.7
       },
       "explanations": [
-        "Missing required tools: ['browser_navigate', 'browser_save_image']"
+        "Getting long (124 lines) \u2014 look for redundancy",
+        "Too many sections (33)"
       ],
       "violations": [],
-      "id": "image_generation",
-      "category": "Content Creation",
-      "weight": 2,
-      "elapsed": 0.0,
+      "weight": 0.05,
+      "elapsed": 0,
       "tool_calls": [],
-      "response_length": 85,
-      "response_preview": "[DRY RUN] Would test: Generate an image of a modern kitchen with marble countertop..."
+      "response_length": 0,
+      "response_preview": ""
+    },
+    {
+      "id": "toolset_registration",
+      "category": "toolset_registration",
+      "composite": 1.0,
+      "scores": {
+        "score": 1.0
+      },
+      "explanations": [],
+      "violations": [],
+      "weight": 0.1,
+      "elapsed": 0,
+      "tool_calls": [],
+      "response_length": 0,
+      "response_preview": ""
     }
   ],
-  "elapsed": 0.0,
-  "model": "claude-haiku-4-5-20251001",
-  "timestamp": "2026-03-30T22:38:57",
-  "scenarios_count": 12,
+  "elapsed": 0.009,
+  "model": "static-analysis",
+  "timestamp": "2026-03-30T22:52:15",
+  "scenarios_count": 7,
   "pass_count": 7,
-  "fail_count": 5
+  "fail_count": 0,
+  "categories": {
+    "execution_language": {
+      "score": 0.925,
+      "notes": []
+    },
+    "tool_coverage": {
+      "score": 1.0,
+      "notes": []
+    },
+    "platform_workflows": {
+      "score": 1.0,
+      "notes": []
+    },
+    "identity": {
+      "score": 1.0,
+      "notes": []
+    },
+    "guardrails": {
+      "score": 1.0,
+      "notes": []
+    },
+    "simplicity": {
+      "score": 0.7,
+      "notes": [
+        "Getting long (124 lines) \u2014 look for redundancy",
+        "Too many sections (33)"
+      ]
+    },
+    "toolset_registration": {
+      "score": 1.0,
+      "notes": []
+    }
+  }
 }
