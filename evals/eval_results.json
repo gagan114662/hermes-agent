@@ -1,14 +1,14 @@
 {
-  "score": 0.9663,
-  "total_weighted": 0.9663,
+  "score": 0.985,
+  "total_weighted": 0.985,
   "max_weighted": 1.0,
   "results": [
     {
       "id": "execution_language",
       "category": "execution_language",
-      "composite": 0.925,
+      "composite": 1.0,
       "scores": {
-        "score": 0.925
+        "score": 1.0
       },
       "explanations": [],
       "violations": [],
@@ -114,13 +114,13 @@
   ],
   "elapsed": 0.01,
   "model": "static-analysis",
-  "timestamp": "2026-03-30T23:22:41",
+  "timestamp": "2026-03-30T23:27:31",
   "scenarios_count": 7,
   "pass_count": 7,
   "fail_count": 0,
   "categories": {
     "execution_language": {
-      "score": 0.925,
+      "score": 1.0,
       "notes": []
     },
     "tool_coverage": {
