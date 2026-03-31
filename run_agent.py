@@ -79,6 +79,8 @@ from hermes_constants import OPENROUTER_BASE_URL
 from agent.prompt_builder import (
     DEFAULT_AGENT_IDENTITY, PLATFORM_HINTS,
     MEMORY_GUIDANCE, SESSION_SEARCH_GUIDANCE, SKILLS_GUIDANCE,
+    TOOL_USE_GUIDANCE, SELF_CORRECTION_GUIDANCE, CRM_INTEGRITY_GUIDANCE,
+    PROACTIVE_BEHAVIORS_GUIDANCE,
 )
 from agent.model_metadata import (
     fetch_model_metadata,
@@ -2611,6 +2613,12 @@ class AIAgent:
             tool_guidance.append(SKILLS_GUIDANCE)
         if tool_guidance:
             prompt_parts.append(" ".join(tool_guidance))
+
+        # C1: Behavioral guidance — tool use, self-correction, CRM integrity, proactive behaviors
+        prompt_parts.append(TOOL_USE_GUIDANCE)
+        prompt_parts.append(SELF_CORRECTION_GUIDANCE)
+        prompt_parts.append(CRM_INTEGRITY_GUIDANCE)
+        prompt_parts.append(PROACTIVE_BEHAVIORS_GUIDANCE)
 
         # Tool-use enforcement: tells the model to actually call tools instead
         # of describing intended actions.  Controlled by config.yaml
