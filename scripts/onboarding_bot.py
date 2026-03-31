@@ -99,12 +99,36 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return await start(update, context)
 
     agent_name = context.user_data.get("agent_name", "Alex")
+
+    # Write business profile for the AI employee identity
+    _write_business_profile(context.user_data)
+
     await update.message.reply_text(
         f"🚀 Launching {agent_name}... takes 3-5 minutes. I'll message you when ready!"
     )
     customer_id = str(uuid.uuid4())[:8]
     await _provision(update, context, customer_id)
     return ConversationHandler.END
+
+
+def _write_business_profile(user_data: dict) -> None:
+    """Write the business profile to ~/.hermes/business_profile.json."""
+    import json
+    from pathlib import Path
+    profile = {
+        "business_name": user_data.get("business_name", ""),
+        "industry": user_data.get("industry", ""),
+        "agent_name": user_data.get("agent_name", "Alex"),
+        "tone": user_data.get("tone", "friendly"),
+        "product": user_data.get("product", ""),
+        "target_customer": user_data.get("target_customer", ""),
+        "hours": user_data.get("hours", ""),
+        "goal": user_data.get("goals", ""),
+    }
+    profile_path = Path.home() / ".hermes" / "business_profile.json"
+    profile_path.parent.mkdir(parents=True, exist_ok=True)
+    profile_path.write_text(json.dumps(profile, indent=2))
+    logger.info("Business profile written to %s", profile_path)
 
 
 async def _provision(update: Update, context: ContextTypes.DEFAULT_TYPE, customer_id: str) -> None:

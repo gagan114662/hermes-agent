@@ -1,0 +1,110 @@
+[
+  {
+    "id": "instagram_post",
+    "category": "Social Media Execution",
+    "prompt": "Create an image of a beautifully staged living room and post it to Instagram with a caption about professional home staging.",
+    "must_use_tools": ["browser_navigate", "browser_upload_file"],
+    "must_not_contain": ["file picker", "manually", "you need to", "click the upload", "select from computer", "I can't", "I cannot"],
+    "must_contain_any": ["browser_upload_file", "posted", "shared"],
+    "weight": 3
+  },
+  {
+    "id": "twitter_post",
+    "category": "Social Media Execution",
+    "prompt": "Post a tweet about home staging trends in the GTA real estate market.",
+    "must_use_tools": ["browser_navigate"],
+    "must_not_contain": ["you should", "you need to", "manually"],
+    "must_contain_any": ["posted", "tweeted", "published"],
+    "weight": 2
+  },
+  {
+    "id": "prospect_research",
+    "category": "Research & Execution",
+    "prompt": "Find 3 real estate agents in Toronto who are active on Instagram and might need home staging services. Add them to the CRM.",
+    "must_use_tools": ["web_search"],
+    "must_not_contain": ["I recommend you", "you should search"],
+    "must_contain_any": ["found", "added", "CRM", "saved"],
+    "weight": 2
+  },
+  {
+    "id": "cold_email",
+    "category": "Outreach Execution",
+    "prompt": "Draft and send a cold outreach email to a real estate agent named Sarah Chen at sarah@royallepage.ca about our home staging services.",
+    "must_use_tools": [],
+    "must_not_contain": ["here's a draft for you to send", "you can send this"],
+    "must_contain_any": ["sent", "delivered", "emailed"],
+    "weight": 2
+  },
+  {
+    "id": "review_response",
+    "category": "Customer Service Execution",
+    "prompt": "Respond to this Google review: 'Design Gaga staged our home and it sold in 3 days! Amazing work.' Post the response.",
+    "must_use_tools": [],
+    "must_not_contain": ["here's what you could reply", "you should respond"],
+    "must_contain_any": ["responded", "replied", "posted"],
+    "weight": 1
+  },
+  {
+    "id": "content_calendar",
+    "category": "Planning + Execution",
+    "prompt": "Create a social media content calendar for next week and schedule the first post.",
+    "must_use_tools": [],
+    "must_not_contain": ["here's a plan for you to execute"],
+    "must_contain_any": ["scheduled", "created", "queued", "posted"],
+    "weight": 1
+  },
+  {
+    "id": "competitor_analysis",
+    "category": "Research & Execution",
+    "prompt": "Research our top 3 competitors in GTA home staging. What are they doing on Instagram that we're not?",
+    "must_use_tools": ["web_search"],
+    "must_not_contain": [],
+    "must_contain_any": ["found", "competitor", "Instagram", "followers"],
+    "weight": 1
+  },
+  {
+    "id": "dm_response",
+    "category": "Customer Service Execution",
+    "prompt": "Check Instagram DMs and respond to any inquiries about our staging services.",
+    "must_use_tools": ["browser_navigate"],
+    "must_not_contain": ["I can't access", "you need to check"],
+    "must_contain_any": ["checked", "responded", "no new", "replied"],
+    "weight": 2
+  },
+  {
+    "id": "plan_when_asked",
+    "category": "Plan vs Execute",
+    "prompt": "Create a marketing strategy for Q2 2026 for Design Gaga.",
+    "must_use_tools": [],
+    "must_not_contain": [],
+    "must_contain_any": ["strategy", "Q2", "plan", "timeline"],
+    "weight": 1
+  },
+  {
+    "id": "identity_check",
+    "category": "Identity & Tone",
+    "prompt": "Who are you and what do you do?",
+    "must_use_tools": [],
+    "must_not_contain": ["I'm an AI assistant", "I'm a large language model", "I'm Claude"],
+    "must_contain_any": ["Hermes", "Design Gaga", "employee", "home staging"],
+    "weight": 1
+  },
+  {
+    "id": "linkedin_post",
+    "category": "Social Media Execution",
+    "prompt": "Write and post a LinkedIn article about why professional home staging increases sale prices by 10-20%.",
+    "must_use_tools": ["browser_navigate"],
+    "must_not_contain": ["here's the article for you to post", "you can post this"],
+    "must_contain_any": ["posted", "published", "shared"],
+    "weight": 2
+  },
+  {
+    "id": "image_generation",
+    "category": "Content Creation",
+    "prompt": "Generate an image of a modern kitchen with marble countertops, staged for a real estate listing. Save it to disk.",
+    "must_use_tools": ["browser_navigate", "browser_save_image"],
+    "must_not_contain": ["I can't generate", "API key"],
+    "must_contain_any": ["saved", "generated", "image"],
+    "weight": 2
+  }
+]

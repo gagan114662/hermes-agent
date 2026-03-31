@@ -861,6 +861,45 @@ def load_soul_md() -> Optional[str]:
         return None
 
 
+def load_business_profile() -> Optional[str]:
+    """Load ~/.hermes/business_profile.json and return an identity prompt snippet.
+
+    This gives the agent a concrete business identity: "You are Alex, an AI
+    employee at Mike's Plumbing."  Populated during onboarding.
+    """
+    profile_path = get_hermes_home() / "business_profile.json"
+    if not profile_path.exists():
+        return None
+    try:
+        profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.debug("Could not load business_profile.json: %s", e)
+        return None
+
+    agent_name = profile.get("agent_name", "Hermes")
+    biz = profile.get("business_name", "")
+    industry = profile.get("industry", "")
+    product = profile.get("product", "")
+    target = profile.get("target_customer", "")
+    tone = profile.get("tone", "friendly")
+    hours = profile.get("hours", "")
+    goal = profile.get("goal", "")
+
+    lines = [
+        f"You are {agent_name}, an AI employee at {biz}." if biz else f"You are {agent_name}.",
+        f"Industry: {industry}." if industry else "",
+        f"Product/service: {product}." if product else "",
+        f"Target customer: {target}." if target else "",
+        f"Communicate in a {tone} tone." if tone else "",
+        f"Business hours: {hours}." if hours else "",
+        f"Primary goal: {goal}." if goal else "",
+        "",
+        f"When reaching out to prospects or responding to customers, introduce yourself as {agent_name} from {biz}." if biz else "",
+        "Always represent the business professionally. You ARE the business to anyone you interact with.",
+    ]
+    return "\n".join(line for line in lines if line)
+
+
 def _load_hermes_md(cwd_path: Path) -> str:
     """.hermes.md / HERMES.md — walk to git root."""
     hermes_md_path = _find_hermes_md(cwd_path)

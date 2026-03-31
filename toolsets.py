@@ -57,6 +57,7 @@ _HERMES_CORE_TOOLS = [
     "browser_type", "browser_scroll", "browser_back",
     "browser_press", "browser_get_images",
     "browser_vision", "browser_console",
+    "browser_upload_file", "browser_save_image",
     # Text-to-speech
     "text_to_speech",
     # Planning & memory
@@ -77,6 +78,10 @@ _HERMES_CORE_TOOLS = [
     "crm_save", "crm_log", "crm_find", "crm_deal",
     # Prospect tracker (outbound pipeline)
     "prospect_add", "prospect_update", "prospect_list", "prospect_digest",
+    # Social media scheduling (Buffer)
+    "social_profiles", "social_post", "social_queue", "social_analytics",
+    # Direct social media posting + content generation
+    "twitter_post", "linkedin_post", "social_post_auto", "social_content",
     # MCP Auto-Configurator
     "mcp_autoconfig",
 ]
@@ -142,8 +147,9 @@ TOOLSETS = {
         "tools": [
             "browser_navigate", "browser_snapshot", "browser_click",
             "browser_type", "browser_scroll", "browser_back",
-            "browser_press", "browser_get_images",
-            "browser_vision", "browser_console", "web_search"
+            "browser_press", "browser_close", "browser_get_images",
+            "browser_vision", "browser_console", "web_search",
+            "browser_upload_file", "browser_save_image"
         ],
         "includes": []
     },
@@ -226,6 +232,18 @@ TOOLSETS = {
     "homeassistant": {
         "description": "Home Assistant smart home control and monitoring",
         "tools": ["ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service"],
+        "includes": []
+    },
+
+    "social_media": {
+        "description": "Social media scheduling and management via Buffer (post, schedule, queue, analytics)",
+        "tools": ["social_profiles", "social_post", "social_queue", "social_analytics"],
+        "includes": []
+    },
+
+    "social_media_direct": {
+        "description": "Direct social media posting (Twitter API, LinkedIn API) and smart auto-routing with content generation",
+        "tools": ["twitter_post", "linkedin_post", "social_post_auto", "social_content"],
         "includes": []
     },
 

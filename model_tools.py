@@ -165,6 +165,8 @@ def _discover_tools():
         "tools.crm_tool",
         "tools.prospect_tool",
         "tools.desktop_tool",
+        "tools.social_media_tool",
+        "tools.google_image_tool",
         "tools.mcp_autoconfig",
     ]
     import importlib
@@ -219,8 +221,9 @@ _LEGACY_TOOLSET_MAP = {
     "browser_tools": [
         "browser_navigate", "browser_snapshot", "browser_click",
         "browser_type", "browser_scroll", "browser_back",
-        "browser_press", "browser_get_images",
-        "browser_vision", "browser_console"
+        "browser_press", "browser_close", "browser_get_images",
+        "browser_vision", "browser_console",
+        "browser_upload_file", "browser_save_image"
     ],
     "cronjob_tools": ["cronjob"],
     "rl_tools": [
