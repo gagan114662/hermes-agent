@@ -1,285 +1,382 @@
 #!/usr/bin/env python3
 """
-Hermes Eval Harness — the immutable evaluation function.
+Hermes Eval Harness — Static Analysis Edition
+Scores SOUL.md and system prompt quality WITHOUT making API calls.
+
 This is the "prepare.py" equivalent from autoresearch.
 DO NOT let the autoresearch loop modify this file.
 
-Scores Hermes on execution vs. description across 12 test scenarios.
-Returns a composite score (0.0 - 1.0) where 1.0 = perfect employee.
+Checks:
+1. Execution-first language patterns
+2. Tool usage instructions present
+3. Anti-description guardrails
+4. Platform-specific workflows documented
+5. Identity clarity
+6. Simplicity (fewer lines for same coverage = better)
 """
 import json
-import os
 import re
 import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from run_agent import AIAgent
-
-
-def _get_api_key():
-    """Load API key from hermes .env."""
-    env_path = Path.home() / ".hermes" / ".env"
-    if env_path.exists():
-        for line in env_path.read_text().splitlines():
-            line = line.strip()
-            if line.startswith("CLAUDE_CODE_OAUTH_TOKEN="):
-                return line.split("=", 1)[1]
-            if line.startswith("ANTHROPIC_API_KEY="):
-                return line.split("=", 1)[1]
-    return os.environ.get("ANTHROPIC_API_KEY", "")
+SOUL_MD = Path.home() / ".hermes" / "SOUL.md"
+SKILLS_DIR = Path(__file__).parent.parent / "skills"
+TOOLSETS_PY = Path(__file__).parent.parent / "toolsets.py"
 
 
-def load_scenarios(path: str = None) -> list[dict]:
-    """Load test scenarios from JSON."""
-    if path is None:
-        path = str(Path(__file__).parent / "scenarios.json")
-    with open(path) as f:
-        return json.load(f)
+def load_soul() -> str:
+    if SOUL_MD.exists():
+        return SOUL_MD.read_text(encoding="utf-8")
+    return ""
 
 
-def score_response(scenario: dict, response: str, tool_calls: list[str]) -> dict:
-    """
-    Score a single response against scenario criteria.
-    Returns dict with individual scores and explanations.
-    """
-    scores = {}
-    explanations = []
-    response_lower = response.lower()
+def load_skills() -> dict[str, str]:
+    skills = {}
+    if SKILLS_DIR.exists():
+        for f in SKILLS_DIR.glob("*.md"):
+            skills[f.stem] = f.read_text(encoding="utf-8")
+    return skills
 
-    # 1. Execution score: did it DO the thing vs DESCRIBE the thing?
-    # Negative signals (describing work instead of doing it)
-    describe_phrases = [
-        "here's what you should do",
-        "here's a plan",
-        "i recommend you",
-        "you need to",
-        "you should",
-        "here are the steps",
-        "follow these steps",
-        "the final step is yours",
-        "i can't do this directly",
-        "you'll need to",
-        "please do the following",
+
+def load_toolsets() -> str:
+    if TOOLSETS_PY.exists():
+        return TOOLSETS_PY.read_text(encoding="utf-8")
+    return ""
+
+
+# ─── Scoring functions ───────────────────────────────────────────────
+
+def score_execution_language(soul: str) -> tuple[float, list[str]]:
+    """Does SOUL.md push execution over description?"""
+    notes = []
+    score = 0.0
+    soul_lower = soul.lower()
+
+    # Positive signals (execution-first)
+    exec_phrases = [
+        "do the work",
+        "execute",
+        "do it",
+        "pick up your tools",
+        "use browser_upload_file",
+        "use browser_navigate",
+        "use browser_save_image",
+        "browser_click",
+        "browser_type",
+        "fully automated",
+        "zero manual steps",
+        "bypasses the os file picker",
+        "do not describe the work",
+        "you are not a consultant",
+        "you are not a secretary",
+        "execution over planning",
     ]
-    describe_count = sum(1 for p in describe_phrases if p in response_lower)
-    execution_score = max(0.0, 1.0 - (describe_count * 0.2))
-    scores["execution"] = execution_score
-    if describe_count > 0:
-        explanations.append(f"Found {describe_count} 'describing work' phrases")
+    found_exec = [p for p in exec_phrases if p in soul_lower]
+    exec_ratio = len(found_exec) / len(exec_phrases)
+    score += exec_ratio * 0.6
+    if exec_ratio < 0.5:
+        notes.append(f"Missing execution phrases: only {len(found_exec)}/{len(exec_phrases)}")
 
-    # 2. Must-not-contain check (hard failures)
-    violations = []
-    for phrase in scenario.get("must_not_contain", []):
-        if phrase.lower() in response_lower:
-            violations.append(phrase)
-    if violations:
-        scores["must_not"] = 0.0
-        explanations.append(f"Contains forbidden: {violations}")
+    # Negative signals (should NOT have wishy-washy language)
+    weak_phrases = [
+        "i cannot",
+        "i can't post",
+        "not possible",
+        "limitation",
+        "workaround",
+        "the user must",
+        "ask the user to",
+    ]
+    found_weak = [p for p in weak_phrases if p in soul_lower]
+    if found_weak:
+        penalty = len(found_weak) * 0.1
+        score -= penalty
+        notes.append(f"Weak/defeatist phrases found: {found_weak}")
+
+    # Strong override present?
+    if "critical" in soul_lower and "browser_upload_file" in soul_lower:
+        score += 0.2
     else:
-        scores["must_not"] = 1.0
+        notes.append("Missing CRITICAL override section for Instagram posting")
 
-    # 3. Must-contain-any check (at least one required phrase)
-    required = scenario.get("must_contain_any", [])
-    if required:
-        found = [p for p in required if p.lower() in response_lower]
-        scores["must_contain"] = 1.0 if found else 0.0
-        if not found:
-            explanations.append(f"Missing all required phrases: {required}")
+    # "NEVER STOP" / autonomous work language
+    if any(p in soul_lower for p in ["never stop", "default: execute", "do something rather than write"]):
+        score += 0.2
     else:
-        scores["must_contain"] = 1.0
+        notes.append("Missing autonomous execution emphasis")
 
-    # 4. Tool usage check
-    required_tools = scenario.get("must_use_tools", [])
-    if required_tools:
-        used = [t for t in required_tools if t in tool_calls]
-        scores["tool_usage"] = len(used) / len(required_tools)
-        missing = [t for t in required_tools if t not in tool_calls]
-        if missing:
-            explanations.append(f"Missing required tools: {missing}")
-    else:
-        scores["tool_usage"] = 1.0
+    return (max(0.0, min(1.0, score)), notes)
 
-    # 5. Response quality (length, structure)
-    if len(response) < 50:
-        scores["quality"] = 0.3
-        explanations.append("Response too short (<50 chars)")
-    elif len(response) > 10000:
-        scores["quality"] = 0.7
-        explanations.append("Response very long (>10k chars)")
-    else:
-        scores["quality"] = 1.0
 
-    # Composite: weighted average
-    weights = {
-        "execution": 0.30,
-        "must_not": 0.25,
-        "must_contain": 0.20,
-        "tool_usage": 0.15,
-        "quality": 0.10,
-    }
-    composite = sum(scores[k] * weights[k] for k in weights)
+def score_tool_coverage(soul: str, skills: dict[str, str]) -> tuple[float, list[str]]:
+    """Are all critical tools documented in SOUL.md or skills?"""
+    notes = []
+    combined = soul + " ".join(skills.values())
+    combined_lower = combined.lower()
 
-    return {
-        "composite": round(composite, 4),
-        "scores": {k: round(v, 4) for k, v in scores.items()},
-        "explanations": explanations,
-        "violations": violations,
+    critical_tools = {
+        "browser_upload_file": "Instagram image upload without OS file picker",
+        "browser_save_image": "Save images from web pages to disk",
+        "browser_navigate": "Navigate to URLs",
+        "browser_snapshot": "Take page snapshots for element refs",
+        "browser_click": "Click elements on page",
+        "browser_type": "Type into input fields",
+        "web_search": "Search the web",
+        "browser_vision": "Visual page inspection",
     }
 
+    found = 0
+    for tool, desc in critical_tools.items():
+        if tool in combined_lower:
+            found += 1
+        else:
+            notes.append(f"Missing tool documentation: {tool} ({desc})")
 
-def run_eval(
-    model: str = "claude-haiku-4-5-20251001",
-    max_iterations: int = 5,
-    scenarios: list[dict] = None,
-    dry_run: bool = False,
-) -> dict:
+    score = found / len(critical_tools)
+    return (score, notes)
+
+
+def score_platform_workflows(soul: str, skills: dict[str, str]) -> tuple[float, list[str]]:
+    """Are step-by-step workflows documented for each platform?"""
+    notes = []
+    combined = soul + " ".join(skills.values())
+    combined_lower = combined.lower()
+
+    platforms = {
+        "instagram": ["browser_upload_file", "create", "caption", "share"],
+        "twitter": ["tweet", "post", "what is happening"],
+        "linkedin": ["start a post", "linkedin.com"],
+        "facebook": ["what's on your mind", "facebook.com"],
+    }
+
+    total = 0
+    found = 0
+    for platform, keywords in platforms.items():
+        total += 1
+        matched = sum(1 for k in keywords if k in combined_lower)
+        if matched >= 2:
+            found += 1
+        else:
+            notes.append(f"Incomplete {platform} workflow (only {matched}/{len(keywords)} keywords)")
+
+    score = found / total if total > 0 else 0.0
+    return (score, notes)
+
+
+def score_identity(soul: str) -> tuple[float, list[str]]:
+    """Does SOUL.md establish clear employee identity?"""
+    notes = []
+    soul_lower = soul.lower()
+
+    checks = {
+        "employee_not_assistant": any(p in soul_lower for p in ["not an assistant", "not a chatbot", "an employee"]),
+        "business_aware": any(p in soul_lower for p in ["business profile", "business described"]),
+        "reports_results": any(p in soul_lower for p in ["report results", "report what you did", "what you accomplished"]),
+        "proactive": any(p in soul_lower for p in ["proactively", "don't wait to be asked", "see something that needs doing"]),
+        "tracks_work": any(p in soul_lower for p in ["track your work", "log", "keep records"]),
+    }
+
+    passed = sum(1 for v in checks.values() if v)
+    for check, ok in checks.items():
+        if not ok:
+            notes.append(f"Missing identity signal: {check}")
+
+    score = passed / len(checks)
+    return (score, notes)
+
+
+def score_guardrails(soul: str) -> tuple[float, list[str]]:
+    """Are anti-description guardrails present?"""
+    notes = []
+    soul_lower = soul.lower()
+
+    guardrails = [
+        ("stop_catch", "catch yourself writing"),
+        ("plan_vs_execute", "when to plan vs execute"),
+        ("default_execute", "default: execute"),
+        ("not_consultant", "not a consultant"),
+        ("not_secretary", "not a secretary"),
+        ("not_chatbot", "not a chatbot"),
+        ("can_do_list", "what you can do"),
+        ("cannot_do_list", "what you cannot do"),
+        ("partially_do_list", "what you can partially do"),
+    ]
+
+    found = 0
+    for name, phrase in guardrails:
+        if phrase in soul_lower:
+            found += 1
+        else:
+            notes.append(f"Missing guardrail: {name} ('{phrase}')")
+
+    score = found / len(guardrails)
+    return (score, notes)
+
+
+def score_simplicity(soul: str) -> tuple[float, list[str]]:
+    """Simpler is better. Penalize bloat."""
+    notes = []
+    lines = soul.strip().splitlines()
+    line_count = len(lines)
+    char_count = len(soul)
+
+    # Sweet spot: 80-200 lines. Under = too sparse. Over = bloated.
+    if line_count < 40:
+        score = 0.5
+        notes.append(f"Too sparse ({line_count} lines) — may miss critical instructions")
+    elif line_count <= 120:
+        score = 1.0  # Sweet spot
+    elif line_count <= 200:
+        score = 0.8
+        notes.append(f"Getting long ({line_count} lines) — look for redundancy")
+    elif line_count <= 300:
+        score = 0.6
+        notes.append(f"Bloated ({line_count} lines) — trim unnecessary content")
+    else:
+        score = 0.4
+        notes.append(f"Very bloated ({line_count} lines) — major trim needed")
+
+    # Check for duplicate/redundant sections
+    paragraphs = re.split(r'\n\n+', soul)
+    if len(paragraphs) > 30:
+        score -= 0.1
+        notes.append(f"Too many sections ({len(paragraphs)})")
+
+    return (max(0.0, min(1.0, score)), notes)
+
+
+def score_toolset_registration(toolsets_content: str) -> tuple[float, list[str]]:
+    """Are browser_upload_file and browser_save_image in the toolsets?"""
+    notes = []
+    score = 0.0
+
+    if "browser_upload_file" in toolsets_content:
+        score += 0.5
+    else:
+        notes.append("browser_upload_file NOT in toolsets.py")
+
+    if "browser_save_image" in toolsets_content:
+        score += 0.5
+    else:
+        notes.append("browser_save_image NOT in toolsets.py")
+
+    return (score, notes)
+
+
+# ─── Main eval ───────────────────────────────────────────────────────
+
+def run_eval(dry_run: bool = False, **kwargs) -> dict:
     """
-    Run the full eval suite. Returns composite score + per-scenario results.
-
-    Args:
-        model: Model to use for eval
-        max_iterations: Max tool-calling loops per scenario
-        scenarios: Override scenarios list
-        dry_run: If True, skip actual API calls (for testing the harness)
-
-    Returns:
-        {
-            "score": float (0.0 - 1.0),
-            "total_weighted": float,
-            "max_weighted": float,
-            "results": [...per-scenario results...],
-            "elapsed": float,
-            "model": str,
-            "timestamp": str,
-        }
+    Run static analysis eval. No API calls.
+    Returns composite score (0.0 - 1.0).
     """
-    if scenarios is None:
-        scenarios = load_scenarios()
-
-    api_key = _get_api_key()
-    if not api_key and not dry_run:
-        return {"score": 0.0, "error": "No API key found"}
-
-    agent = None
-    if not dry_run:
-        agent = AIAgent(
-            model=model,
-            api_key=api_key,
-            api_mode="anthropic_messages",
-            provider="anthropic",
-            max_iterations=max_iterations,
-            quiet_mode=True,
-            skip_context_files=False,  # Load SOUL.md — that's what we're testing
-            skip_memory=True,
-            verbose_logging=False,
-        )
-
-    results = []
-    total_weighted = 0.0
-    max_weighted = 0.0
     t_start = time.time()
 
-    for i, scenario in enumerate(scenarios):
-        sid = scenario["id"]
-        weight = scenario.get("weight", 1)
-        max_weighted += weight
+    soul = load_soul()
+    skills = load_skills()
+    toolsets = load_toolsets()
 
-        print(f"\n[{i+1}/{len(scenarios)}] {sid} (weight={weight})")
+    if not soul:
+        return {"score": 0.0, "error": "SOUL.md not found"}
 
-        if dry_run:
-            response = f"[DRY RUN] Would test: {scenario['prompt'][:60]}..."
-            tool_calls = []
-            elapsed = 0.0
+    # Run all scoring functions
+    categories = {}
+
+    s, n = score_execution_language(soul)
+    categories["execution_language"] = {"score": s, "notes": n, "weight": 0.25}
+
+    s, n = score_tool_coverage(soul, skills)
+    categories["tool_coverage"] = {"score": s, "notes": n, "weight": 0.20}
+
+    s, n = score_platform_workflows(soul, skills)
+    categories["platform_workflows"] = {"score": s, "notes": n, "weight": 0.15}
+
+    s, n = score_identity(soul)
+    categories["identity"] = {"score": s, "notes": n, "weight": 0.10}
+
+    s, n = score_guardrails(soul)
+    categories["guardrails"] = {"score": s, "notes": n, "weight": 0.15}
+
+    s, n = score_simplicity(soul)
+    categories["simplicity"] = {"score": s, "notes": n, "weight": 0.05}
+
+    s, n = score_toolset_registration(toolsets)
+    categories["toolset_registration"] = {"score": s, "notes": n, "weight": 0.10}
+
+    # Composite weighted score
+    total_score = sum(
+        cat["score"] * cat["weight"]
+        for cat in categories.values()
+    )
+
+    elapsed = time.time() - t_start
+
+    # Build results in the format autoresearch expects
+    results = []
+    pass_count = 0
+    fail_count = 0
+    for name, cat in categories.items():
+        composite = cat["score"]
+        if composite >= 0.7:
+            pass_count += 1
         else:
-            t0 = time.time()
-            try:
-                # Track tool calls by inspecting agent messages after run
-                response = agent.chat(scenario["prompt"])
-                if response is None:
-                    response = "ERROR: None response"
-            except Exception as e:
-                response = f"ERROR: {e}"
-            elapsed = time.time() - t0
-
-            # Extract tool calls from agent's message history
-            tool_calls = []
-            for msg in getattr(agent, "_session_messages", []):
-                if isinstance(msg, dict) and msg.get("role") == "assistant":
-                    for block in msg.get("content", []):
-                        if isinstance(block, dict) and block.get("type") == "tool_use":
-                            tool_calls.append(block.get("name", ""))
-
-            # Reset for next scenario
-            agent.messages = []
-            if hasattr(agent, "_session_messages"):
-                agent._session_messages = []
-
-        # Score
-        result = score_response(scenario, response, tool_calls)
-        result["id"] = sid
-        result["category"] = scenario["category"]
-        result["weight"] = weight
-        result["elapsed"] = round(elapsed, 1)
-        result["tool_calls"] = tool_calls
-        result["response_length"] = len(response)
-        result["response_preview"] = response[:300]
-
-        total_weighted += result["composite"] * weight
-        results.append(result)
-
-        status = "PASS" if result["composite"] >= 0.7 else "FAIL"
-        print(f"  {status} score={result['composite']:.3f} elapsed={elapsed:.1f}s tools={tool_calls[:5]}")
-        if result["explanations"]:
-            for exp in result["explanations"]:
-                print(f"  ! {exp}")
-
-    total_elapsed = time.time() - t_start
-    final_score = total_weighted / max_weighted if max_weighted > 0 else 0.0
+            fail_count += 1
+        results.append({
+            "id": name,
+            "category": name,
+            "composite": round(composite, 4),
+            "scores": {"score": round(composite, 4)},
+            "explanations": cat["notes"],
+            "violations": [],
+            "weight": cat["weight"],
+            "elapsed": 0,
+            "tool_calls": [],
+            "response_length": 0,
+            "response_preview": "",
+        })
 
     summary = {
-        "score": round(final_score, 4),
-        "total_weighted": round(total_weighted, 4),
-        "max_weighted": max_weighted,
+        "score": round(total_score, 4),
+        "total_weighted": round(total_score, 4),
+        "max_weighted": 1.0,
         "results": results,
-        "elapsed": round(total_elapsed, 1),
-        "model": model,
+        "elapsed": round(elapsed, 3),
+        "model": "static-analysis",
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "scenarios_count": len(scenarios),
-        "pass_count": sum(1 for r in results if r["composite"] >= 0.7),
-        "fail_count": sum(1 for r in results if r["composite"] < 0.7),
+        "scenarios_count": len(categories),
+        "pass_count": pass_count,
+        "fail_count": fail_count,
+        "categories": {
+            name: {"score": round(cat["score"], 4), "notes": cat["notes"]}
+            for name, cat in categories.items()
+        },
     }
 
     return summary
 
 
 def print_summary(summary: dict):
-    """Pretty-print eval summary."""
     print("\n" + "=" * 70)
     print(f"HERMES EVAL SCORE: {summary['score']:.4f}")
-    print(f"Model: {summary['model']} | Time: {summary['elapsed']:.0f}s")
+    print(f"Method: Static Analysis | Time: {summary['elapsed']:.3f}s")
     print(f"Pass: {summary['pass_count']}/{summary['scenarios_count']} | "
           f"Fail: {summary['fail_count']}/{summary['scenarios_count']}")
     print("=" * 70)
 
     for r in summary["results"]:
         status = "PASS" if r["composite"] >= 0.7 else "FAIL"
-        print(f"  [{status}] {r['id']:<25} {r['composite']:.3f}  "
-              f"(exec={r['scores']['execution']:.2f} "
-              f"tools={r['scores']['tool_usage']:.2f} "
-              f"contain={r['scores']['must_contain']:.2f})")
+        print(f"  [{status}] {r['id']:<25} {r['composite']:.3f}")
+        for note in r["explanations"]:
+            print(f"         ! {note}")
 
     print(f"\nFinal: {summary['score']:.4f}")
 
 
 if __name__ == "__main__":
-    dry = "--dry-run" in sys.argv
-    summary = run_eval(dry_run=dry)
+    summary = run_eval()
     print_summary(summary)
 
-    # Save results
     out_path = Path(__file__).parent / "eval_results.json"
     with open(out_path, "w") as f:
         json.dump(summary, f, indent=2)

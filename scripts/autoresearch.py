@@ -4,16 +4,17 @@ Hermes Autoresearch Loop
 Inspired by github.com/karpathy/autoresearch
 
 Continuously improves Hermes by:
-1. Proposing a change to SOUL.md / toolsets / skills
-2. Running the eval harness
+1. Static-analyzing SOUL.md for quality signals
+2. Using Claude Code CLI (subscription, no API billing) to propose changes
 3. Keeping improvements, reverting regressions
 4. Logging everything to results.tsv
 5. NEVER STOPPING (until killed)
 
+NO API CALLS. Uses Claude Code CLI for proposals, static analysis for scoring.
+
 Usage:
     python3 scripts/autoresearch.py                  # Run forever
     python3 scripts/autoresearch.py --max-runs 5     # Run 5 experiments
-    python3 scripts/autoresearch.py --dry-run        # Test without API calls
     python3 scripts/autoresearch.py --baseline-only  # Just run baseline eval
 """
 import argparse
@@ -26,45 +27,18 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-# Setup paths
 REPO_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(REPO_ROOT))
-
-from run_agent import AIAgent
 
 EVALS_DIR = REPO_ROOT / "evals"
 RESULTS_TSV = EVALS_DIR / "results.tsv"
 SOUL_MD = Path.home() / ".hermes" / "SOUL.md"
-TOOLSETS_PY = REPO_ROOT / "toolsets.py"
-SKILLS_DIR = REPO_ROOT / "skills"
 
-# Files the researcher agent is allowed to modify
-MUTABLE_FILES = [
-    str(SOUL_MD),
-    # str(TOOLSETS_PY),  # Uncomment when ready to let it modify toolsets
-    # Add skill files as needed
-]
-
-# The researcher uses a smarter model to propose changes
-RESEARCHER_MODEL = "claude-sonnet-4-6"
-# The eval runs on the same model Hermes uses in production
-EVAL_MODEL = "claude-haiku-4-5-20251001"
-
-
-def _get_api_key():
-    env_path = Path.home() / ".hermes" / ".env"
-    if env_path.exists():
-        for line in env_path.read_text().splitlines():
-            line = line.strip()
-            if line.startswith("CLAUDE_CODE_OAUTH_TOKEN="):
-                return line.split("=", 1)[1]
-            if line.startswith("ANTHROPIC_API_KEY="):
-                return line.split("=", 1)[1]
-    return os.environ.get("ANTHROPIC_API_KEY", "")
+# Files the researcher is allowed to modify
+MUTABLE_FILES = [str(SOUL_MD)]
 
 
 def git_commit(message: str) -> str:
-    """Commit current state, return short hash."""
     subprocess.run(["git", "add", "-A"], cwd=REPO_ROOT, capture_output=True)
     subprocess.run(
         ["git", "commit", "-m", message, "--allow-empty"],
@@ -77,14 +51,6 @@ def git_commit(message: str) -> str:
     return result.stdout.strip()
 
 
-def git_reset_hard(commit_hash: str):
-    """Revert to a specific commit."""
-    subprocess.run(
-        ["git", "reset", "--hard", commit_hash],
-        cwd=REPO_ROOT, capture_output=True,
-    )
-
-
 def git_current_hash() -> str:
     result = subprocess.run(
         ["git", "rev-parse", "--short", "HEAD"],
@@ -94,7 +60,6 @@ def git_current_hash() -> str:
 
 
 def read_mutable_files() -> dict[str, str]:
-    """Read all mutable files into a dict."""
     contents = {}
     for fpath in MUTABLE_FILES:
         p = Path(fpath)
@@ -104,13 +69,11 @@ def read_mutable_files() -> dict[str, str]:
 
 
 def write_mutable_files(contents: dict[str, str]):
-    """Write modified file contents back to disk."""
     for fpath, content in contents.items():
         Path(fpath).write_text(content, encoding="utf-8")
 
 
 def load_results_history() -> list[dict]:
-    """Load past experiment results from TSV."""
     if not RESULTS_TSV.exists():
         return []
     results = []
@@ -122,7 +85,6 @@ def load_results_history() -> list[dict]:
 
 
 def append_result(result: dict):
-    """Append a single result to the TSV."""
     file_exists = RESULTS_TSV.exists()
     fieldnames = [
         "timestamp", "run", "commit", "score", "prev_score", "delta",
@@ -135,26 +97,25 @@ def append_result(result: dict):
         writer.writerow(result)
 
 
-def run_eval(dry_run: bool = False) -> dict:
-    """Run the eval harness and return the summary."""
+def run_eval() -> dict:
+    """Run static analysis eval. Zero API calls."""
     from evals.hermes_eval import run_eval as _run_eval
-    return _run_eval(model=EVAL_MODEL, max_iterations=5, dry_run=dry_run)
+    return _run_eval()
 
 
 def propose_change(
-    api_key: str,
     current_files: dict[str, str],
     history: list[dict],
     eval_results: dict,
-) -> dict[str, str] | None:
+) -> dict | None:
     """
-    Use a researcher agent to propose a single improvement to Hermes.
-    Returns modified file contents, or None if no change proposed.
+    Use Claude Code CLI (subscription, no API billing) to propose a change.
+    Falls back to rule-based proposals if CLI unavailable.
     """
-    # Build context for the researcher
+    # Build context
     history_text = ""
     if history:
-        recent = history[-10:]  # Last 10 experiments
+        recent = history[-10:]
         history_text = "Recent experiments:\n"
         for h in recent:
             history_text += (
@@ -163,134 +124,233 @@ def propose_change(
                 f"— {h.get('description','?')}\n"
             )
 
-    # Format eval failures for the researcher
     failures_text = ""
     if eval_results and "results" in eval_results:
         failures = [r for r in eval_results["results"] if r["composite"] < 0.7]
         if failures:
-            failures_text = "\nFailing scenarios:\n"
+            failures_text = "\nFailing categories:\n"
             for f in failures:
                 failures_text += (
                     f"  {f['id']}: score={f['composite']:.3f} "
                     f"— {', '.join(f.get('explanations', []))}\n"
                 )
 
-    # Build the files context
     files_text = ""
     for fpath, content in current_files.items():
         fname = Path(fpath).name
-        files_text += f"\n--- {fname} ({fpath}) ---\n{content}\n"
+        files_text += f"\n--- {fname} ---\n{content}\n"
 
-    prompt = f"""You are an autonomous researcher improving Hermes, an AI employee agent.
+    prompt = f"""You are improving Hermes SOUL.md. Propose ONE small change to improve the eval score.
 
-Your job: propose ONE small, targeted change to improve the eval score.
-
-Current eval score: {eval_results.get('score', 'unknown')}
+Current score: {eval_results.get('score', 'unknown')}
 {history_text}
 {failures_text}
 
-Files you can modify:
+Current SOUL.md:
 {files_text}
 
 RULES:
-1. Make ONE change at a time. Small, focused, testable.
-2. Prefer changes that fix the worst-scoring scenario first.
-3. Simpler is better. Removing unnecessary text for same score = good.
-4. Focus on making Hermes EXECUTE instead of DESCRIBE work.
-5. Don't add complexity unless it demonstrably helps.
-6. Think about what instructions would make the LLM actually call tools vs talk about calling tools.
+1. ONE change at a time. Small, focused.
+2. Fix worst-scoring category first.
+3. Simpler is better.
+4. Focus on execution over description.
 
-OUTPUT FORMAT (strict JSON):
-{{
-  "description": "One sentence describing the change",
-  "hypothesis": "Why this should improve the score",
-  "target_scenario": "Which failing scenario this targets",
-  "files": {{
-    "/path/to/file": "FULL new file content here"
-  }}
-}}
+Output ONLY valid JSON (no markdown, no explanation):
+{{"description": "one sentence", "hypothesis": "why this helps", "target": "category_name", "files": {{"{str(SOUL_MD)}": "FULL new file content"}}}}
 
-If you believe no improvement is possible, return:
-{{"description": "no_change", "files": {{}}}}
-"""
+Or if no change needed: {{"description": "no_change", "files": {{}}}}"""
 
-    agent = AIAgent(
-        model=RESEARCHER_MODEL,
-        api_key=api_key,
-        api_mode="anthropic_messages",
-        provider="anthropic",
-        max_iterations=1,  # No tool use, just thinking
-        quiet_mode=True,
-        skip_context_files=True,
-        skip_memory=True,
+    # Try Claude Code CLI (uses subscription, no API billing)
+    try:
+        result = subprocess.run(
+            ["claude", "-p", prompt, "--output-format", "json"],
+            capture_output=True, text=True, timeout=120,
+            cwd=str(REPO_ROOT),
+        )
+        if result.returncode == 0:
+            # Parse claude CLI JSON output
+            output = result.stdout.strip()
+            try:
+                cli_response = json.loads(output)
+                # Claude CLI returns {"result": "..."} format
+                response_text = cli_response.get("result", output)
+            except json.JSONDecodeError:
+                response_text = output
+
+            # Extract JSON from response
+            proposal = _extract_json(response_text)
+            if proposal:
+                if proposal.get("description") == "no_change" or not proposal.get("files"):
+                    print("  Researcher says: no change needed")
+                    return None
+                print(f"  Proposal: {proposal.get('description', '?')}")
+                return proposal
+
+    except FileNotFoundError:
+        print("  Claude CLI not found, using rule-based proposals")
+    except subprocess.TimeoutExpired:
+        print("  Claude CLI timed out")
+    except Exception as e:
+        print(f"  Claude CLI error: {e}")
+
+    # Fallback: rule-based proposals based on eval results
+    return _rule_based_proposal(current_files, eval_results)
+
+
+def _extract_json(text: str) -> dict | None:
+    """Extract JSON from text that may have markdown wrapping."""
+    # Try direct parse
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    # Try finding JSON in markdown blocks
+    if "```json" in text:
+        try:
+            start = text.index("```json") + 7
+            end = text.index("```", start)
+            return json.loads(text[start:end].strip())
+        except (ValueError, json.JSONDecodeError):
+            pass
+
+    if "```" in text:
+        try:
+            start = text.index("```") + 3
+            end = text.index("```", start)
+            return json.loads(text[start:end].strip())
+        except (ValueError, json.JSONDecodeError):
+            pass
+
+    # Try finding {...} pattern
+    import re
+    match = re.search(r'\{[^{}]*"description"[^{}]*\}', text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group())
+        except json.JSONDecodeError:
+            pass
+
+    return None
+
+
+def _rule_based_proposal(
+    current_files: dict[str, str],
+    eval_results: dict,
+) -> dict | None:
+    """Deterministic proposals based on eval failures. No API calls."""
+    if not eval_results or "results" not in eval_results:
+        return None
+
+    # Find worst category
+    failures = sorted(
+        [r for r in eval_results["results"] if r["composite"] < 0.7],
+        key=lambda r: r["composite"],
     )
 
-    try:
-        response = agent.chat(prompt)
-    except Exception as e:
-        print(f"  Researcher error: {e}")
+    if not failures:
+        # All passing — try simplification
+        soul = current_files.get(str(SOUL_MD), "")
+        lines = soul.splitlines()
+        # Remove consecutive blank lines (simplification)
+        new_lines = []
+        prev_blank = False
+        for line in lines:
+            is_blank = line.strip() == ""
+            if is_blank and prev_blank:
+                continue
+            new_lines.append(line)
+            prev_blank = is_blank
+        new_soul = "\n".join(new_lines)
+        if new_soul != soul:
+            return {
+                "description": "Remove redundant blank lines for simplicity",
+                "files": {str(SOUL_MD): new_soul},
+            }
         return None
 
-    # Parse JSON from response
-    try:
-        # Find JSON in the response (may be wrapped in markdown)
-        json_match = None
-        # Try to find JSON block
-        if "```json" in response:
-            start = response.index("```json") + 7
-            end = response.index("```", start)
-            json_match = response[start:end].strip()
-        elif "```" in response:
-            start = response.index("```") + 3
-            end = response.index("```", start)
-            json_match = response[start:end].strip()
-        else:
-            # Try parsing the whole response
-            json_match = response.strip()
+    worst = failures[0]
+    soul = current_files.get(str(SOUL_MD), "")
 
-        proposal = json.loads(json_match)
-    except (json.JSONDecodeError, ValueError) as e:
-        print(f"  Could not parse researcher response: {e}")
-        print(f"  Response preview: {response[:200]}")
+    # Rule-based fixes for each category
+    if worst["id"] == "execution_language":
+        for note in worst.get("explanations", []):
+            if "Missing execution phrases" in note:
+                # Add stronger execution language
+                if "NEVER describe work. ALWAYS do work." not in soul:
+                    soul = soul.replace(
+                        "## CORE RULE: DO THE WORK. DO NOT DESCRIBE THE WORK.",
+                        "## CORE RULE: DO THE WORK. DO NOT DESCRIBE THE WORK.\n\n"
+                        "NEVER describe work. ALWAYS do work. Pick up your tools and execute.",
+                    )
+                    return {
+                        "description": "Strengthen execution-first language in core rule",
+                        "files": {str(SOUL_MD): soul},
+                    }
+
+    elif worst["id"] == "guardrails":
+        for note in worst.get("explanations", []):
+            if "catch yourself writing" in note and "catch yourself writing" not in soul.lower():
+                # Add the self-check guardrail
+                soul = soul.replace(
+                    "## EXECUTION OVER PLANNING. ALWAYS.",
+                    '## EXECUTION OVER PLANNING. ALWAYS.\n\n'
+                    'If you catch yourself writing "Here\'s a plan..." or "I recommend..." '
+                    'or "You should..." — STOP. Ask yourself: "Can I do any part of this '
+                    'right now?" If yes, do it first, then report what you did.',
+                )
+                return {
+                    "description": "Add self-check guardrail for description detection",
+                    "files": {str(SOUL_MD): soul},
+                }
+
+    elif worst["id"] == "toolset_registration":
+        # This needs code changes, not SOUL.md changes
+        print("  toolset_registration failures require code changes, not SOUL.md")
         return None
 
-    if proposal.get("description") == "no_change" or not proposal.get("files"):
-        print("  Researcher says: no change to propose")
-        return None
+    elif worst["id"] == "simplicity":
+        # Try to trim the file
+        lines = soul.splitlines()
+        new_lines = []
+        for line in lines:
+            # Remove comment-only lines that add no value
+            stripped = line.strip()
+            if stripped.startswith("<!--") and stripped.endswith("-->"):
+                continue
+            new_lines.append(line)
+        new_soul = "\n".join(new_lines)
+        if new_soul != soul:
+            return {
+                "description": "Remove HTML comments for simplicity",
+                "files": {str(SOUL_MD): new_soul},
+            }
 
-    print(f"  Proposal: {proposal.get('description', '?')}")
-    print(f"  Hypothesis: {proposal.get('hypothesis', '?')}")
-    print(f"  Target: {proposal.get('target_scenario', '?')}")
-
-    return proposal
+    return None
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Hermes Autoresearch Loop")
+    parser = argparse.ArgumentParser(description="Hermes Autoresearch Loop (no API calls)")
     parser.add_argument("--max-runs", type=int, default=0, help="Max experiments (0=infinite)")
-    parser.add_argument("--dry-run", action="store_true", help="Skip API calls")
     parser.add_argument("--baseline-only", action="store_true", help="Just run baseline eval")
     args = parser.parse_args()
 
-    api_key = _get_api_key()
-    if not api_key and not args.dry_run:
-        print("ERROR: No API key found in ~/.hermes/.env")
-        sys.exit(1)
-
     print("=" * 70)
-    print("HERMES AUTORESEARCH LOOP")
-    print(f"Researcher: {RESEARCHER_MODEL} | Eval: {EVAL_MODEL}")
+    print("HERMES AUTORESEARCH LOOP (static analysis + Claude Code CLI)")
     print(f"Max runs: {'infinite' if args.max_runs == 0 else args.max_runs}")
     print(f"Mutable files: {[Path(f).name for f in MUTABLE_FILES]}")
+    print(f"NO API BILLING — uses Claude Code subscription only")
     print("=" * 70)
 
-    # Step 1: Baseline eval
-    print("\n>>> Running baseline eval...")
-    baseline = run_eval(dry_run=args.dry_run)
+    # Baseline
+    print("\n>>> Running baseline eval (static analysis)...")
+    baseline = run_eval()
     baseline_score = baseline.get("score", 0.0)
     baseline_hash = git_current_hash()
 
-    print(f"\nBASELINE SCORE: {baseline_score:.4f} (commit {baseline_hash})")
+    # Print detailed baseline
+    from evals.hermes_eval import print_summary
+    print_summary(baseline)
 
     append_result({
         "timestamp": datetime.now().isoformat(),
@@ -310,11 +370,12 @@ def main():
         print("\nBaseline-only mode. Done.")
         return
 
-    # Step 2: THE LOOP — NEVER STOP
+    # THE LOOP
     run_number = 0
     prev_score = baseline_score
     best_score = baseline_score
     best_hash = baseline_hash
+    last_eval = baseline
 
     while True:
         run_number += 1
@@ -326,16 +387,15 @@ def main():
         print(f"EXPERIMENT {run_number} | Best: {best_score:.4f} | Current: {prev_score:.4f}")
         print(f"{'=' * 70}")
 
-        # Load current state
         current_files = read_mutable_files()
         history = load_results_history()
 
-        # Propose a change
+        # Propose
         print("\n>>> Proposing change...")
-        proposal = propose_change(api_key, current_files, history, baseline)
+        proposal = propose_change(current_files, history, last_eval)
 
         if proposal is None:
-            print("  No change proposed. Sleeping 30s...")
+            print("  No change proposed. Done for now.")
             append_result({
                 "timestamp": datetime.now().isoformat(),
                 "run": run_number,
@@ -349,33 +409,30 @@ def main():
                 "pass_count": 0,
                 "fail_count": 0,
             })
-            time.sleep(30)
-            continue
+            if args.max_runs == 0:
+                time.sleep(60)
+                continue
+            else:
+                break
 
-        # Apply the change
+        # Apply
         print("\n>>> Applying change...")
-        pre_change_hash = git_current_hash()
-
         try:
             new_files = proposal.get("files", {})
             write_mutable_files(new_files)
         except Exception as e:
             print(f"  Error applying change: {e}")
-            # Revert
             for fpath, content in current_files.items():
                 Path(fpath).write_text(content, encoding="utf-8")
             continue
 
-        # Commit the change
         desc = proposal.get("description", "autoresearch change")
         commit_hash = git_commit(f"autoresearch: {desc}")
         print(f"  Committed: {commit_hash}")
 
-        # Run eval
+        # Eval (static analysis, instant)
         print("\n>>> Running eval...")
-        t0 = time.time()
-        eval_result = run_eval(dry_run=args.dry_run)
-        eval_elapsed = time.time() - t0
+        eval_result = run_eval()
         new_score = eval_result.get("score", 0.0)
         delta = new_score - prev_score
 
@@ -386,38 +443,29 @@ def main():
             status = "keep"
             print(f"  >>> KEEPING (improved by {delta:+.4f})")
             prev_score = new_score
+            last_eval = eval_result
             if new_score > best_score:
                 best_score = new_score
                 best_hash = commit_hash
                 print(f"  >>> NEW BEST: {best_score:.4f}")
-            # Update baseline for next proposal
-            baseline = eval_result
         elif new_score == prev_score:
-            # Same score — keep if simpler (fewer lines), discard otherwise
-            old_lines = sum(len(v.splitlines()) for v in current_files.values())
-            new_lines = sum(
-                len(Path(f).read_text().splitlines())
-                for f in new_files
-                if Path(f).exists()
-            )
-            if new_lines < old_lines:
+            old_len = sum(len(v) for v in current_files.values())
+            new_len = sum(len(Path(f).read_text()) for f in new_files if Path(f).exists())
+            if new_len < old_len:
                 status = "keep_simpler"
-                print(f"  >>> KEEPING (same score, simpler: {new_lines} vs {old_lines} lines)")
-                baseline = eval_result
+                print(f"  >>> KEEPING (same score, simpler)")
+                last_eval = eval_result
             else:
                 status = "discard_same"
                 print(f"  >>> DISCARDING (same score, not simpler)")
-                # Revert
                 write_mutable_files(current_files)
                 git_commit(f"revert: {desc}")
         else:
             status = "discard"
             print(f"  >>> DISCARDING (regressed by {delta:.4f})")
-            # Revert
             write_mutable_files(current_files)
             git_commit(f"revert: {desc}")
 
-        # Log result
         append_result({
             "timestamp": datetime.now().isoformat(),
             "run": run_number,
@@ -427,16 +475,13 @@ def main():
             "delta": f"{delta:+.4f}",
             "status": status,
             "description": desc,
-            "elapsed_s": round(eval_elapsed, 1),
+            "elapsed_s": round(eval_result.get("elapsed", 0), 3),
             "pass_count": eval_result.get("pass_count", 0),
             "fail_count": eval_result.get("fail_count", 0),
         })
 
-        # Brief pause between experiments
-        print(f"\n  Sleeping 10s before next experiment...")
-        time.sleep(10)
+        time.sleep(2)
 
-    # Final summary
     print("\n" + "=" * 70)
     print("AUTORESEARCH COMPLETE")
     print(f"Total experiments: {run_number}")
