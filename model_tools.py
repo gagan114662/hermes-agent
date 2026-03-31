@@ -146,6 +146,7 @@ def _discover_tools():
         "tools.skill_manager_tool",
         "tools.browser_tool",
         "tools.cronjob_tools",
+        "tools.cron_tool",
         "tools.rl_training_tool",
         "tools.tts_tool",
         "tools.todo_tool",
@@ -508,16 +509,24 @@ def handle_function_call(
         if function_name in _AGENT_LOOP_TOOLS:
             return json.dumps({"error": f"{function_name} must be handled by the agent loop"})
 
+        # Pre-tool hook: plugins can suppress or stop the tool call.
         try:
-            from hermes_cli.plugins import invoke_hook
-            invoke_hook(
-                "pre_tool_call",
-                tool_name=function_name,
-                args=function_args,
-                task_id=task_id or "",
-                session_id=session_id or "",
-                tool_call_id=tool_call_id or "",
+            from hermes_cli.plugins import invoke_pre_tool_hook
+            hook_result = invoke_pre_tool_hook(
+                tool_name=function_name, args=function_args, task_id=task_id or ""
             )
+            if hook_result.action == "suppress":
+                # Plugin blocked this tool call; return the plugin's message.
+                msg = hook_result.message or f"Tool '{function_name}' was suppressed by a plugin."
+                logger.info("pre_tool_call hook suppressed '%s': %s", function_name, msg)
+                return json.dumps({"suppressed": True, "message": msg})
+            if hook_result.action == "stop":
+                msg = hook_result.message or f"Agent stopped by plugin before '{function_name}'."
+                logger.warning("pre_tool_call hook stopped agent at '%s': %s", function_name, msg)
+                return json.dumps({"error": msg, "stop": True})
+            # Apply any argument overrides from the hook.
+            if hook_result.updated_args is not None:
+                function_args = hook_result.updated_args
         except Exception:
             pass
 
@@ -556,6 +565,12 @@ def handle_function_call(
     except Exception as e:
         error_msg = f"Error executing {function_name}: {str(e)}"
         logger.error(error_msg)
+        try:
+            from hermes_cli.plugins import invoke_hook
+            invoke_hook("on_tool_error", tool_name=function_name, args=function_args,
+                        error=str(e), task_id=task_id or "")
+        except Exception:
+            pass
         return json.dumps({"error": error_msg}, ensure_ascii=False)
 
 
