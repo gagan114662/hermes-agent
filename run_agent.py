@@ -216,7 +216,10 @@ class IterationBudget:
 _NEVER_PARALLEL_TOOLS = frozenset({"clarify"})
 
 # Read-only tools with no shared mutable session state.
-_PARALLEL_SAFE_TOOLS = frozenset({
+# NOTE: This frozenset is the legacy fallback for tools that have not yet
+# migrated to declaring ``is_concurrency_safe=True`` in registry.register().
+# New tools should use the registry flag instead of editing this set.
+_PARALLEL_SAFE_TOOLS_LEGACY = frozenset({
     "ha_get_state",
     "ha_list_entities",
     "ha_list_services",
@@ -229,6 +232,21 @@ _PARALLEL_SAFE_TOOLS = frozenset({
     "web_extract",
     "web_search",
 })
+
+
+def _get_parallel_safe_tools() -> frozenset:
+    """Return the union of registry-declared and legacy safe tools.
+
+    Registry-declared tools (``is_concurrency_safe=True``) take precedence;
+    the legacy set covers tools not yet migrated to self-declaration.
+    ``_NEVER_PARALLEL_TOOLS`` overrides both.
+    """
+    try:
+        from tools.registry import registry
+        declared = registry.get_concurrency_safe_tools()
+    except Exception:
+        declared = frozenset()
+    return (declared | _PARALLEL_SAFE_TOOLS_LEGACY) - _NEVER_PARALLEL_TOOLS
 
 # File tools can run concurrently when they target independent paths.
 _PATH_SCOPED_TOOLS = frozenset({"read_file", "write_file", "patch"})
@@ -302,7 +320,7 @@ def _should_parallelize_tool_batch(tool_calls) -> bool:
             reserved_paths.append(scoped_path)
             continue
 
-        if tool_name not in _PARALLEL_SAFE_TOOLS:
+        if tool_name not in _get_parallel_safe_tools():
             return False
 
     return True
@@ -1477,7 +1495,11 @@ class AIAgent:
         # Turn counter (added after reset_session_state was first written — #2635)
         self._user_turn_count = 0
 
-        # Context engine reset (works for both built-in compressor and plugins)
+        # Per-tool cost attribution (C3)
+        self._tool_cost_entries: list = []   # List[ToolCostEntry]
+        self._current_turn_tool_names: list = []   # tools called this API turn
+
+        # Context compressor internal counters (if present)
         if hasattr(self, "context_compressor") and self.context_compressor:
             self.context_compressor.on_session_reset()
     
@@ -6617,6 +6639,13 @@ class AIAgent:
         """
         tool_calls = assistant_message.tool_calls
 
+        # Track which tools are about to run so cost attribution can
+        # apportion the next API response's token delta across them.
+        self._current_turn_tool_names = [
+            tc.function.name for tc in tool_calls
+            if hasattr(tc, "function") and hasattr(tc.function, "name")
+        ]
+
         # Allow _vprint during tool execution even with stream consumers
         self._executing_tools = True
         try:
@@ -7501,33 +7530,19 @@ class AIAgent:
 
         return final_response
 
-    def run_conversation(
+    def _prepare_turn(
         self,
         user_message: str,
-        system_message: str = None,
-        conversation_history: List[Dict[str, Any]] = None,
-        task_id: str = None,
-        stream_callback: Optional[callable] = None,
-        persist_user_message: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """
-        Run a complete conversation with tool calling until completion.
+        system_message,
+        conversation_history,
+        task_id,
+        stream_callback,
+        persist_user_message,
+        sync_honcho: bool = True,
+    ) -> dict:
+        """Pre-loop setup: sanitize inputs, init messages, resolve system prompt, preflight compress.
 
-        Args:
-            user_message (str): The user's message/question
-            system_message (str): Custom system message (optional, overrides ephemeral_system_prompt if provided)
-            conversation_history (List[Dict]): Previous conversation messages (optional)
-            task_id (str): Unique identifier for this task to isolate VMs between concurrent tasks (optional, auto-generated if not provided)
-            stream_callback: Optional callback invoked with each text delta during streaming.
-                Used by the TTS pipeline to start audio generation before the full response.
-                When None (default), API calls use the standard non-streaming path.
-            persist_user_message: Optional clean user message to store in
-                transcripts/history when user_message contains API-only
-                synthetic prefixes.
-                    or queuing follow-up prefetch work.
-
-        Returns:
-            Dict: Complete conversation result with final response and message history
+        Returns a dict with all mutable state the while-loop needs.
         """
         # Guard stdio against OSError from broken pipes (systemd/headless/daemon).
         # Installed once, transparent when streams are healthy, prevents crash on write.
@@ -7552,7 +7567,7 @@ class AIAgent:
         self._persist_user_message_override = persist_user_message
         # Generate unique task_id if not provided to isolate VMs between concurrent tasks
         effective_task_id = task_id or str(uuid.uuid4())
-        
+
         # Reset retry counters and iteration budget at the start of each turn
         # so subagent usage from a previous turn doesn't eat into the next one.
         self._invalid_tool_retries = 0
@@ -7589,16 +7604,6 @@ class AIAgent:
         # calls so that nudge logic accumulates correctly in CLI mode.
         self.iteration_budget = IterationBudget(self.max_iterations)
 
-        # Log conversation turn start for debugging/observability
-        _msg_preview = (user_message[:80] + "...") if len(user_message) > 80 else user_message
-        _msg_preview = _msg_preview.replace("\n", " ")
-        logger.info(
-            "conversation turn: session=%s model=%s provider=%s platform=%s history=%d msg=%r",
-            self.session_id or "none", self.model, self.provider or "unknown",
-            self.platform or "unknown", len(conversation_history or []),
-            _msg_preview,
-        )
-
         # Initialize conversation (copy to avoid mutating the caller's list)
         messages = list(conversation_history) if conversation_history else []
 
@@ -7609,18 +7614,18 @@ class AIAgent:
         # making tool calls in ALL subsequent turns.
         if messages:
             _strip_budget_warnings_from_history(messages)
-        
+
         # Hydrate todo store from conversation history (gateway creates a fresh
         # AIAgent per message, so the in-memory store is empty -- we need to
         # recover the todo state from the most recent todo tool response in history)
         if conversation_history and not self._todo_store.has_items():
             self._hydrate_todo_store(conversation_history)
-        
+
         # Prefill messages (few-shot priming) are injected at API-call time only,
         # never stored in the messages list. This keeps them ephemeral: they won't
         # be saved to session DB, session logs, or batch trajectories, but they're
         # automatically re-applied on every API call (including session continuations).
-        
+
         # Track user turns for memory flush and periodic nudge logic
         self._user_turn_count += 1
 
@@ -7644,10 +7649,10 @@ class AIAgent:
         messages.append(user_msg)
         current_turn_user_idx = len(messages) - 1
         self._persist_user_message_idx = current_turn_user_idx
-        
+
         if not self.quiet_mode:
             self._safe_print(f"💬 Starting conversation: '{user_message[:60]}{'...' if len(user_message) > 60 else ''}'")
-        
+
         # ── System prompt (cached per session for prefix caching) ──
         # Built once on first call, reused for all subsequent calls.
         # Only rebuilt after context compression events (which invalidate
@@ -7793,6 +7798,67 @@ class AIAgent:
                 _plugin_user_context = "\n\n".join(_ctx_parts)
         except Exception as exc:
             logger.warning("pre_llm_call hook failed: %s", exc)
+
+        return {
+            "user_message": user_message,
+            "persist_user_message": persist_user_message,
+            "messages": messages,
+            "active_system_prompt": active_system_prompt,
+            "effective_task_id": effective_task_id,
+            "current_turn_user_idx": current_turn_user_idx,
+            "_plugin_turn_context": _plugin_turn_context,
+            "original_user_message": original_user_message,
+            "_should_review_memory": _should_review_memory,
+        }
+
+    def run_conversation(
+        self,
+        user_message: str,
+        system_message: str = None,
+        conversation_history: List[Dict[str, Any]] = None,
+        task_id: str = None,
+        stream_callback: Optional[callable] = None,
+        persist_user_message: Optional[str] = None,
+        sync_honcho: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Run a complete conversation with tool calling until completion.
+
+        Args:
+            user_message (str): The user's message/question
+            system_message (str): Custom system message (optional, overrides ephemeral_system_prompt if provided)
+            conversation_history (List[Dict]): Previous conversation messages (optional)
+            task_id (str): Unique identifier for this task to isolate VMs between concurrent tasks (optional, auto-generated if not provided)
+            stream_callback: Optional callback invoked with each text delta during streaming.
+                Used by the TTS pipeline to start audio generation before the full response.
+                When None (default), API calls use the standard non-streaming path.
+            persist_user_message: Optional clean user message to store in
+                transcripts/history when user_message contains API-only
+                synthetic prefixes.
+            sync_honcho: When False, skip writing the final synthetic turn back
+                to Honcho or queuing follow-up prefetch work.
+
+        Returns:
+            Dict: Complete conversation result with final response and message history
+        """
+        _turn = self._prepare_turn(
+            user_message=user_message,
+            system_message=system_message,
+            conversation_history=conversation_history,
+            task_id=task_id,
+            stream_callback=stream_callback,
+            persist_user_message=persist_user_message,
+            sync_honcho=sync_honcho,
+        )
+        user_message = _turn["user_message"]
+        persist_user_message = _turn["persist_user_message"]
+        messages = _turn["messages"]
+        active_system_prompt = _turn["active_system_prompt"]
+        effective_task_id = _turn["effective_task_id"]
+        current_turn_user_idx = _turn["current_turn_user_idx"]
+        _plugin_turn_context = _turn["_plugin_turn_context"]
+        original_user_message = _turn["original_user_message"]
+        _should_review_memory = _turn["_should_review_memory"]
 
         # Main conversation loop
         api_call_count = 0
@@ -8481,6 +8547,31 @@ class AIAgent:
                             self.session_estimated_cost_usd += float(cost_result.amount_usd)
                         self.session_cost_status = cost_result.status
                         self.session_cost_source = cost_result.source
+
+                        # Per-tool cost attribution (C3): apportion this API
+                        # call's token delta equally across the tools that ran
+                        # in the preceding turn to produce it.
+                        if self._current_turn_tool_names:
+                            try:
+                                from agent.usage_pricing import ToolCostEntry
+                                from decimal import Decimal as _Decimal
+                                n = len(self._current_turn_tool_names)
+                                per_tool_cost = (
+                                    (cost_result.amount_usd / _Decimal(n))
+                                    if cost_result.amount_usd is not None else None
+                                )
+                                for _tname in self._current_turn_tool_names:
+                                    self._tool_cost_entries.append(ToolCostEntry(
+                                        tool_name=_tname,
+                                        input_tokens_delta=canonical_usage.input_tokens // n,
+                                        output_tokens_delta=canonical_usage.output_tokens // n,
+                                        cache_read_tokens_delta=canonical_usage.cache_read_tokens // n,
+                                        cache_write_tokens_delta=canonical_usage.cache_write_tokens // n,
+                                        estimated_cost_usd=per_tool_cost,
+                                    ))
+                                self._current_turn_tool_names = []
+                            except Exception:
+                                pass  # never block the agent loop
 
                         # Persist token counts to session DB for /insights.
                         # Do this for every platform with a session_id so non-CLI
@@ -10089,6 +10180,8 @@ class AIAgent:
             "estimated_cost_usd": self.session_estimated_cost_usd,
             "cost_status": self.session_cost_status,
             "cost_source": self.session_cost_source,
+            # Per-tool cost breakdown (C3) — list of dicts, one per tool call
+            "tool_cost_entries": [e.to_dict() for e in self._tool_cost_entries],
         }
         self._response_was_previewed = False
         
