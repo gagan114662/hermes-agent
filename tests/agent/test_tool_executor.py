@@ -23,10 +23,15 @@ def test_tool_executor_instantiates():
 
 def test_invoke_unknown_tool_delegates_to_handle_function_call():
     executor = _make_executor()
-    with patch("agent.tool_executor.ToolExecutor.invoke_tool") as mock_invoke:
-        mock_invoke.return_value = '{"ok": true}'
+    with patch("agent.tool_executor.handle_function_call") as mock_hfc:
+        mock_hfc.return_value = '{"ok": true}'
         result = executor.invoke_tool("web_search", {"query": "test"}, "task-1")
-    mock_invoke.assert_called_once_with("web_search", {"query": "test"}, "task-1")
+    mock_hfc.assert_called_once_with(
+        "web_search", {"query": "test"}, "task-1",
+        enabled_tools=None,
+        honcho_manager=None,
+        honcho_session_key=None,
+    )
     assert result == '{"ok": true}'
 
 
