@@ -69,6 +69,10 @@ VALID_HOOKS: Set[str] = {
     "on_budget_warning",
     "on_context_compress",
     "on_file_changed",
+    # Stop-hook events (fired at conversation end)
+    "on_conversation_end",
+    "on_deal_stage_transition",
+    "on_contact_update",
 }
 
 
