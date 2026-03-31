@@ -407,6 +407,7 @@ def delegate_task(
     tasks: Optional[List[Dict[str, Any]]] = None,
     max_iterations: Optional[int] = None,
     parent_agent=None,
+    agent_name: Optional[str] = None,
 ) -> str:
     """
     Spawn one or more child agents to handle delegated tasks.
@@ -415,10 +416,46 @@ def delegate_task(
       - Single: provide goal (+ optional context, toolsets)
       - Batch:  provide tasks array [{goal, context, toolsets}, ...]
 
+    When agent_name is provided, the specialist is registered in the session
+    registry and reused on subsequent calls with accumulated conversation history.
+
     Returns JSON with results array, one entry per task.
     """
     if parent_agent is None:
         return json.dumps({"error": "delegate_task requires a parent agent context."})
+
+    # A3: Named persistent specialist — reuse if already registered
+    if agent_name:
+        try:
+            from agent.agent_registry import get_registry
+            registry = get_registry()
+            existing = registry.get(agent_name)
+            if existing is not None and goal:
+                # Reuse existing specialist with accumulated history
+                accumulated_history = registry.get_history(agent_name)
+                try:
+                    result = existing.run_conversation(
+                        user_message=goal,
+                        conversation_history=accumulated_history,
+                    )
+                    registry.append_history(agent_name, result.get("messages", []))
+                    return json.dumps({
+                        "agent_name": agent_name,
+                        "results": [{
+                            "task_index": 0,
+                            "status": "completed" if result.get("final_response") else "failed",
+                            "summary": result.get("final_response", ""),
+                            "exit_reason": "completed" if result.get("completed") else "max_iterations",
+                            "api_calls": result.get("api_calls", 0),
+                            "duration_seconds": 0,
+                        }],
+                        "total_duration_seconds": 0,
+                    }, ensure_ascii=False)
+                except Exception as exc:
+                    logger.warning("agent_registry: specialist %r run failed: %s", agent_name, exc)
+                    # Fall through to normal delegation
+        except Exception as exc:
+            logger.debug("agent_registry: lookup failed: %s", exc)
 
     # Depth limit
     depth = getattr(parent_agent, '_delegate_depth', 0)
@@ -575,6 +612,21 @@ def delegate_task(
         _emit_hook("on_delegation_end", goal=goal, success=_success, results=results)
     except Exception:
         pass
+
+    # A3: Register the specialist in the session registry so it can be reused
+    if agent_name and n_tasks == 1 and children:
+        try:
+            from agent.agent_registry import get_registry
+            _i, _t, child = children[0]
+            registry = get_registry()
+            registry.register(agent_name, child)
+            # Seed history from the child's conversation messages
+            result_messages = results[0].get("messages", []) if results else []
+            if result_messages:
+                registry.append_history(agent_name, result_messages)
+            logger.debug("agent_registry: registered specialist %r", agent_name)
+        except Exception as exc:
+            logger.debug("agent_registry: registration failed: %s", exc)
 
     return json.dumps({
         "results": results,
@@ -864,6 +916,16 @@ DELEGATE_TASK_SCHEMA = {
                     "Only set lower for simple tasks."
                 ),
             },
+            "agent_name": {
+                "type": "string",
+                "description": (
+                    "Optional. Name this specialist (e.g. 'researcher', 'coder'). "
+                    "Named specialists are registered in the session registry and can "
+                    "be reused via message_agent or subsequent delegate_task calls "
+                    "with the same agent_name. The specialist retains accumulated "
+                    "conversation history across calls."
+                ),
+            },
         },
         "required": [],
     },
@@ -883,7 +945,8 @@ registry.register(
         toolsets=args.get("toolsets"),
         tasks=args.get("tasks"),
         max_iterations=args.get("max_iterations"),
-        parent_agent=kw.get("parent_agent")),
+        parent_agent=kw.get("parent_agent"),
+        agent_name=args.get("agent_name")),
     check_fn=check_delegate_requirements,
     emoji="🔀",
 )
@@ -992,6 +1055,89 @@ registry.register(
     handler=lambda args, **kw: check_delegation(
         task_handle_id=args.get("task_handle_id"),
         wait_seconds=args.get("wait_seconds", 0)),
+    check_fn=check_delegate_requirements,
+    emoji="🔀",
+)
+
+
+def message_agent(name: str, message: str) -> str:
+    """Send a follow-up message to a named specialist agent.
+
+    The specialist already has context from previous interactions.
+    Use this instead of delegate_task when continuing work with a named agent.
+    """
+    from agent.agent_registry import get_registry
+
+    registry = get_registry()
+    specialist = registry.get(name)
+    if specialist is None:
+        return json.dumps({
+            "error": (
+                f"No specialist named {name!r}. "
+                f"Create one with delegate_task(agent_name='{name}', ...) first."
+            )
+        })
+
+    try:
+        history = registry.get_history(name)
+        result = specialist.run_conversation(
+            user_message=message,
+            conversation_history=history,
+        )
+        registry.append_history(name, result.get("messages", []))
+
+        return json.dumps({
+            "agent_name": name,
+            "response": result.get("final_response", ""),
+            "completed": result.get("completed", False),
+        }, ensure_ascii=False)
+    except Exception as exc:
+        logger.warning("message_agent: specialist %r failed: %s", name, exc)
+        return json.dumps({
+            "error": f"Specialist {name!r} run failed: {exc}",
+            "agent_name": name,
+        })
+
+
+MESSAGE_AGENT_SCHEMA = {
+    "name": "message_agent",
+    "description": (
+        "Send a follow-up message to a named specialist agent created via delegate_task.\n\n"
+        "The specialist retains full context from all previous interactions, making it a "
+        "true persistent specialist you can continue a conversation with.\n\n"
+        "WHEN TO USE:\n"
+        "- You already created a specialist with delegate_task(agent_name='...', ...)\n"
+        "- You want to continue work with that same specialist (ask follow-ups, iterate)\n"
+        "- The specialist has context that would be expensive to re-establish\n\n"
+        "WHEN TO USE delegate_task INSTEAD:\n"
+        "- First interaction with a specialist (use agent_name param there)\n"
+        "- Parallel work with multiple specialists\n\n"
+        "The specialist's response is returned directly."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "The specialist agent name (as passed to delegate_task agent_name).",
+            },
+            "message": {
+                "type": "string",
+                "description": "The follow-up message or instruction to send.",
+            },
+        },
+        "required": ["name", "message"],
+    },
+}
+
+registry.register(
+    name="message_agent",
+    toolset="delegation",
+    schema=MESSAGE_AGENT_SCHEMA,
+    handler=lambda args, **kw: message_agent(
+        name=args.get("name", ""),
+        message=args.get("message", ""),
+    ),
     check_fn=check_delegate_requirements,
     emoji="🔀",
 )

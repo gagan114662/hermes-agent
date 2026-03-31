@@ -2742,6 +2742,20 @@ class AIAgent:
                 if user_block:
                     prompt_parts.append(user_block)
 
+            # Team shared memory — inject if the file exists (capped at 1000 chars)
+            try:
+                from tools.memory_tool import TEAM_MEMORY_FILE
+                if os.path.exists(TEAM_MEMORY_FILE):
+                    with open(TEAM_MEMORY_FILE, encoding="utf-8") as _tf:
+                        _team_content = _tf.read(1000)
+                    if _team_content.strip():
+                        _sep = "═" * 46
+                        prompt_parts.append(
+                            f"{_sep}\nTEAM SHARED KNOWLEDGE\n{_sep}\n{_team_content.strip()}"
+                        )
+            except Exception:
+                pass
+
         has_skills_tools = any(name in self.valid_tool_names for name in ['skills_list', 'skill_view', 'skill_manage'])
         if has_skills_tools:
             avail_toolsets = {
