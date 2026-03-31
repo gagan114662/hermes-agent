@@ -461,6 +461,13 @@ def delegate_task(
         if not task.get("goal", "").strip():
             return json.dumps({"error": f"Task {i} is missing a 'goal'."})
 
+    # Emit delegation start hook (fire-and-forget)
+    try:
+        from hermes_cli.plugins import emit_hook as _emit_hook
+        _emit_hook("on_delegation_start", goal=goal, toolsets=toolsets, tasks=tasks)
+    except Exception:
+        pass
+
     overall_start = time.monotonic()
     results = []
 
@@ -560,6 +567,14 @@ def delegate_task(
         results.sort(key=lambda r: r["task_index"])
 
     total_duration = round(time.monotonic() - overall_start, 2)
+
+    # Emit delegation end hook (fire-and-forget)
+    try:
+        from hermes_cli.plugins import emit_hook as _emit_hook
+        _success = all(r.get("status") not in ("error", "failed") for r in results)
+        _emit_hook("on_delegation_end", goal=goal, success=_success, results=results)
+    except Exception:
+        pass
 
     return json.dumps({
         "results": results,
