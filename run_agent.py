@@ -5572,6 +5572,146 @@ class AIAgent:
 
         return api_messages
 
+    def _build_result(
+        self,
+        api_call_count: int,
+        completed: bool,
+        interrupted: bool,
+        final_response,
+        messages: list,
+        original_user_message: str,
+        _should_review_memory: bool,
+        conversation_history,
+        user_message: str = "",
+        effective_task_id: str = "",
+        sync_honcho: bool = True,
+    ) -> dict:
+        """Build the final result dict and fire post-turn hooks.
+
+        Fires post_llm_call hook, extracts last reasoning, constructs the
+        result dict, triggers background memory/skill review, fires
+        on_session_end hook.
+
+        Returns the result dict ready to be returned from run_conversation().
+        """
+        # Save trajectory if enabled
+        self._save_trajectory(messages, user_message, completed)
+
+        # Clean up VM and browser for this task after conversation completes
+        self._cleanup_task_resources(effective_task_id)
+
+        # Persist session to both JSON log and SQLite
+        self._persist_session(messages, conversation_history)
+
+        # Sync conversation to Honcho for user modeling
+        if final_response and not interrupted and sync_honcho:
+            self._honcho_sync(original_user_message, final_response)
+            self._queue_honcho_prefetch(original_user_message)
+
+        # Plugin hook: post_llm_call
+        # Fired once per turn after the tool-calling loop completes.
+        # Plugins can use this to persist conversation data (e.g. sync
+        # to an external memory system).
+        if final_response and not interrupted:
+            try:
+                from hermes_cli.plugins import invoke_hook as _invoke_hook
+                _invoke_hook(
+                    "post_llm_call",
+                    session_id=self.session_id,
+                    user_message=original_user_message,
+                    assistant_response=final_response,
+                    conversation_history=list(messages),
+                    model=self.model,
+                    platform=getattr(self, "platform", None) or "",
+                )
+            except Exception as exc:
+                logger.warning("post_llm_call hook failed: %s", exc)
+
+        # Extract reasoning from the last assistant message (if any)
+        last_reasoning = None
+        for msg in reversed(messages):
+            if msg.get("role") == "assistant" and msg.get("reasoning"):
+                last_reasoning = msg["reasoning"]
+                break
+
+        # Build result with interrupt info if applicable
+        result = {
+            "final_response": final_response,
+            "last_reasoning": last_reasoning,
+            "messages": messages,
+            "api_calls": api_call_count,
+            "completed": completed,
+            "partial": False,  # True only when stopped due to invalid tool calls
+            "interrupted": interrupted,
+            "response_previewed": getattr(self, "_response_was_previewed", False),
+            "model": self.model,
+            "provider": self.provider,
+            "base_url": self.base_url,
+            "input_tokens": self.session_input_tokens,
+            "output_tokens": self.session_output_tokens,
+            "cache_read_tokens": self.session_cache_read_tokens,
+            "cache_write_tokens": self.session_cache_write_tokens,
+            "reasoning_tokens": self.session_reasoning_tokens,
+            "prompt_tokens": self.session_prompt_tokens,
+            "completion_tokens": self.session_completion_tokens,
+            "total_tokens": self.session_total_tokens,
+            "last_prompt_tokens": getattr(self.context_compressor, "last_prompt_tokens", 0) or 0,
+            "estimated_cost_usd": self.session_estimated_cost_usd,
+            "cost_status": self.session_cost_status,
+            "cost_source": self.session_cost_source,
+            # Per-tool cost breakdown (C3) — list of dicts, one per tool call
+            "tool_cost_entries": [e.to_dict() for e in self._tool_cost_entries],
+        }
+        self._response_was_previewed = False
+
+        # Include interrupt message if one triggered the interrupt
+        if interrupted and self._interrupt_message:
+            result["interrupt_message"] = self._interrupt_message
+
+        # Clear interrupt state after handling
+        self.clear_interrupt()
+
+        # Clear stream callback so it doesn't leak into future calls
+        self._stream_callback = None
+
+        # Check skill trigger NOW — based on how many tool iterations THIS turn used.
+        _should_review_skills = False
+        if (self._skill_nudge_interval > 0
+                and self._iters_since_skill >= self._skill_nudge_interval
+                and "skill_manage" in self.valid_tool_names):
+            _should_review_skills = True
+            self._iters_since_skill = 0
+
+        # Background memory/skill review — runs AFTER the response is delivered
+        # so it never competes with the user's task for model attention.
+        if final_response and not interrupted and (_should_review_memory or _should_review_skills):
+            try:
+                self._spawn_background_review(
+                    messages_snapshot=list(messages),
+                    review_memory=_should_review_memory,
+                    review_skills=_should_review_skills,
+                )
+            except Exception:
+                pass  # Background review is best-effort
+
+        # Plugin hook: on_session_end
+        # Fired at the very end of every run_conversation call.
+        # Plugins can use this for cleanup, flushing buffers, etc.
+        try:
+            from hermes_cli.plugins import invoke_hook as _invoke_hook
+            _invoke_hook(
+                "on_session_end",
+                session_id=self.session_id,
+                completed=completed,
+                interrupted=interrupted,
+                model=self.model,
+                platform=getattr(self, "platform", None) or "",
+            )
+        except Exception as exc:
+            logger.warning("on_session_end hook failed: %s", exc)
+
+        return result
+
     def _prepare_turn(
         self,
         user_message: str,
@@ -7556,123 +7696,19 @@ class AIAgent:
         # Determine if conversation completed successfully
         completed = final_response is not None and api_call_count < self.max_iterations
 
-        # Save trajectory if enabled
-        self._save_trajectory(messages, user_message, completed)
-
-        # Clean up VM and browser for this task after conversation completes
-        self._cleanup_task_resources(effective_task_id)
-
-        # Persist session to both JSON log and SQLite
-        self._persist_session(messages, conversation_history)
-
-        # Sync conversation to Honcho for user modeling
-        if final_response and not interrupted and sync_honcho:
-            self._honcho_sync(original_user_message, final_response)
-            self._queue_honcho_prefetch(original_user_message)
-
-        # Plugin hook: post_llm_call
-        # Fired once per turn after the tool-calling loop completes.
-        # Plugins can use this to persist conversation data (e.g. sync
-        # to an external memory system).
-        if final_response and not interrupted:
-            try:
-                from hermes_cli.plugins import invoke_hook as _invoke_hook
-                _invoke_hook(
-                    "post_llm_call",
-                    session_id=self.session_id,
-                    user_message=original_user_message,
-                    assistant_response=final_response,
-                    conversation_history=list(messages),
-                    model=self.model,
-                    platform=getattr(self, "platform", None) or "",
-                )
-            except Exception as exc:
-                logger.warning("post_llm_call hook failed: %s", exc)
-
-        # Extract reasoning from the last assistant message (if any)
-        last_reasoning = None
-        for msg in reversed(messages):
-            if msg.get("role") == "assistant" and msg.get("reasoning"):
-                last_reasoning = msg["reasoning"]
-                break
-
-        # Build result with interrupt info if applicable
-        result = {
-            "final_response": final_response,
-            "last_reasoning": last_reasoning,
-            "messages": messages,
-            "api_calls": api_call_count,
-            "completed": completed,
-            "partial": False,  # True only when stopped due to invalid tool calls
-            "interrupted": interrupted,
-            "response_previewed": getattr(self, "_response_was_previewed", False),
-            "model": self.model,
-            "provider": self.provider,
-            "base_url": self.base_url,
-            "input_tokens": self.session_input_tokens,
-            "output_tokens": self.session_output_tokens,
-            "cache_read_tokens": self.session_cache_read_tokens,
-            "cache_write_tokens": self.session_cache_write_tokens,
-            "reasoning_tokens": self.session_reasoning_tokens,
-            "prompt_tokens": self.session_prompt_tokens,
-            "completion_tokens": self.session_completion_tokens,
-            "total_tokens": self.session_total_tokens,
-            "last_prompt_tokens": getattr(self.context_compressor, "last_prompt_tokens", 0) or 0,
-            "estimated_cost_usd": self.session_estimated_cost_usd,
-            "cost_status": self.session_cost_status,
-            "cost_source": self.session_cost_source,
-            # Per-tool cost breakdown (C3) — list of dicts, one per tool call
-            "tool_cost_entries": [e.to_dict() for e in self._tool_cost_entries],
-        }
-        self._response_was_previewed = False
-        
-        # Include interrupt message if one triggered the interrupt
-        if interrupted and self._interrupt_message:
-            result["interrupt_message"] = self._interrupt_message
-        
-        # Clear interrupt state after handling
-        self.clear_interrupt()
-
-        # Clear stream callback so it doesn't leak into future calls
-        self._stream_callback = None
-
-        # Check skill trigger NOW — based on how many tool iterations THIS turn used.
-        _should_review_skills = False
-        if (self._skill_nudge_interval > 0
-                and self._iters_since_skill >= self._skill_nudge_interval
-                and "skill_manage" in self.valid_tool_names):
-            _should_review_skills = True
-            self._iters_since_skill = 0
-
-        # Background memory/skill review — runs AFTER the response is delivered
-        # so it never competes with the user's task for model attention.
-        if final_response and not interrupted and (_should_review_memory or _should_review_skills):
-            try:
-                self._spawn_background_review(
-                    messages_snapshot=list(messages),
-                    review_memory=_should_review_memory,
-                    review_skills=_should_review_skills,
-                )
-            except Exception:
-                pass  # Background review is best-effort
-
-        # Plugin hook: on_session_end
-        # Fired at the very end of every run_conversation call.
-        # Plugins can use this for cleanup, flushing buffers, etc.
-        try:
-            from hermes_cli.plugins import invoke_hook as _invoke_hook
-            _invoke_hook(
-                "on_session_end",
-                session_id=self.session_id,
-                completed=completed,
-                interrupted=interrupted,
-                model=self.model,
-                platform=getattr(self, "platform", None) or "",
-            )
-        except Exception as exc:
-            logger.warning("on_session_end hook failed: %s", exc)
-
-        return result
+        return self._build_result(
+            api_call_count=api_call_count,
+            completed=completed,
+            interrupted=interrupted,
+            final_response=final_response,
+            messages=messages,
+            original_user_message=original_user_message,
+            _should_review_memory=_should_review_memory,
+            conversation_history=conversation_history,
+            user_message=user_message,
+            effective_task_id=effective_task_id,
+            sync_honcho=sync_honcho,
+        )
 
     def chat(self, message: str, stream_callback: Optional[callable] = None) -> str:
         """
