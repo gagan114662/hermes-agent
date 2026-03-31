@@ -6024,6 +6024,101 @@ class AIAgent:
 
         return final_response
 
+    def _build_api_messages(
+        self,
+        messages: list,
+        active_system_prompt: str,
+        current_turn_user_idx: int,
+        _plugin_turn_context: str = "",
+    ) -> list:
+        """Normalize messages for a single API call.
+
+        Builds api_messages from the internal messages list:
+        - Injects Honcho turn context into current-turn user message
+        - Moves reasoning fields for multi-provider compatibility
+        - Strips internal-only fields (reasoning, finish_reason)
+        - Applies provider-specific sanitization (Mistral)
+        - Builds effective_system and prepends as system message
+        - Injects prefill messages
+        - Applies prompt caching breakpoints
+        - Strips orphaned tool results/stubs
+
+        Returns the final api_messages list ready for the API client.
+        """
+        # Prepare messages for API call
+        # If we have an ephemeral system prompt, prepend it to the messages
+        # Note: Reasoning is embedded in content via <think> tags for trajectory storage.
+        # However, providers like Moonshot AI require a separate 'reasoning_content' field
+        # on assistant messages with tool_calls. We handle both cases here.
+        api_messages = []
+        for idx, msg in enumerate(messages):
+            api_msg = msg.copy()
+
+            if idx == current_turn_user_idx and msg.get("role") == "user" and self._honcho_turn_context:
+                api_msg["content"] = _inject_honcho_turn_context(
+                    api_msg.get("content", ""), self._honcho_turn_context
+                )
+
+            # For ALL assistant messages, pass reasoning back to the API
+            # This ensures multi-turn reasoning context is preserved
+            if msg.get("role") == "assistant":
+                reasoning_text = msg.get("reasoning")
+                if reasoning_text:
+                    # Add reasoning_content for API compatibility (Moonshot AI, Novita, OpenRouter)
+                    api_msg["reasoning_content"] = reasoning_text
+
+            # Remove 'reasoning' field - it's for trajectory storage only
+            # We've copied it to 'reasoning_content' for the API above
+            if "reasoning" in api_msg:
+                api_msg.pop("reasoning")
+            # Remove finish_reason - not accepted by strict APIs (e.g. Mistral)
+            if "finish_reason" in api_msg:
+                api_msg.pop("finish_reason")
+            # Strip Codex Responses API fields (call_id, response_item_id) for
+            # strict providers like Mistral that reject unknown fields with 422.
+            # Uses new dicts so the internal messages list retains the fields
+            # for Codex Responses compatibility.
+            if "api.mistral.ai" in self._base_url_lower:
+                self._sanitize_tool_calls_for_strict_api(api_msg)
+            # Keep 'reasoning_details' - OpenRouter uses this for multi-turn reasoning context
+            # The signature field helps maintain reasoning continuity
+            api_messages.append(api_msg)
+
+        # Build the final system message: cached prompt + ephemeral system prompt.
+        # Ephemeral additions are API-call-time only (not persisted to session DB).
+        # Honcho later-turn recall is intentionally kept OUT of the system prompt
+        # so the stable cache prefix remains unchanged.
+        effective_system = active_system_prompt or ""
+        if self.ephemeral_system_prompt:
+            effective_system = (effective_system + "\n\n" + self.ephemeral_system_prompt).strip()
+        # Plugin context from pre_llm_call hooks — ephemeral, not cached.
+        if _plugin_turn_context:
+            effective_system = (effective_system + "\n\n" + _plugin_turn_context).strip()
+        if effective_system:
+            api_messages = [{"role": "system", "content": effective_system}] + api_messages
+
+        # Inject ephemeral prefill messages right after the system prompt
+        # but before conversation history. Same API-call-time-only pattern.
+        if self.prefill_messages:
+            sys_offset = 1 if effective_system else 0
+            for idx, pfm in enumerate(self.prefill_messages):
+                api_messages.insert(sys_offset + idx, pfm.copy())
+
+        # Apply Anthropic prompt caching for Claude models via OpenRouter.
+        # Auto-detected: if model name contains "claude" and base_url is OpenRouter,
+        # inject cache_control breakpoints (system + last 3 messages) to reduce
+        # input token costs by ~75% on multi-turn conversations.
+        if self._use_prompt_caching:
+            api_messages = apply_anthropic_cache_control(api_messages, cache_ttl=self._cache_ttl, native_anthropic=(self.api_mode == 'anthropic_messages'))
+
+        # Safety net: strip orphaned tool results / add stubs for missing
+        # results before sending to the API.  Runs unconditionally — not
+        # gated on context_compressor — so orphans from session loading or
+        # manual message manipulation are always caught.
+        api_messages = self._sanitize_api_messages(api_messages)
+
+        return api_messages
+
     def _prepare_turn(
         self,
         user_message: str,
@@ -6394,77 +6489,12 @@ class AIAgent:
                     and "skill_manage" in self.valid_tool_names):
                 self._iters_since_skill += 1
             
-            # Prepare messages for API call
-            # If we have an ephemeral system prompt, prepend it to the messages
-            # Note: Reasoning is embedded in content via <think> tags for trajectory storage.
-            # However, providers like Moonshot AI require a separate 'reasoning_content' field
-            # on assistant messages with tool_calls. We handle both cases here.
-            api_messages = []
-            for idx, msg in enumerate(messages):
-                api_msg = msg.copy()
-
-                if idx == current_turn_user_idx and msg.get("role") == "user" and self._honcho_turn_context:
-                    api_msg["content"] = _inject_honcho_turn_context(
-                        api_msg.get("content", ""), self._honcho_turn_context
-                    )
-
-                # For ALL assistant messages, pass reasoning back to the API
-                # This ensures multi-turn reasoning context is preserved
-                if msg.get("role") == "assistant":
-                    reasoning_text = msg.get("reasoning")
-                    if reasoning_text:
-                        # Add reasoning_content for API compatibility (Moonshot AI, Novita, OpenRouter)
-                        api_msg["reasoning_content"] = reasoning_text
-
-                # Remove 'reasoning' field - it's for trajectory storage only
-                # We've copied it to 'reasoning_content' for the API above
-                if "reasoning" in api_msg:
-                    api_msg.pop("reasoning")
-                # Remove finish_reason - not accepted by strict APIs (e.g. Mistral)
-                if "finish_reason" in api_msg:
-                    api_msg.pop("finish_reason")
-                # Strip Codex Responses API fields (call_id, response_item_id) for
-                # strict providers like Mistral that reject unknown fields with 422.
-                # Uses new dicts so the internal messages list retains the fields
-                # for Codex Responses compatibility.
-                if "api.mistral.ai" in self._base_url_lower:
-                    self._sanitize_tool_calls_for_strict_api(api_msg)
-                # Keep 'reasoning_details' - OpenRouter uses this for multi-turn reasoning context
-                # The signature field helps maintain reasoning continuity
-                api_messages.append(api_msg)
-
-            # Build the final system message: cached prompt + ephemeral system prompt.
-            # Ephemeral additions are API-call-time only (not persisted to session DB).
-            # Honcho later-turn recall is intentionally kept OUT of the system prompt
-            # so the stable cache prefix remains unchanged.
-            effective_system = active_system_prompt or ""
-            if self.ephemeral_system_prompt:
-                effective_system = (effective_system + "\n\n" + self.ephemeral_system_prompt).strip()
-            # Plugin context from pre_llm_call hooks — ephemeral, not cached.
-            if _plugin_turn_context:
-                effective_system = (effective_system + "\n\n" + _plugin_turn_context).strip()
-            if effective_system:
-                api_messages = [{"role": "system", "content": effective_system}] + api_messages
-
-            # Inject ephemeral prefill messages right after the system prompt
-            # but before conversation history. Same API-call-time-only pattern.
-            if self.prefill_messages:
-                sys_offset = 1 if effective_system else 0
-                for idx, pfm in enumerate(self.prefill_messages):
-                    api_messages.insert(sys_offset + idx, pfm.copy())
-
-            # Apply Anthropic prompt caching for Claude models via OpenRouter.
-            # Auto-detected: if model name contains "claude" and base_url is OpenRouter,
-            # inject cache_control breakpoints (system + last 3 messages) to reduce
-            # input token costs by ~75% on multi-turn conversations.
-            if self._use_prompt_caching:
-                api_messages = apply_anthropic_cache_control(api_messages, cache_ttl=self._cache_ttl, native_anthropic=(self.api_mode == 'anthropic_messages'))
-
-            # Safety net: strip orphaned tool results / add stubs for missing
-            # results before sending to the API.  Runs unconditionally — not
-            # gated on context_compressor — so orphans from session loading or
-            # manual message manipulation are always caught.
-            api_messages = self._sanitize_api_messages(api_messages)
+            api_messages = self._build_api_messages(
+                messages=messages,
+                active_system_prompt=active_system_prompt,
+                current_turn_user_idx=current_turn_user_idx,
+                _plugin_turn_context=_plugin_turn_context,
+            )
 
             # Calculate approximate request size for logging
             total_chars = sum(len(str(msg)) for msg in api_messages)
