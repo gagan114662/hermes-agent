@@ -1,0 +1,205 @@
+#!/bin/bash
+# Hermes launcher — copies bundled source on first run, then starts the agent.
+set -uo pipefail
+
+HERMES_HOME="$HOME/.hermes"
+INSTALL_DIR="$HERMES_HOME/agent"
+VENV="$INSTALL_DIR/venv"
+PYTHON="$VENV/bin/python3"
+SETUP_DONE="$HERMES_HOME/.setup_done"
+INSTALL_DONE="$HERMES_HOME/.installed"
+
+# Locate this .app bundle
+SCRIPT_PATH="$(cd "$(dirname "$0")" && pwd)"
+BUNDLE_RESOURCES="$(dirname "$SCRIPT_PATH")/Resources"
+BUNDLED_AGENT="$BUNDLE_RESOURCES/agent"
+
+mkdir -p "$HERMES_HOME/logs"
+LOG="$HERMES_HOME/logs/launcher.log"
+exec >> "$LOG" 2>&1
+echo "[$(date)] Hermes launcher starting"
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+ask() {
+    osascript -e "text returned of (display dialog \"$1\" default answer \"$2\" buttons {\"Continue\"} default button \"Continue\" with title \"Hermes Setup\")" 2>/dev/null
+}
+alert() {
+    osascript -e "display dialog \"$1\" buttons {\"OK\"} default button \"OK\" with title \"Hermes\"" >/dev/null 2>&1 || true
+}
+progress() {
+    osascript -e "display notification \"$1\" with title \"Hermes\"" >/dev/null 2>&1 || true
+}
+die() {
+    echo "[$(date)] ERROR: $1"
+    alert "Hermes setup failed:\n\n$1\n\nCheck ~/.hermes/logs/launcher.log for details."
+    exit 1
+}
+
+# ── Step 1: Check Python 3.11+ ─────────────────────────────────────────────────
+SYSTEM_PYTHON=""
+for candidate in \
+    /opt/homebrew/opt/python@3.11/bin/python3.11 \
+    /opt/homebrew/opt/python@3.12/bin/python3.12 \
+    /opt/homebrew/bin/python3.11 \
+    /opt/homebrew/bin/python3.12 \
+    /opt/homebrew/bin/python3 \
+    /usr/local/bin/python3.11 \
+    python3; do
+    if command -v "$candidate" &>/dev/null; then
+        major=$("$candidate" -c "import sys; print(sys.version_info.major)" 2>/dev/null || echo "0")
+        minor=$("$candidate" -c "import sys; print(sys.version_info.minor)" 2>/dev/null || echo "0")
+        if [ "$major" -ge 3 ] && [ "$minor" -ge 11 ]; then
+            SYSTEM_PYTHON="$candidate"
+            break
+        fi
+    fi
+done
+
+if [ -z "$SYSTEM_PYTHON" ]; then
+    alert "Hermes needs Python 3.11 or later.\n\nInstall it with:\n  brew install python@3.11\n\nThen relaunch Hermes."
+    exit 1
+fi
+echo "[$(date)] Using Python: $SYSTEM_PYTHON ($("$SYSTEM_PYTHON" --version 2>&1))"
+
+# ── Step 2: Install if needed ──────────────────────────────────────────────────
+if [ ! -f "$INSTALL_DONE" ]; then
+    progress "Installing Hermes... this takes about 2 minutes."
+    echo "[$(date)] Installing from bundle..."
+
+    mkdir -p "$INSTALL_DIR"
+
+    # Copy bundled source (skip if already there and newer)
+    rsync -a --delete \
+        --exclude='venv' --exclude='__pycache__' --exclude='*.pyc' \
+        "$BUNDLED_AGENT/" "$INSTALL_DIR/" \
+        || die "Failed to copy Hermes files to $INSTALL_DIR"
+
+    # Create venv
+    "$SYSTEM_PYTHON" -m venv "$VENV" \
+        || die "Failed to create Python venv at $VENV"
+
+    "$VENV/bin/pip3" install --quiet --upgrade pip \
+        || die "Failed to upgrade pip"
+
+    # Install dependencies
+    progress "Installing Python packages..."
+    "$VENV/bin/pip3" install --quiet -e "$INSTALL_DIR" \
+        || die "Failed to install Hermes dependencies"
+    "$VENV/bin/pip3" install --quiet -r "$INSTALL_DIR/requirements-menubar.txt" \
+        || die "Failed to install menubar dependencies"
+
+    touch "$INSTALL_DONE"
+    echo "[$(date)] Install complete"
+fi
+
+# ── Step 3: First-run setup wizard ────────────────────────────────────────────
+if [ ! -f "$SETUP_DONE" ]; then
+    alert "Welcome to Hermes!\n\nYour AI employee is about to get to work.\n\nYou'll need:\n  • A Telegram bot token (free from @BotFather)\n  • Your Telegram user ID (from @userinfobot)\n\nTap Continue to begin."
+
+    BOT_TOKEN=$(ask "Step 1 of 3: Telegram bot token\n\nOpen Telegram → search @BotFather → /newbot\nPaste the token below:" "") || true
+    if [ -z "$BOT_TOKEN" ]; then
+        alert "Setup cancelled. Relaunch Hermes when ready."
+        exit 0
+    fi
+
+    OWNER_ID=$(ask "Step 2 of 3: Your Telegram user ID\n\nOpen Telegram → search @userinfobot → /start\nPaste your ID below:" "") || true
+    if [ -z "$OWNER_ID" ]; then
+        alert "Setup cancelled. Relaunch Hermes when ready."
+        exit 0
+    fi
+
+    LLM_KEY=$(ask "Step 3 of 3: Anthropic API key\n\nconsole.anthropic.com → API Keys\nPaste your key below:" "") || true
+
+    # Write .env
+    mkdir -p "$HERMES_HOME"
+    cat > "$HERMES_HOME/.env" << ENV_EOF
+TELEGRAM_BOT_TOKEN=${BOT_TOKEN}
+TELEGRAM_OWNER_ID=${OWNER_ID}
+ANTHROPIC_API_KEY=${LLM_KEY}
+LLM_MODEL=claude-sonnet-4-6
+ENV_EOF
+    chmod 600 "$HERMES_HOME/.env"
+    echo "[$(date)] .env written"
+
+    # Install gateway launchd service
+    PLIST="$HOME/Library/LaunchAgents/ai.hermes.gateway.plist"
+    cat > "$PLIST" << PLIST_EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>ai.hermes.gateway</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${PYTHON}</string>
+        <string>-m</string>
+        <string>hermes_cli.main</string>
+        <string>gateway</string>
+        <string>run</string>
+        <string>--replace</string>
+    </array>
+    <key>WorkingDirectory</key><string>${INSTALL_DIR}</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key><string>${HOME}</string>
+        <key>HERMES_HOME</key><string>${HERMES_HOME}</string>
+    </dict>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><true/>
+    <key>StandardOutPath</key><string>${HERMES_HOME}/logs/gateway.log</string>
+    <key>StandardErrorPath</key><string>${HERMES_HOME}/logs/gateway.error.log</string>
+    <key>LimitLoadToSessionType</key><string>Aqua</string>
+</dict>
+</plist>
+PLIST_EOF
+
+    launchctl load "$PLIST" 2>/dev/null || true
+    echo "[$(date)] Gateway launchd service installed"
+
+    # Install cron jobs
+    (crontab -l 2>/dev/null | grep -v "hermes.*proactive_loop\|hermes.*morning_digest" || true; \
+     echo "*/15 * * * * cd \"${INSTALL_DIR}\" && set -a && source \"${HERMES_HOME}/.env\" && set +a && \"${PYTHON}\" scripts/proactive_loop.py >> \"${HERMES_HOME}/logs/proactive_loop.log\" 2>&1"; \
+     echo "0 8 * * * cd \"${INSTALL_DIR}\" && set -a && source \"${HERMES_HOME}/.env\" && set +a && \"${PYTHON}\" scripts/morning_digest.py >> \"${HERMES_HOME}/logs/morning_digest.log\" 2>&1") | crontab -
+    echo "[$(date)] Cron jobs installed"
+
+    # Run first_run.py to detect tools and send welcome Telegram
+    progress "Connecting to your tools..."
+    set -a && source "$HERMES_HOME/.env" && set +a
+    cd "$INSTALL_DIR"
+    "$PYTHON" scripts/first_run.py || echo "[$(date)] first_run.py failed (non-fatal)"
+fi
+
+# ── Step 4: Install menubar launchd service and start it ──────────────────────
+MENUBAR_PLIST="$HOME/Library/LaunchAgents/ai.hermes.menubar.plist"
+
+cat > "$MENUBAR_PLIST" << MPLIST_EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>ai.hermes.menubar</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${PYTHON}</string>
+        <string>${INSTALL_DIR}/scripts/menubar_app.py</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key><string>${HOME}</string>
+        <key>HERMES_HOME</key><string>${HERMES_HOME}</string>
+    </dict>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><true/>
+    <key>StandardOutPath</key><string>${HERMES_HOME}/logs/menubar.log</string>
+    <key>StandardErrorPath</key><string>${HERMES_HOME}/logs/menubar.error.log</string>
+    <key>LimitLoadToSessionType</key><string>Aqua</string>
+</dict>
+</plist>
+MPLIST_EOF
+
+# Unload old instance if running, then reload
+launchctl unload "$MENUBAR_PLIST" 2>/dev/null || true
+launchctl load "$MENUBAR_PLIST" 2>/dev/null && echo "[$(date)] Menubar service started"
+echo "[$(date)] Hermes is running — look for ⚡ in your menu bar"
+sleep 2  # give menubar app time to start
+osascript -e 'display notification "Look for ⚡ in your menu bar top-right" with title "Hermes is running" sound name "Glass"' 2>/dev/null || true

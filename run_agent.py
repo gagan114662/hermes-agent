@@ -88,7 +88,7 @@ from agent.model_metadata import (
 )
 from agent.context_compressor import ContextCompressor
 from agent.prompt_caching import apply_anthropic_cache_control
-from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, load_soul_md, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS
+from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, load_soul_md, load_business_profile, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
 from agent.display import (
     KawaiiSpinner, build_tool_preview as _build_tool_preview,
@@ -2567,6 +2567,12 @@ class AIAgent:
             else:
                 _identity = DEFAULT_AGENT_IDENTITY
             prompt_parts = [_identity]
+
+        # Business identity profile (from onboarding)
+        if not self.skip_context_files:
+            _biz_profile = load_business_profile()
+            if _biz_profile:
+                prompt_parts.append(_biz_profile)
 
         # Tool-aware behavioral guidance: only inject when the tools are loaded
         tool_guidance = []

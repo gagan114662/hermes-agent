@@ -613,32 +613,20 @@ async def _send_signal(extra, chat_id, message):
 
 
 async def _send_email(extra, chat_id, message):
-    """Send via SMTP (one-shot, no persistent connection needed)."""
-    import smtplib
-    from email.mime.text import MIMEText
+    """Send via Resend (preferred) or SMTP fallback."""
+    from tools.email_delivery import send_email
 
-    address = extra.get("address") or os.getenv("EMAIL_ADDRESS", "")
-    password = os.getenv("EMAIL_PASSWORD", "")
-    smtp_host = extra.get("smtp_host") or os.getenv("EMAIL_SMTP_HOST", "")
-    smtp_port = int(os.getenv("EMAIL_SMTP_PORT", "587"))
+    result = send_email(
+        to=chat_id,
+        subject="Hermes Agent",
+        body=message,
+        from_address=extra.get("address"),
+    )
 
-    if not all([address, password, smtp_host]):
-        return {"error": "Email not configured (EMAIL_ADDRESS, EMAIL_PASSWORD, EMAIL_SMTP_HOST required)"}
-
-    try:
-        msg = MIMEText(message, "plain", "utf-8")
-        msg["From"] = address
-        msg["To"] = chat_id
-        msg["Subject"] = "Hermes Agent"
-
-        server = smtplib.SMTP(smtp_host, smtp_port)
-        server.starttls(context=ssl.create_default_context())
-        server.login(address, password)
-        server.send_message(msg)
-        server.quit()
-        return {"success": True, "platform": "email", "chat_id": chat_id}
-    except Exception as e:
-        return {"error": f"Email send failed: {e}"}
+    if result.get("success"):
+        return {"success": True, "platform": "email", "chat_id": chat_id, "provider": result.get("provider")}
+    else:
+        return {"error": result.get("error", "Email send failed")}
 
 
 async def _send_sms(auth_token, chat_id, message):
