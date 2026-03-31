@@ -2553,7 +2553,7 @@ class AIAgent:
             if not self.quiet_mode:
                 print(f"  Honcho write failed: {e}")
 
-    def _build_system_prompt(self, system_message: str = None) -> str:
+    def _build_system_prompt(self, system_message: str = None, user_message: str = "") -> str:
         """
         Assemble the full system prompt from all layers.
         
@@ -2697,9 +2697,33 @@ class AIAgent:
 
         if self._memory_store:
             if self._memory_enabled:
-                mem_block = self._memory_store.format_for_system_prompt("memory")
-                if mem_block:
-                    prompt_parts.append(mem_block)
+                # If topic-file layout exists, use relevance scoring instead of flat store
+                _topic_memories_dir = os.path.expanduser("~/.hermes/memories")
+                _topic_index = os.path.join(_topic_memories_dir, "MEMORY.md")
+                _used_topic_layout = False
+                if os.path.isdir(_topic_memories_dir) and os.path.exists(_topic_index):
+                    # Check this is a topic index (contains markdown links), not flat store
+                    try:
+                        _idx_content = open(_topic_index, encoding="utf-8").read()
+                        if "- [" in _idx_content and "](" in _idx_content:
+                            try:
+                                from agent.memory_selector import select_relevant_memories
+                                _topic_block = select_relevant_memories(
+                                    user_message or "",
+                                    _topic_memories_dir,
+                                )
+                                if _topic_block:
+                                    from agent.prompt_builder import _render_topic_memory_block
+                                    prompt_parts.append(_render_topic_memory_block(_topic_block))
+                                    _used_topic_layout = True
+                            except Exception as _e:
+                                logger.debug("Topic memory selection failed, falling back: %s", _e)
+                    except Exception:
+                        pass
+                if not _used_topic_layout:
+                    mem_block = self._memory_store.format_for_system_prompt("memory")
+                    if mem_block:
+                        prompt_parts.append(mem_block)
             # USER.md is always included when enabled -- Honcho prefetch is additive.
             if self._user_profile_enabled:
                 user_block = self._memory_store.format_for_system_prompt("user")
@@ -5858,7 +5882,7 @@ class AIAgent:
                 self._cached_system_prompt = stored_prompt
             else:
                 # First turn of a new session — build from scratch.
-                self._cached_system_prompt = self._build_system_prompt(system_message)
+                self._cached_system_prompt = self._build_system_prompt(system_message, user_message=user_message or "")
                 # Bake Honcho context into the prompt so it's stable for
                 # the entire session (not re-fetched per turn).
                 if self._honcho_context:
