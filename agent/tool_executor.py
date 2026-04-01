@@ -34,6 +34,38 @@ class ToolExecutor:
     def __init__(self, agent: "AIAgent") -> None:
         self.agent = agent
 
+    def apply_context_modifiers(self, modifiers: list) -> None:
+        """Apply a batch of ContextModifiers atomically after tool execution."""
+        from tools.registry import ContextModifier
+
+        for modifier in modifiers:
+            if modifier is None or modifier.is_empty():
+                continue
+
+            # Memory writes
+            if modifier.memory_writes:
+                for write in modifier.memory_writes:
+                    try:
+                        from tools.memory_tool import memory_tool as _mt
+                        _mt(
+                            action="add",
+                            target=write.get("target", "user"),
+                            content=write.get("content", ""),
+                            store=self.agent._memory_store,
+                        )
+                    except Exception as e:
+                        logger.debug("context_modifier memory write failed: %s", e)
+
+            # Ephemeral context — append to agent's ephemeral_system_prompt
+            if modifier.ephemeral_context:
+                try:
+                    existing = self.agent.ephemeral_system_prompt or ""
+                    self.agent.ephemeral_system_prompt = (
+                        (existing + "\n\n" + modifier.ephemeral_context).strip()
+                    )
+                except Exception as e:
+                    logger.debug("context_modifier ephemeral context failed: %s", e)
+
     def invoke_tool(self, function_name: str, function_args: dict, effective_task_id: str) -> str:
         """Invoke a single tool and return the result string. No display logic.
 
