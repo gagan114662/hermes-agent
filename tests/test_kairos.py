@@ -20,6 +20,12 @@ from agent.kairos import (
 )
 
 
+@pytest.fixture(autouse=True)
+def reset_kairos_state():
+    yield
+    set_kairos_active(False)
+
+
 class TestKairosSettings:
     def test_load_from_json(self, tmp_path):
         settings_file = tmp_path / "settings.json"
