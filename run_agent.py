@@ -1302,7 +1302,16 @@ class AIAgent:
             self.context_compressor._context_probe_persistable = False
             # Iterative summary from previous session must not bleed into new one (#2635)
             self.context_compressor._previous_summary = None
-    
+
+        # Load buddy companion (non-critical, fire-and-forget)
+        self._buddy = None
+        try:
+            from agent.buddy import load_or_create_buddy
+            seed = getattr(self, 'session_id', None) or 'default'
+            self._buddy = load_or_create_buddy(seed)
+        except Exception:
+            pass
+
     def _safe_print(self, *args, **kwargs):
         """Print that silently handles broken pipes / closed stdout.
 
@@ -5796,6 +5805,15 @@ class AIAgent:
         try:
             from agent.dream import maybe_dream
             maybe_dream(agent=self)
+        except Exception:
+            pass
+
+        # Buddy XP gain
+        try:
+            if hasattr(self, '_buddy') and self._buddy and final_response:
+                self._buddy.gain_xp(1)
+                from agent.buddy import save_buddy
+                save_buddy(self._buddy)
         except Exception:
             pass
 
