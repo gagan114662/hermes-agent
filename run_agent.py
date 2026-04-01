@@ -1253,6 +1253,13 @@ class AIAgent:
         self._tool_executor = ToolExecutor(self)
         self._pipeline = TurnPipeline(self)
 
+        # Kairos: init after all other setup
+        try:
+            from agent.kairos import init_kairos
+            self._kairos_active = init_kairos(self)
+        except Exception:
+            self._kairos_active = False
+
     def reset_session_state(self):
         """Reset all session-scoped token counters to 0 for a fresh session.
         
@@ -2637,6 +2644,15 @@ class AIAgent:
         try:
             from agent.coordinator import get_coordinator_prompt_addition
             prompt_parts.append(get_coordinator_prompt_addition())
+        except Exception:
+            pass
+
+        # Kairos assistant mode addendum
+        try:
+            from agent.kairos import get_kairos_prompt_addendum
+            kairos_addendum = get_kairos_prompt_addendum()
+            if kairos_addendum:
+                prompt_parts.append(kairos_addendum)
         except Exception:
             pass
 
