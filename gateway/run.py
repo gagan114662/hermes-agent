@@ -1860,63 +1860,16 @@ class GatewayRunner:
             await self._stop_task
             return
 
-        async def _stop_impl() -> None:
-            logger.info(
-                "Stopping gateway%s...",
-                " for restart" if self._restart_requested else "",
-            )
-            self._running = False
-            self._draining = True
+        # Run registered cleanup functions (2s timeout)
+        try:
+            from agent.cleanup_registry import run_all_cleanups
+            run_all_cleanups(timeout=2.0)
+        except Exception:
+            pass
 
-            timeout = self._restart_drain_timeout
-            active_agents, timed_out = await self._drain_active_agents(timeout)
-            if timed_out:
-                logger.warning(
-                    "Gateway drain timed out after %.1fs with %d active agent(s); interrupting remaining work.",
-                    timeout,
-                    self._running_agent_count(),
-                )
-                self._interrupt_running_agents(
-                    "Gateway restarting" if self._restart_requested else "Gateway shutting down"
-                )
-                interrupt_deadline = asyncio.get_running_loop().time() + 5.0
-                while self._running_agents and asyncio.get_running_loop().time() < interrupt_deadline:
-                    self._update_runtime_status("draining")
-                    await asyncio.sleep(0.1)
-
-            if self._restart_requested and self._restart_detached:
-                try:
-                    await self._launch_detached_restart_command()
-                except Exception as e:
-                    logger.error("Failed to launch detached gateway restart: %s", e)
-
-            self._finalize_shutdown_agents(active_agents)
-
-            for platform, adapter in list(self.adapters.items()):
-                try:
-                    await adapter.cancel_background_tasks()
-                except Exception as e:
-                    logger.debug("✗ %s background-task cancel error: %s", platform.value, e)
-                try:
-                    await adapter.disconnect()
-                    logger.info("✓ %s disconnected", platform.value)
-                except Exception as e:
-                    logger.error("✗ %s disconnect error: %s", platform.value, e)
-
-            for _task in list(self._background_tasks):
-                if _task is self._stop_task:
-                    continue
-                _task.cancel()
-            self._background_tasks.clear()
-
-            self.adapters.clear()
-            self._running_agents.clear()
-            self._pending_messages.clear()
-            self._pending_approvals.clear()
-            self._shutdown_event.set()
-
-            # Global cleanup: kill any remaining tool subprocesses not tied
-            # to a specific agent (catch-all for zombie prevention).
+        for session_key, agent in list(self._running_agents.items()):
+            if agent is _AGENT_PENDING_SENTINEL:
+                continue
             try:
                 from tools.process_registry import process_registry
                 process_registry.kill_all()

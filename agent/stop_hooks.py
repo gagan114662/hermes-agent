@@ -47,6 +47,13 @@ def run_stop_hooks(
     # Hook 4: Contact update detection
     _maybe_detect_contact_update(messages, final_response, agent)
 
+    # Hook 5: Magic docs update
+    try:
+        from agent.magic_docs import update_magic_docs_async
+        update_magic_docs_async(messages, agent)
+    except Exception:
+        pass
+
 
 def _maybe_detect_deal_transition(messages: list, final_response: str, agent: "AIAgent") -> None:
     """Detect if a deal stage changed and emit hook."""

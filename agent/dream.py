@@ -163,9 +163,25 @@ def run_dream(agent: "AIAgent") -> None:
         )
 
         # Call LLM
+        # Inherit parent's prompt cache to avoid re-paying for cached prefix
+        dream_messages: list = [{"role": "user", "content": prompt}]
+        try:
+            from agent.prompt_caching import get_last_cache_safe_params
+            cache_params = get_last_cache_safe_params()
+            if cache_params and cache_params.cached_messages_prefix:
+                # Prepend parent's cached prefix so our first call hits the cache
+                logger.debug(
+                    "[dream] Inheriting %d cached messages from parent",
+                    len(cache_params.cached_messages_prefix),
+                )
+                # Note: don't re-apply cache_control markers — they're already in the prefix
+                dream_messages = list(cache_params.cached_messages_prefix) + dream_messages
+        except ImportError:
+            pass
+
         resp = agent.client.chat.completions.create(
             model="anthropic/claude-haiku-4-5",
-            messages=[{"role": "user", "content": prompt}],
+            messages=dream_messages,
             max_tokens=800,
         )
         raw = resp.choices[0].message.content or "{}"

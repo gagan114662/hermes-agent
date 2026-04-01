@@ -2278,13 +2278,21 @@ def cleanup_browser(task_id: Optional[str] = None) -> None:
 def cleanup_all_browsers() -> None:
     """
     Clean up all active browser sessions.
-    
+
     Useful for cleanup on shutdown.
     """
     with _cleanup_lock:
         task_ids = list(_active_sessions.keys())
     for task_id in task_ids:
         cleanup_browser(task_id)
+
+
+# Auto-register with cleanup registry
+try:
+    from agent.cleanup_registry import register_cleanup as _register_cleanup
+    _register_cleanup(cleanup_all_browsers)
+except ImportError:
+    pass
 
 
 def browser_upload_file(file_path: str, task_id: Optional[str] = None) -> str:

@@ -1032,6 +1032,14 @@ def cleanup_vm(task_id: str):
             logger.warning("Error cleaning up environment for task %s: %s", task_id, e)
 
 
+# Auto-register with cleanup registry
+try:
+    from agent.cleanup_registry import register_cleanup as _register_cleanup
+    _register_cleanup(cleanup_all_environments)
+except ImportError:
+    pass
+
+
 def _atexit_cleanup():
     """Stop cleanup thread and shut down all remaining sandboxes on exit."""
     _stop_cleanup_thread()

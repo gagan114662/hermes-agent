@@ -9,7 +9,41 @@ Pure functions -- no class state, no AIAgent dependency.
 """
 
 import copy
+import threading
+from dataclasses import dataclass, field
 from typing import Any, Dict, List
+
+
+@dataclass
+class CacheSafeParams:
+    """Snapshot of parent agent's cached prompt prefix for forked subagents.
+
+    Subagents that share these params avoid re-paying for the full system
+    prompt and conversation prefix on every fork.
+    """
+    system_prompt: str
+    # First N messages already cached by parent (the stable prefix)
+    cached_messages_prefix: list[dict[str, Any]]
+    # Indices in the original message list where cache_control was placed
+    cache_breakpoint_indices: list[int]
+
+
+# Thread-local storage so different sessions don't interfere
+_cache_safe_params: CacheSafeParams | None = None
+_cache_lock = threading.Lock()
+
+
+def save_cache_safe_params(params: CacheSafeParams | None) -> None:
+    """Save the current parent's cache params after each successful API call."""
+    global _cache_safe_params
+    with _cache_lock:
+        _cache_safe_params = params
+
+
+def get_last_cache_safe_params() -> CacheSafeParams | None:
+    """Get the last saved cache params for use by forked subagents."""
+    with _cache_lock:
+        return _cache_safe_params
 
 
 def _apply_cache_marker(msg: dict, cache_marker: dict, native_anthropic: bool = False) -> None:
@@ -70,3 +104,31 @@ def apply_anthropic_cache_control(
         _apply_cache_marker(messages[idx], marker, native_anthropic=native_anthropic)
 
     return messages
+
+
+def build_cache_safe_params(system_prompt: str, messages: list[dict[str, Any]]) -> CacheSafeParams:
+    """Build CacheSafeParams from the current system prompt and messages.
+
+    Identifies which messages have cache_control applied (the breakpoints)
+    and extracts the prefix for subagent reuse.
+    """
+    breakpoints = []
+    for i, msg in enumerate(messages):
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and "cache_control" in block:
+                    breakpoints.append(i)
+                    break
+        elif isinstance(msg, dict) and "cache_control" in msg:
+            breakpoints.append(i)
+
+    # The prefix is everything up to and including the last breakpoint
+    prefix_end = (max(breakpoints) + 1) if breakpoints else 0
+    prefix = messages[:prefix_end]
+
+    return CacheSafeParams(
+        system_prompt=system_prompt,
+        cached_messages_prefix=prefix,
+        cache_breakpoint_indices=breakpoints,
+    )

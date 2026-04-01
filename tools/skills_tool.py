@@ -1364,6 +1364,7 @@ registry.register(
     ),
     check_fn=check_skills_requirements,
     emoji="📚",
+    is_concurrency_safe=True,
 )
 registry.register(
     name="skill_view",
@@ -1374,4 +1375,5 @@ registry.register(
     ),
     check_fn=check_skills_requirements,
     emoji="📚",
+    is_concurrency_safe=True,
 )

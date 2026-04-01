@@ -133,3 +133,28 @@ def get_buddy_greeting(companion: Companion) -> str:
         f"({companion.species}{hat_str}, Lv.{companion.level}) — "
         f"{companion.interactions} sessions together"
     )
+
+
+def inherit_parent_cache(messages: list) -> list:
+    """Prepend parent's cached message prefix so forked buddy subagent avoids
+    re-paying for the cached prefix on its first API call.
+
+    Only prepends if messages is short (fresh start) and a cached prefix exists.
+    Safe to call always — fails silently if cache params are unavailable.
+    """
+    # Inherit parent's prompt cache to avoid re-paying for cached prefix
+    try:
+        from agent.prompt_caching import get_last_cache_safe_params
+        cache_params = get_last_cache_safe_params()
+        if cache_params and cache_params.cached_messages_prefix:
+            # Only prepend if this looks like a fresh messages list (not already large)
+            if len(messages) <= 2:
+                logger.debug(
+                    "[buddy] Inheriting %d cached messages from parent",
+                    len(cache_params.cached_messages_prefix),
+                )
+                # Note: don't re-apply cache_control markers — they're already in the prefix
+                return list(cache_params.cached_messages_prefix) + messages
+    except ImportError:
+        pass
+    return messages

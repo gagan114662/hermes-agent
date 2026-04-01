@@ -75,6 +75,85 @@ class CostResult:
     notes: tuple[str, ...] = ()
 
 
+@dataclass
+class ToolCostEntry:
+    """Cost attributed to a single tool call within a session turn.
+
+    Populated by ``model_tools.handle_function_call`` by diffing the
+    session's cumulative token usage before and after each tool invocation.
+    Used to build per-tool cost breakdowns for customer-facing summaries.
+    """
+
+    tool_name: str
+    input_tokens_delta: int = 0
+    output_tokens_delta: int = 0
+    cache_read_tokens_delta: int = 0
+    cache_write_tokens_delta: int = 0
+    estimated_cost_usd: Optional[Decimal] = None
+    timestamp: datetime = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.timestamp is None:
+            self.timestamp = datetime.now(timezone.utc)
+
+    @property
+    def total_tokens_delta(self) -> int:
+        return (
+            self.input_tokens_delta
+            + self.output_tokens_delta
+            + self.cache_read_tokens_delta
+            + self.cache_write_tokens_delta
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "tool": self.tool_name,
+            "input_tokens": self.input_tokens_delta,
+            "output_tokens": self.output_tokens_delta,
+            "cache_read_tokens": self.cache_read_tokens_delta,
+            "cache_write_tokens": self.cache_write_tokens_delta,
+            "total_tokens": self.total_tokens_delta,
+            "estimated_cost_usd": float(self.estimated_cost_usd) if self.estimated_cost_usd else None,
+            "timestamp": self.timestamp.isoformat() if self.timestamp else None,
+        }
+
+
+def format_tool_cost_summary(entries: list) -> str:
+    """Format a list of ToolCostEntry objects as a human-readable summary.
+
+    Returns an empty string if no entries have non-zero costs.
+    """
+    if not entries:
+        return ""
+
+    lines = []
+    total_tokens = sum(e.total_tokens_delta for e in entries)
+    total_cost = sum(
+        (e.estimated_cost_usd or Decimal("0")) for e in entries
+    )
+
+    if total_tokens == 0 and total_cost == 0:
+        return ""
+
+    # Group by tool name, summing tokens and cost
+    by_tool: Dict[str, Dict[str, Any]] = {}
+    for entry in entries:
+        if entry.tool_name not in by_tool:
+            by_tool[entry.tool_name] = {"tokens": 0, "cost": Decimal("0"), "calls": 0}
+        by_tool[entry.tool_name]["tokens"] += entry.total_tokens_delta
+        by_tool[entry.tool_name]["cost"] += entry.estimated_cost_usd or Decimal("0")
+        by_tool[entry.tool_name]["calls"] += 1
+
+    lines.append("Tool cost breakdown:")
+    for tool_name, data in sorted(by_tool.items(), key=lambda x: -x[1]["cost"]):
+        cost_str = f"${data['cost']:.4f}" if data["cost"] else "n/a"
+        calls_str = f"{data['calls']}x" if data["calls"] > 1 else ""
+        lines.append(f"  {tool_name}{' ' + calls_str if calls_str else ''}: {data['tokens']:,} tokens  {cost_str}")
+
+    lines.append(f"  Total: {total_tokens:,} tokens  ${total_cost:.4f}")
+    return "\n".join(lines)
+
+
 _UTC_NOW = lambda: datetime.now(timezone.utc)
 
 

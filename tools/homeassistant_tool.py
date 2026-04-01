@@ -460,6 +460,7 @@ registry.register(
     handler=_handle_list_entities,
     check_fn=_check_ha_available,
     emoji="🏠",
+    is_concurrency_safe=True,
 )
 
 registry.register(
@@ -469,6 +470,7 @@ registry.register(
     handler=_handle_get_state,
     check_fn=_check_ha_available,
     emoji="🏠",
+    is_concurrency_safe=True,
 )
 
 registry.register(
@@ -478,6 +480,7 @@ registry.register(
     handler=_handle_list_services,
     check_fn=_check_ha_available,
     emoji="🏠",
+    is_concurrency_safe=True,
 )
 
 registry.register(

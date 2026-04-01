@@ -338,12 +338,8 @@ def _extract_parallel_scope_path(tool_name: str, function_args: dict) -> Path | 
     if not isinstance(raw_path, str) or not raw_path.strip():
         return None
 
-    expanded = Path(raw_path).expanduser()
-    if expanded.is_absolute():
-        return Path(os.path.abspath(str(expanded)))
-
     # Avoid resolve(); the file may not exist yet.
-    return Path(os.path.abspath(str(Path.cwd() / expanded)))
+    return Path(raw_path).expanduser()
 
 
 def _paths_overlap(left: Path, right: Path) -> bool:
@@ -593,8 +589,6 @@ class AIAgent:
         provider_data_collection: str = None,
         session_id: str = None,
         tool_progress_callback: callable = None,
-        tool_start_callback: callable = None,
-        tool_complete_callback: callable = None,
         thinking_callback: callable = None,
         reasoning_callback: callable = None,
         clarify_callback: callable = None,
@@ -615,11 +609,9 @@ class AIAgent:
         parent_session_id: str = None,
         iteration_budget: "IterationBudget" = None,
         fallback_model: Dict[str, Any] = None,
-        credential_pool=None,
         checkpoints_enabled: bool = False,
         checkpoint_max_snapshots: int = 50,
         pass_session_id: bool = False,
-        persist_session: bool = True,
     ):
         """
         Initialize the AI Agent.
@@ -682,8 +674,6 @@ class AIAgent:
         self.background_review_callback = None  # Optional sync callback for gateway delivery
         self.skip_context_files = skip_context_files
         self.pass_session_id = pass_session_id
-        self.persist_session = persist_session
-        self._credential_pool = credential_pool
         self.log_prefix_chars = log_prefix_chars
         self.log_prefix = f"{log_prefix} " if log_prefix else ""
         # Store effective base URL for feature detection (prompt caching, reasoning, etc.)
@@ -741,9 +731,6 @@ class AIAgent:
             ).start()
 
         self.tool_progress_callback = tool_progress_callback
-        self.tool_start_callback = tool_start_callback
-        self.tool_complete_callback = tool_complete_callback
-        self.suppress_status_output = False
         self.thinking_callback = thinking_callback
         self.reasoning_callback = reasoning_callback
         self.clarify_callback = clarify_callback
@@ -808,24 +795,36 @@ class AIAgent:
         # Tiered: fires at 85% and again at 95% of compaction threshold.
         self._context_pressure_warned_at = 0.0  # highest tier already shown
 
-        # Activity tracking — updated on each API call, tool execution, and
-        # stream chunk.  Used by the gateway timeout handler to report what the
-        # agent was doing when it was killed, and by the "still working"
-        # notifications to show progress.
-        self._last_activity_ts: float = time.time()
-        self._last_activity_desc: str = "initializing"
-        self._current_tool: str | None = None
-        self._api_call_count: int = 0
+        # Ultrathink: per-turn flag to boost reasoning effort to max when the
+        # user includes the 'ultrathink' keyword in their message.
+        self._ultrathink_active = False
 
-        # Rate limit tracking — updated from x-ratelimit-* response headers
-        # after each API call.  Accessed by /usage slash command.
-        self._rate_limit_state: Optional["RateLimitState"] = None
-
-        # Centralized logging — agent.log (INFO+) and errors.log (WARNING+)
-        # both live under ~/.hermes/logs/.  Idempotent, so gateway mode
-        # (which creates a new AIAgent per message) won't duplicate handlers.
-        from hermes_logging import setup_logging, setup_verbose_logging
-        setup_logging(hermes_home=_hermes_home)
+        # Persistent error log -- always writes WARNING+ to ~/.hermes/logs/errors.log
+        # so tool failures, API errors, etc. are inspectable after the fact.
+        # In gateway mode, each incoming message creates a new AIAgent instance,
+        # while the root logger is process-global. Re-adding the same errors.log
+        # handler would cause each warning/error line to be written multiple times.
+        from logging.handlers import RotatingFileHandler
+        root_logger = logging.getLogger()
+        error_log_dir = _hermes_home / "logs"
+        error_log_path = error_log_dir / "errors.log"
+        resolved_error_log_path = error_log_path.resolve()
+        has_errors_log_handler = any(
+            isinstance(handler, RotatingFileHandler)
+            and Path(getattr(handler, "baseFilename", "")).resolve() == resolved_error_log_path
+            for handler in root_logger.handlers
+        )
+        from agent.redact import RedactingFormatter
+        if not has_errors_log_handler:
+            error_log_dir.mkdir(parents=True, exist_ok=True)
+            error_file_handler = RotatingFileHandler(
+                error_log_path, maxBytes=2 * 1024 * 1024, backupCount=2,
+            )
+            error_file_handler.setLevel(logging.WARNING)
+            error_file_handler.setFormatter(RedactingFormatter(
+                '%(asctime)s %(levelname)s %(name)s: %(message)s',
+            ))
+            root_logger.addHandler(error_file_handler)
 
         if self.verbose_logging:
             setup_verbose_logging()
@@ -1735,7 +1734,6 @@ class AIAgent:
         content = re.sub(r'<thinking>.*?</thinking>', '', content, flags=re.DOTALL | re.IGNORECASE)
         content = re.sub(r'<reasoning>.*?</reasoning>', '', content, flags=re.DOTALL)
         content = re.sub(r'<REASONING_SCRATCHPAD>.*?</REASONING_SCRATCHPAD>', '', content, flags=re.DOTALL)
-        content = re.sub(r'</?(?:think|thinking|reasoning|REASONING_SCRATCHPAD)>\s*', '', content, flags=re.IGNORECASE)
         return content
 
     def _looks_like_codex_intermediate_ack(
@@ -2067,10 +2065,7 @@ class AIAgent:
         """Save session state to both JSON log and SQLite on any exit path.
 
         Ensures conversations are never lost, even on errors or early returns.
-        Skipped when ``persist_session=False`` (ephemeral helper flows).
         """
-        if not self.persist_session:
-            return
         self._apply_persist_user_message_override(messages)
         self._session_messages = messages
         self._save_session_log(messages)
@@ -2894,6 +2889,161 @@ class AIAgent:
 
 
 
+        from tools.honcho_tools import set_session_context
+
+        set_session_context(self._honcho, self._honcho_session_key)
+
+        # Rebuild tool surface after Honcho context injection. Tool availability
+        # is check_fn-gated and may change once session context is attached.
+        self.tools = get_tool_definitions(
+            enabled_toolsets=enabled_toolsets,
+            disabled_toolsets=disabled_toolsets,
+            quiet_mode=True,
+        )
+        self.valid_tool_names = {
+            tool["function"]["name"] for tool in self.tools
+        } if self.tools else set()
+
+        if hcfg.recall_mode == "context":
+            self._strip_honcho_tools_from_surface()
+            if not self.quiet_mode:
+                print("  Honcho active — recall_mode: context (Honcho tools hidden)")
+        else:
+            if not self.quiet_mode:
+                print(f"  Honcho active — recall_mode: {hcfg.recall_mode}")
+
+        logger.info(
+            "Honcho active (session: %s, user: %s, workspace: %s, "
+            "write_frequency: %s, memory_mode: %s)",
+            self._honcho_session_key,
+            hcfg.peer_name,
+            hcfg.workspace_id,
+            hcfg.write_frequency,
+            hcfg.memory_mode,
+        )
+
+        recall_mode = hcfg.recall_mode
+        if recall_mode != "tools":
+            try:
+                ctx = self._honcho.get_prefetch_context(self._honcho_session_key)
+                if ctx:
+                    self._honcho.set_context_result(self._honcho_session_key, ctx)
+                    logger.debug("Honcho context pre-warmed for first turn")
+            except Exception as exc:
+                logger.debug("Honcho context prefetch failed (non-fatal): %s", exc)
+
+        self._register_honcho_exit_hook()
+
+    def _register_honcho_exit_hook(self) -> None:
+        """Register a process-exit flush hook without clobbering signal handlers."""
+        if self._honcho_exit_hook_registered or not self._honcho:
+            return
+
+        honcho_ref = weakref.ref(self._honcho)
+
+        def _flush_honcho_on_exit():
+            manager = honcho_ref()
+            if manager is None:
+                return
+            try:
+                manager.flush_all()
+            except (Exception, KeyboardInterrupt) as exc:
+                logger.debug("Honcho flush on exit failed (non-fatal): %s", exc)
+
+        atexit.register(_flush_honcho_on_exit)
+        self._honcho_exit_hook_registered = True
+
+    def _queue_honcho_prefetch(self, user_message: str) -> None:
+        """Queue turn-end Honcho prefetch so the next turn can consume cached results."""
+        if not self._honcho or not self._honcho_session_key:
+            return
+
+        recall_mode = (self._honcho_config.recall_mode if self._honcho_config else "hybrid")
+        if recall_mode == "tools":
+            return
+
+        try:
+            self._honcho.prefetch_context(self._honcho_session_key, user_message)
+            self._honcho.prefetch_dialectic(self._honcho_session_key, user_message or "What were we working on?")
+        except Exception as exc:
+            logger.debug("Honcho background prefetch failed (non-fatal): %s", exc)
+
+    def _honcho_prefetch(self, user_message: str) -> str:
+        """Assemble the first-turn Honcho context from the pre-warmed cache."""
+        if not self._honcho or not self._honcho_session_key:
+            return ""
+        try:
+            parts = []
+
+            ctx = self._honcho.pop_context_result(self._honcho_session_key)
+            if ctx:
+                rep = ctx.get("representation", "")
+                card = ctx.get("card", "")
+                if rep:
+                    parts.append(f"## User representation\n{rep}")
+                if card:
+                    parts.append(card)
+                ai_rep = ctx.get("ai_representation", "")
+                ai_card = ctx.get("ai_card", "")
+                if ai_rep:
+                    parts.append(f"## AI peer representation\n{ai_rep}")
+                if ai_card:
+                    parts.append(ai_card)
+
+            dialectic = self._honcho.pop_dialectic_result(self._honcho_session_key)
+            if dialectic:
+                parts.append(f"## Continuity synthesis\n{dialectic}")
+
+            if not parts:
+                return ""
+            header = (
+                "# Honcho Memory (persistent cross-session context)\n"
+                "Use this to answer questions about the user, prior sessions, "
+                "and what you were working on together. Do not call tools to "
+                "look up information that is already present here.\n"
+            )
+            return header + "\n\n".join(parts)
+        except Exception as e:
+            logger.debug("Honcho prefetch failed (non-fatal): %s", e)
+            return ""
+
+    def _honcho_save_user_observation(self, content: str) -> str:
+        """Route a memory tool target=user add to Honcho.
+
+        Sends the content as a user peer message so Honcho's reasoning
+        model can incorporate it into the user representation.
+        """
+        if not content or not content.strip():
+            return json.dumps({"success": False, "error": "Content cannot be empty."})
+        try:
+            session = self._honcho.get_or_create(self._honcho_session_key)
+            session.add_message("user", f"[observation] {content.strip()}")
+            self._honcho.save(session)
+            return json.dumps({
+                "success": True,
+                "target": "user",
+                "message": "Saved to Honcho user model.",
+            })
+        except Exception as e:
+            logger.debug("Honcho user observation failed: %s", e)
+            return json.dumps({"success": False, "error": f"Honcho save failed: {e}"})
+
+    def _honcho_sync(self, user_content: str, assistant_content: str) -> None:
+        """Sync the user/assistant message pair to Honcho."""
+        if not self._honcho or not self._honcho_session_key:
+            return
+        try:
+            session = self._honcho.get_or_create(self._honcho_session_key)
+            session.add_message("user", user_content)
+            session.add_message("assistant", assistant_content)
+            self._honcho.save(session)
+            logger.info("Honcho sync queued for session %s (%d messages)",
+                        self._honcho_session_key, len(session.messages))
+        except Exception as e:
+            logger.warning("Honcho sync failed: %s", e)
+            if not self.quiet_mode:
+                print(f"  Honcho write failed: {e}")
+
     def _build_system_prompt(self, system_message: str = None, user_message: str = "") -> str:
         """
         Assemble the full system prompt from all layers.
@@ -2922,6 +3072,12 @@ class AIAgent:
         if not _soul_loaded:
             # Fallback to hardcoded identity
             prompt_parts = [DEFAULT_AGENT_IDENTITY]
+
+        # Business identity profile (from onboarding)
+        if not self.skip_context_files:
+            _biz_profile = load_business_profile()
+            if _biz_profile:
+                prompt_parts.append(_biz_profile)
 
         # Business identity profile (from onboarding)
         if not self.skip_context_files:
@@ -3302,19 +3458,6 @@ class AIAgent:
         return converted or None
 
     @staticmethod
-    def _deterministic_call_id(fn_name: str, arguments: str, index: int = 0) -> str:
-        """Generate a deterministic call_id from tool call content.
-
-        Used as a fallback when the API doesn't provide a call_id.
-        Deterministic IDs prevent cache invalidation — random UUIDs would
-        make every API call's prefix unique, breaking OpenAI's prompt cache.
-        """
-        import hashlib
-        seed = f"{fn_name}:{arguments}:{index}"
-        digest = hashlib.sha256(seed.encode("utf-8", errors="replace")).hexdigest()[:12]
-        return f"call_{digest}"
-
-    @staticmethod
     def _split_responses_tool_id(raw_id: Any) -> tuple[Optional[str], Optional[str]]:
         """Split a stored tool id into (call_id, response_item_id)."""
         if not isinstance(raw_id, str):
@@ -3420,8 +3563,7 @@ class AIAgent:
                                 ):
                                     call_id = f"call_{embedded_response_item_id[len('fc_'):]}"
                                 else:
-                                    _raw_args = str(fn.get("arguments", "{}"))
-                                    call_id = self._deterministic_call_id(fn_name, _raw_args, len(items))
+                                    call_id = f"call_{uuid.uuid4().hex[:12]}"
                             call_id = call_id.strip()
 
                             arguments = fn.get("arguments", "{}")
@@ -3624,10 +3766,9 @@ class AIAgent:
             "model": model,
             "instructions": instructions,
             "input": normalized_input,
+            "tools": normalized_tools,
             "store": False,
         }
-        if normalized_tools is not None:
-            normalized["tools"] = normalized_tools
 
         # Pass through reasoning config
         reasoning = api_kwargs.get("reasoning")
@@ -3804,7 +3945,7 @@ class AIAgent:
                 embedded_call_id, _ = self._split_responses_tool_id(raw_item_id)
                 call_id = raw_call_id if isinstance(raw_call_id, str) and raw_call_id.strip() else embedded_call_id
                 if not isinstance(call_id, str) or not call_id.strip():
-                    call_id = self._deterministic_call_id(fn_name, arguments, len(tool_calls))
+                    call_id = f"call_{uuid.uuid4().hex[:12]}"
                 call_id = call_id.strip()
                 response_item_id = raw_item_id if isinstance(raw_item_id, str) else None
                 response_item_id = self._derive_responses_function_call_id(call_id, response_item_id)
@@ -3825,7 +3966,7 @@ class AIAgent:
                 embedded_call_id, _ = self._split_responses_tool_id(raw_item_id)
                 call_id = raw_call_id if isinstance(raw_call_id, str) and raw_call_id.strip() else embedded_call_id
                 if not isinstance(call_id, str) or not call_id.strip():
-                    call_id = self._deterministic_call_id(fn_name, arguments, len(tool_calls))
+                    call_id = f"call_{uuid.uuid4().hex[:12]}"
                 call_id = call_id.strip()
                 response_item_id = raw_item_id if isinstance(raw_item_id, str) else None
                 response_item_id = self._derive_responses_function_call_id(call_id, response_item_id)
@@ -3890,33 +4031,14 @@ class AIAgent:
 
     @staticmethod
     def _is_openai_client_closed(client: Any) -> bool:
-        """Check if an OpenAI client is closed.
-
-        Handles both property and method forms of is_closed:
-        - httpx.Client.is_closed is a bool property
-        - openai.OpenAI.is_closed is a method returning bool
-
-        Prior bug: getattr(client, "is_closed", False) returned the bound method,
-        which is always truthy, causing unnecessary client recreation on every call.
-        """
         from unittest.mock import Mock
 
         if isinstance(client, Mock):
             return False
-
-        is_closed_attr = getattr(client, "is_closed", None)
-        if is_closed_attr is not None:
-            # Handle method (openai SDK) vs property (httpx)
-            if callable(is_closed_attr):
-                if is_closed_attr():
-                    return True
-            elif bool(is_closed_attr):
-                return True
-
+        if bool(getattr(client, "is_closed", False)):
+            return True
         http_client = getattr(client, "_client", None)
-        if http_client is not None:
-            return bool(getattr(http_client, "is_closed", False))
-        return False
+        return bool(getattr(http_client, "is_closed", False))
 
     def _create_openai_client(self, client_kwargs: dict, *, reason: str, shared: bool) -> Any:
         if self.provider == "copilot-acp" or str(client_kwargs.get("base_url", "")).startswith("acp://copilot"):
@@ -4140,8 +4262,6 @@ class AIAgent:
 
     def _run_codex_stream(self, api_kwargs: dict, client: Any = None, on_first_delta: callable = None):
         """Execute one streaming Responses API request and return the final response."""
-        import httpx as _httpx
-
         active_client = client or self._ensure_primary_openai_client(reason="codex_stream_direct")
         max_stream_retries = 1
         has_tool_calls = False
@@ -4180,67 +4300,7 @@ class AIAgent:
                             reasoning_text = getattr(event, "delta", "")
                             if reasoning_text:
                                 self._fire_reasoning_delta(reasoning_text)
-                        # Collect completed output items — some backends
-                        # (chatgpt.com/backend-api/codex) stream valid items
-                        # via response.output_item.done but the SDK's
-                        # get_final_response() returns an empty output list.
-                        elif event_type == "response.output_item.done":
-                            done_item = getattr(event, "item", None)
-                            if done_item is not None:
-                                collected_output_items.append(done_item)
-                        # Log non-completed terminal events for diagnostics
-                        elif event_type in ("response.incomplete", "response.failed"):
-                            resp_obj = getattr(event, "response", None)
-                            status = getattr(resp_obj, "status", None) if resp_obj else None
-                            incomplete_details = getattr(resp_obj, "incomplete_details", None) if resp_obj else None
-                            logger.warning(
-                                "Codex Responses stream received terminal event %s "
-                                "(status=%s, incomplete_details=%s, streamed_chars=%d). %s",
-                                event_type, status, incomplete_details,
-                                sum(len(p) for p in self._codex_streamed_text_parts),
-                                self._client_log_context(),
-                            )
-                    final_response = stream.get_final_response()
-                    # PATCH: ChatGPT Codex backend streams valid output items
-                    # but get_final_response() can return an empty output list.
-                    # Backfill from collected items or synthesize from deltas.
-                    _out = getattr(final_response, "output", None)
-                    if isinstance(_out, list) and not _out:
-                        if collected_output_items:
-                            final_response.output = list(collected_output_items)
-                            logger.debug(
-                                "Codex stream: backfilled %d output items from stream events",
-                                len(collected_output_items),
-                            )
-                        elif self._codex_streamed_text_parts and not has_tool_calls:
-                            assembled = "".join(self._codex_streamed_text_parts)
-                            final_response.output = [SimpleNamespace(
-                                type="message",
-                                role="assistant",
-                                status="completed",
-                                content=[SimpleNamespace(type="output_text", text=assembled)],
-                            )]
-                            logger.debug(
-                                "Codex stream: synthesized output from %d text deltas (%d chars)",
-                                len(self._codex_streamed_text_parts), len(assembled),
-                            )
-                    return final_response
-            except (_httpx.RemoteProtocolError, _httpx.ReadTimeout, _httpx.ConnectError, ConnectionError) as exc:
-                if attempt < max_stream_retries:
-                    logger.debug(
-                        "Codex Responses stream transport failed (attempt %s/%s); retrying. %s error=%s",
-                        attempt + 1,
-                        max_stream_retries + 1,
-                        self._client_log_context(),
-                        exc,
-                    )
-                    continue
-                logger.debug(
-                    "Codex Responses stream transport failed; falling back to create(stream=True). %s error=%s",
-                    self._client_log_context(),
-                    exc,
-                )
-                return self._run_codex_create_stream_fallback(api_kwargs, client=active_client)
+                    return stream.get_final_response()
             except RuntimeError as exc:
                 err_text = str(exc)
                 missing_completed = "response.completed" in err_text
@@ -4439,134 +4499,6 @@ class AIAgent:
         from agent.anthropic_adapter import _is_oauth_token
         self._is_anthropic_oauth = _is_oauth_token(new_token)
         return True
-
-    def _apply_client_headers_for_base_url(self, base_url: str) -> None:
-        from agent.auxiliary_client import _OR_HEADERS
-
-        normalized = (base_url or "").lower()
-        if "openrouter" in normalized:
-            self._client_kwargs["default_headers"] = dict(_OR_HEADERS)
-        elif "api.githubcopilot.com" in normalized:
-            from hermes_cli.models import copilot_default_headers
-
-            self._client_kwargs["default_headers"] = copilot_default_headers()
-        elif "api.kimi.com" in normalized:
-            self._client_kwargs["default_headers"] = {"User-Agent": "KimiCLI/1.30.0"}
-        elif "portal.qwen.ai" in normalized:
-            self._client_kwargs["default_headers"] = _qwen_portal_headers()
-        else:
-            self._client_kwargs.pop("default_headers", None)
-
-    def _swap_credential(self, entry) -> None:
-        runtime_key = getattr(entry, "runtime_api_key", None) or getattr(entry, "access_token", "")
-        runtime_base = getattr(entry, "runtime_base_url", None) or getattr(entry, "base_url", None) or self.base_url
-
-        if self.api_mode == "anthropic_messages":
-            from agent.anthropic_adapter import build_anthropic_client, _is_oauth_token
-
-            try:
-                self._anthropic_client.close()
-            except Exception:
-                pass
-
-            self._anthropic_api_key = runtime_key
-            self._anthropic_base_url = runtime_base
-            self._anthropic_client = build_anthropic_client(runtime_key, runtime_base)
-            self._is_anthropic_oauth = _is_oauth_token(runtime_key)
-            self.api_key = runtime_key
-            self.base_url = runtime_base
-            return
-
-        self.api_key = runtime_key
-        self.base_url = runtime_base.rstrip("/") if isinstance(runtime_base, str) else runtime_base
-        self._client_kwargs["api_key"] = self.api_key
-        self._client_kwargs["base_url"] = self.base_url
-        self._apply_client_headers_for_base_url(self.base_url)
-        self._replace_primary_openai_client(reason="credential_rotation")
-
-    def _recover_with_credential_pool(
-        self,
-        *,
-        status_code: Optional[int],
-        has_retried_429: bool,
-        classified_reason: Optional[FailoverReason] = None,
-        error_context: Optional[Dict[str, Any]] = None,
-    ) -> tuple[bool, bool]:
-        """Attempt credential recovery via pool rotation.
-
-        Returns (recovered, has_retried_429).
-        On rate limits: first occurrence retries same credential (sets flag True).
-                        second consecutive failure rotates to next credential.
-        On billing exhaustion: immediately rotates.
-        On auth failures: attempts token refresh before rotating.
-
-        `classified_reason` lets the recovery path honor the structured error
-        classifier instead of relying only on raw HTTP codes. This matters for
-        providers that surface billing/rate-limit/auth conditions under a
-        different status code, such as Anthropic returning HTTP 400 for
-        "out of extra usage".
-        """
-        pool = self._credential_pool
-        if pool is None:
-            return False, has_retried_429
-
-        effective_reason = classified_reason
-        if effective_reason is None:
-            if status_code == 402:
-                effective_reason = FailoverReason.billing
-            elif status_code == 429:
-                effective_reason = FailoverReason.rate_limit
-            elif status_code == 401:
-                effective_reason = FailoverReason.auth
-
-        if effective_reason == FailoverReason.billing:
-            rotate_status = status_code if status_code is not None else 402
-            next_entry = pool.mark_exhausted_and_rotate(status_code=rotate_status, error_context=error_context)
-            if next_entry is not None:
-                logger.info(
-                    "Credential %s (billing) — rotated to pool entry %s",
-                    rotate_status,
-                    getattr(next_entry, "id", "?"),
-                )
-                self._swap_credential(next_entry)
-                return True, False
-            return False, has_retried_429
-
-        if effective_reason == FailoverReason.rate_limit:
-            if not has_retried_429:
-                return False, True
-            rotate_status = status_code if status_code is not None else 429
-            next_entry = pool.mark_exhausted_and_rotate(status_code=rotate_status, error_context=error_context)
-            if next_entry is not None:
-                logger.info(
-                    "Credential %s (rate limit) — rotated to pool entry %s",
-                    rotate_status,
-                    getattr(next_entry, "id", "?"),
-                )
-                self._swap_credential(next_entry)
-                return True, False
-            return False, True
-
-        if effective_reason == FailoverReason.auth:
-            refreshed = pool.try_refresh_current()
-            if refreshed is not None:
-                logger.info(f"Credential auth failure — refreshed pool entry {getattr(refreshed, 'id', '?')}")
-                self._swap_credential(refreshed)
-                return True, has_retried_429
-            # Refresh failed — rotate to next credential instead of giving up.
-            # The failed entry is already marked exhausted by try_refresh_current().
-            rotate_status = status_code if status_code is not None else 401
-            next_entry = pool.mark_exhausted_and_rotate(status_code=rotate_status, error_context=error_context)
-            if next_entry is not None:
-                logger.info(
-                    "Credential %s (auth refresh failed) — rotated to pool entry %s",
-                    rotate_status,
-                    getattr(next_entry, "id", "?"),
-                )
-                self._swap_credential(next_entry)
-                return True, False
-
-        return False, has_retried_429
 
     def _anthropic_messages_create(self, api_kwargs: dict):
         if self.api_mode == "anthropic_messages":
@@ -6000,17 +5932,15 @@ class AIAgent:
         if _is_nous:
             extra_body["tags"] = ["product=hermes-agent"]
 
-        # Ollama num_ctx: override the 2048 default so the model actually
-        # uses the context window it was trained for.  Passed via the OpenAI
-        # SDK's extra_body → options.num_ctx, which Ollama's OpenAI-compat
-        # endpoint forwards to the runner as --ctx-size.
-        if self._ollama_num_ctx:
-            options = extra_body.get("options", {})
-            options["num_ctx"] = self._ollama_num_ctx
-            extra_body["options"] = options
-
-        if self._is_qwen_portal():
-            extra_body["vl_high_resolution_images"] = True
+        # Ultrathink: boost reasoning effort to max for this turn
+        if getattr(self, '_ultrathink_active', False):
+            if _is_openrouter or self._supports_reasoning_extra_body():
+                effort = "max" if "opus" in self.model.lower() else "high"
+                if "reasoning" in extra_body:
+                    extra_body["reasoning"]["effort"] = effort
+                else:
+                    extra_body["reasoning"] = {"enabled": True, "effort": effort}
+                logger.info("[ultrathink] Boosted reasoning effort to '%s'", effort)
 
         if extra_body:
             api_kwargs["extra_body"] = extra_body
@@ -6027,6 +5957,16 @@ class AIAgent:
             api_kwargs.update(self.request_overrides)
 
         return api_kwargs
+
+    def _check_ultrathink(self, text: str) -> bool:
+        """Return True if message contains 'ultrathink' keyword."""
+        import re
+        return bool(re.search(r'\bultrathink\b', text, re.IGNORECASE))
+
+    def _strip_ultrathink(self, text: str) -> str:
+        """Remove 'ultrathink' keyword from message before sending to API."""
+        import re
+        return re.sub(r'\bultrathink\b\s*', '', text, flags=re.IGNORECASE).strip()
 
     def _supports_reasoning_extra_body(self) -> bool:
         """Return True when reasoning extra_body is safe to send for this route/model.
@@ -6173,10 +6113,7 @@ class AIAgent:
                     if isinstance(raw_id, str) and raw_id.strip():
                         call_id = raw_id.strip()
                     else:
-                        _fn = getattr(tool_call, "function", None)
-                        _fn_name = getattr(_fn, "name", "") if _fn else ""
-                        _fn_args = getattr(_fn, "arguments", "{}") if _fn else "{}"
-                        call_id = self._deterministic_call_id(_fn_name, _fn_args, len(tool_calls))
+                        call_id = f"call_{uuid.uuid4().hex[:12]}"
                 call_id = call_id.strip()
 
                 response_item_id = getattr(tool_call, "response_item_id", None)
@@ -6474,17 +6411,11 @@ class AIAgent:
             except Exception as e:
                 logger.warning("Session DB compression split failed — new session will NOT be indexed: %s", e)
 
-        # Warn on repeated compressions (quality degrades with each pass)
-        _cc = self.context_compressor.compression_count
-        if _cc >= 2:
-            self._vprint(
-                f"{self.log_prefix}⚠️  Session compressed {_cc} times — "
-                f"accuracy may degrade. Consider /new to start fresh.",
-                force=True,
-            )
-
-        # Update token estimate after compaction so pressure calculations
-        # use the post-compression count, not the stale pre-compression one.
+        # Reset context pressure warning and token estimate — usage drops
+        # after compaction.  Without this, the stale last_prompt_tokens from
+        # the previous API call causes the pressure calculation to stay at
+        # >1000% and spam warnings / re-trigger compression in a loop.
+        self._context_pressure_warned = False
         _compressed_est = (
             estimate_tokens_rough(new_system_prompt)
             + estimate_messages_tokens_rough(compressed)
@@ -6492,34 +6423,6 @@ class AIAgent:
         self.context_compressor.last_prompt_tokens = _compressed_est
         self.context_compressor.last_completion_tokens = 0
 
-        # Only reset the pressure warning if compression actually brought
-        # us below the warning level (85% of threshold).  When compression
-        # can't reduce enough (e.g. threshold is very low, or system prompt
-        # alone exceeds the warning level), keep the tier set to prevent
-        # spamming the user with repeated warnings every loop iteration.
-        if self.context_compressor.threshold_tokens > 0:
-            _post_progress = _compressed_est / self.context_compressor.threshold_tokens
-            if _post_progress < 0.85:
-                self._context_pressure_warned_at = 0.0
-                # Clear class-level dedup for this session so a fresh
-                # warning cycle can start if context grows again.
-                _sid = self.session_id or "default"
-                AIAgent._context_pressure_last_warned.pop(_sid, None)
-
-        # Clear the file-read dedup cache.  After compression the original
-        # read content is summarised away — if the model re-reads the same
-        # file it needs the full content, not a "file unchanged" stub.
-        try:
-            from tools.file_tools import reset_file_dedup
-            reset_file_dedup(task_id)
-        except Exception:
-            pass
-
-        logger.info(
-            "context compression done: session=%s messages=%d->%d tokens=~%s",
-            self.session_id or "none", _pre_msg_count, len(compressed),
-            f"{_compressed_est:,}",
-        )
         return compressed, new_system_prompt
 
     def _execute_tool_calls(self, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
@@ -7071,6 +6974,15 @@ class AIAgent:
         if isinstance(persist_user_message, str):
             persist_user_message = _sanitize_surrogates(persist_user_message)
 
+        # Detect ultrathink keyword in user message before appending to messages.
+        # Strip the keyword so it is never sent to the API verbatim.
+        if self._check_ultrathink(user_message):
+            self._ultrathink_active = True
+            user_message = self._strip_ultrathink(user_message)
+            logger.info("[ultrathink] Keyword detected — boosting reasoning to max")
+        else:
+            self._ultrathink_active = False
+
         # Store stream callback for _interruptible_api_call to pick up
         self._stream_callback = stream_callback
         self._persist_user_message_idx = None
@@ -7265,12 +7177,6 @@ class AIAgent:
                     )
                     if len(messages) >= _orig_len:
                         break  # Cannot compress further
-                    # Compression created a new session — clear the history
-                    # reference so _flush_messages_to_session_db writes ALL
-                    # compressed messages to the new session's SQLite, not
-                    # skipping them because conversation_history is still the
-                    # pre-compression length.
-                    conversation_history = None
                     # Re-estimate after compression
                     _preflight_tokens = estimate_request_tokens_rough(
                         messages,
@@ -7377,6 +7283,33 @@ class AIAgent:
         original_user_message = _turn["original_user_message"]
         _should_review_memory = _turn["_should_review_memory"]
 
+        # Clear magic docs registry for fresh session
+        try:
+            from agent.magic_docs import clear_registry
+            clear_registry()
+        except Exception:
+            pass
+
+        # Inject pre-loaded context from speculation (if available) on first turn
+        if not conversation_history:
+            try:
+                from agent.speculation import get_speculator
+                spec_context = get_speculator().get_context_injection(timeout=0.5)
+                if spec_context:
+                    if hasattr(self, 'ephemeral_system_prompt'):
+                        self.ephemeral_system_prompt = (self.ephemeral_system_prompt or "") + "\n\n" + spec_context
+                    logger.debug("[speculation] Injected %d chars of pre-loaded context", len(spec_context))
+            except Exception:
+                pass
+
+        # Prevent Mac from sleeping during agent work
+        try:
+            from agent.prevent_sleep import start_prevent_sleep
+            start_prevent_sleep()
+            _prevent_sleep_started = True
+        except Exception:
+            _prevent_sleep_started = False
+
         # Main conversation loop
         api_call_count = 0
         final_response = None
@@ -7386,23 +7319,9 @@ class AIAgent:
         truncated_tool_call_retries = 0
         truncated_response_prefix = ""
         compression_attempts = 0
-        _turn_exit_reason = "unknown"  # Diagnostic: why the loop ended
-        
+
         # Clear any stale interrupt state at start
         self.clear_interrupt()
-
-        # External memory provider: prefetch once before the tool loop.
-        # Reuse the cached result on every iteration to avoid re-calling
-        # prefetch_all() on each tool call (10 tool calls = 10x latency + cost).
-        # Use original_user_message (clean input) — user_message may contain
-        # injected skill content that bloats / breaks provider queries.
-        _ext_prefetch_cache = ""
-        if self._memory_manager:
-            try:
-                _query = original_user_message if isinstance(original_user_message, str) else ""
-                _ext_prefetch_cache = self._memory_manager.prefetch_all(_query) or ""
-            except Exception:
-                pass
 
         while api_call_count < self.max_iterations and self.iteration_budget.remaining > 0:
             # Reset per-turn checkpoint dedup so each iteration can take one snapshot
@@ -7502,11 +7421,9 @@ class AIAgent:
             max_retries = 3
             primary_recovery_attempted = False
             max_compression_attempts = 3
-            codex_auth_retry_attempted=False
-            anthropic_auth_retry_attempted=False
-            nous_auth_retry_attempted=False
-            thinking_sig_retry_attempted = False
-            has_retried_429 = False
+            codex_auth_retry_attempted = False
+            anthropic_auth_retry_attempted = False
+            nous_auth_retry_attempted = False
             restart_with_compressed_messages = False
             restart_with_length_continuation = False
 
@@ -8057,8 +7974,14 @@ class AIAgent:
                             if not self.quiet_mode:
                                 self._vprint(f"{self.log_prefix}   💾 Cache: {cached:,}/{prompt:,} tokens ({hit_pct:.0f}% hit, {written:,} written)")
                     
-                    has_retried_429 = False  # Reset on success
-                    self._touch_activity(f"API call #{api_call_count} completed")
+                    # Save cache params for forked subagents to reuse
+                    try:
+                        from agent.prompt_caching import build_cache_safe_params, save_cache_safe_params
+                        _system_prompt = self.system_prompt if hasattr(self, 'system_prompt') else ""
+                        save_cache_safe_params(build_cache_safe_params(_system_prompt, api_messages))
+                    except Exception:
+                        pass
+
                     break  # Success, exit retry loop
 
                 except InterruptedError:
@@ -8119,34 +8042,6 @@ class AIAgent:
                         # prompt or prefill. Fall through to normal error path.
 
                     status_code = getattr(api_error, "status_code", None)
-                    error_context = self._extract_api_error_context(api_error)
-
-                    # ── Classify the error for structured recovery decisions ──
-                    _compressor = getattr(self, "context_compressor", None)
-                    _ctx_len = getattr(_compressor, "context_length", 200000) if _compressor else 200000
-                    classified = classify_api_error(
-                        api_error,
-                        provider=getattr(self, "provider", "") or "",
-                        model=getattr(self, "model", "") or "",
-                        approx_tokens=approx_tokens,
-                        context_length=_ctx_len,
-                        num_messages=len(api_messages) if api_messages else 0,
-                    )
-                    logger.debug(
-                        "Error classified: reason=%s status=%s retryable=%s compress=%s rotate=%s fallback=%s",
-                        classified.reason.value, classified.status_code,
-                        classified.retryable, classified.should_compress,
-                        classified.should_rotate_credential, classified.should_fallback,
-                    )
-
-                    recovered_with_pool, has_retried_429 = self._recover_with_credential_pool(
-                        status_code=status_code,
-                        has_retried_429=has_retried_429,
-                        classified_reason=classified.reason,
-                        error_context=error_context,
-                    )
-                    if recovered_with_pool:
-                        continue
                     if (
                         self.api_mode == "codex_responses"
                         and self.provider == "openai-codex"
@@ -8362,17 +8257,10 @@ class AIAgent:
                         FailoverReason.billing,
                     )
                     if is_rate_limited and self._fallback_index < len(self._fallback_chain):
-                        # Don't eagerly fallback if credential pool rotation may
-                        # still recover.  The pool's retry-then-rotate cycle needs
-                        # at least one more attempt to fire — jumping to a fallback
-                        # provider here short-circuits it.
-                        pool = self._credential_pool
-                        pool_may_recover = pool is not None and pool.has_available()
-                        if not pool_may_recover:
-                            self._emit_status("⚠️ Rate limited — switching to fallback provider...")
-                            if self._try_activate_fallback():
-                                retry_count = 0
-                                continue
+                        self._emit_status("⚠️ Rate limited — switching to fallback provider...")
+                        if self._try_activate_fallback():
+                            retry_count = 0
+                            continue
 
                     is_payload_too_large = (
                         classified.reason == FailoverReason.payload_too_large
@@ -8382,7 +8270,6 @@ class AIAgent:
                         compression_attempts += 1
                         if compression_attempts > max_compression_attempts:
                             self._vprint(f"{self.log_prefix}❌ Max compression attempts ({max_compression_attempts}) reached for payload-too-large error.", force=True)
-                            self._vprint(f"{self.log_prefix}   💡 Try /new to start a fresh conversation, or /compress to retry compression.", force=True)
                             logging.error(f"{self.log_prefix}413 compression failed after {max_compression_attempts} attempts.")
                             self._persist_session(messages, conversation_history)
                             return {
@@ -8411,7 +8298,6 @@ class AIAgent:
                             break
                         else:
                             self._vprint(f"{self.log_prefix}❌ Payload too large and cannot compress further.", force=True)
-                            self._vprint(f"{self.log_prefix}   💡 Try /new to start a fresh conversation, or /compress to retry compression.", force=True)
                             logging.error(f"{self.log_prefix}413 payload too large. Cannot compress further.")
                             self._persist_session(messages, conversation_history)
                             return {
@@ -8512,7 +8398,6 @@ class AIAgent:
                         compression_attempts += 1
                         if compression_attempts > max_compression_attempts:
                             self._vprint(f"{self.log_prefix}❌ Max compression attempts ({max_compression_attempts}) reached.", force=True)
-                            self._vprint(f"{self.log_prefix}   💡 Try /new to start a fresh conversation, or /compress to retry compression.", force=True)
                             logging.error(f"{self.log_prefix}Context compression failed after {max_compression_attempts} attempts.")
                             self._persist_session(messages, conversation_history)
                             return {
@@ -8543,7 +8428,7 @@ class AIAgent:
                         else:
                             # Can't compress further and already at minimum tier
                             self._vprint(f"{self.log_prefix}❌ Context length exceeded and cannot compress further.", force=True)
-                            self._vprint(f"{self.log_prefix}   💡 The conversation has accumulated too much content. Try /new to start fresh, or /compress to manually trigger compression.", force=True)
+                            self._vprint(f"{self.log_prefix}   💡 The conversation has accumulated too much content.", force=True)
                             logging.error(f"{self.log_prefix}Context length exceeded: {approx_tokens:,} tokens. Cannot compress further.")
                             self._persist_session(messages, conversation_history)
                             return {
@@ -9224,10 +9109,6 @@ class AIAgent:
                             approx_tokens=self.context_compressor.last_prompt_tokens,
                             task_id=effective_task_id,
                         )
-                        # Compression created a new session — clear history so
-                        # _flush_messages_to_session_db writes compressed messages
-                        # to the new session (see preflight compression comment).
-                        conversation_history = None
                     
                     # Save session log incrementally (so progress is visible even if interrupted)
                     self._session_messages = messages
@@ -9512,7 +9393,7 @@ class AIAgent:
         # Determine if conversation completed successfully
         completed = final_response is not None and api_call_count < self.max_iterations
 
-        return self._build_result(
+        _result = self._build_result(
             api_call_count=api_call_count,
             completed=completed,
             interrupted=interrupted,
@@ -9525,6 +9406,16 @@ class AIAgent:
             effective_task_id=effective_task_id,
             sync_honcho=sync_honcho,
         )
+
+        # Release sleep prevention
+        if _prevent_sleep_started:
+            try:
+                from agent.prevent_sleep import stop_prevent_sleep
+                stop_prevent_sleep()
+            except Exception:
+                pass
+
+        return _result
 
     def chat(self, message: str, stream_callback: Optional[callable] = None) -> str:
         """
