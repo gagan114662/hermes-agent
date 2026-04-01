@@ -23,6 +23,7 @@ _DEFAULT_TASKS_PATH = os.path.expanduser("~/.hermes/scheduled_tasks.json")
 # ---------------------------------------------------------------------------
 _kairos_active: bool = False
 _kairos_settings: Optional["KairosSettings"] = None
+_kairos_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -53,12 +54,14 @@ def load_kairos_settings(settings_path: str = _DEFAULT_SETTINGS_PATH) -> KairosS
 # State accessors
 # ---------------------------------------------------------------------------
 def is_kairos_active() -> bool:
-    return _kairos_active
+    with _kairos_lock:
+        return _kairos_active
 
 
 def set_kairos_active(value: bool) -> None:
     global _kairos_active
-    _kairos_active = value
+    with _kairos_lock:
+        _kairos_active = value
 
 
 # ---------------------------------------------------------------------------

@@ -1412,6 +1412,7 @@ class AIAgent:
             from agent.kairos import init_kairos
             self._kairos_active = init_kairos(self)
         except Exception:
+            logger.exception("Kairos init failed; running without assistant mode")
             self._kairos_active = False
 
     def reset_session_state(self):
@@ -2959,7 +2960,7 @@ class AIAgent:
             if kairos_addendum:
                 prompt_parts.append(kairos_addendum)
         except Exception:
-            pass
+            logger.warning("Kairos prompt addendum failed", exc_info=True)
 
         # Tool-use enforcement: tells the model to actually call tools instead
         # of describing intended actions.  Controlled by config.yaml
