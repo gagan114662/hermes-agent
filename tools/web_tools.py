@@ -1827,6 +1827,7 @@ registry.register(
     check_fn=check_web_api_key,
     requires_env=["EXA_API_KEY", "PARALLEL_API_KEY", "FIRECRAWL_API_KEY", "TAVILY_API_KEY"],
     emoji="🔍",
+    is_concurrency_safe=True,
 )
 registry.register(
     name="web_extract",
@@ -1838,4 +1839,5 @@ registry.register(
     requires_env=["EXA_API_KEY", "PARALLEL_API_KEY", "FIRECRAWL_API_KEY", "TAVILY_API_KEY"],
     is_async=True,
     emoji="📄",
+    is_concurrency_safe=True,
 )

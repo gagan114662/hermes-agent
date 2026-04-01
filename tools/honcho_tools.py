@@ -249,6 +249,7 @@ registry.register(
     handler=_handle_honcho_profile,
     check_fn=_check_honcho_available,
     emoji="🔮",
+    is_concurrency_safe=True,
 )
 
 registry.register(
@@ -258,6 +259,7 @@ registry.register(
     handler=_handle_honcho_search,
     check_fn=_check_honcho_available,
     emoji="🔮",
+    is_concurrency_safe=True,
 )
 
 registry.register(
@@ -267,6 +269,7 @@ registry.register(
     handler=_handle_honcho_context,
     check_fn=_check_honcho_available,
     emoji="🔮",
+    is_concurrency_safe=True,
 )
 
 registry.register(

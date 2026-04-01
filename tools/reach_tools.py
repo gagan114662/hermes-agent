@@ -493,6 +493,7 @@ registry.register(
     handler=lambda args, **kw: youtube_get_tool(args["url"]),
     check_fn=_check_yt_dlp,
     emoji="📺",
+    is_concurrency_safe=True,
 )
 
 registry.register(
@@ -513,6 +514,7 @@ registry.register(
     handler=lambda args, **kw: youtube_search_tool(args["query"], args.get("limit", 5)),
     check_fn=_check_yt_dlp,
     emoji="🔍",
+    is_concurrency_safe=True,
 )
 
 registry.register(
@@ -533,6 +535,7 @@ registry.register(
     check_fn=_check_bird,
     requires_env=["TWITTER_AUTH_TOKEN", "TWITTER_CT0"],
     emoji="🐦",
+    is_concurrency_safe=True,
 )
 
 registry.register(
@@ -554,6 +557,7 @@ registry.register(
     check_fn=_check_bird,
     requires_env=["TWITTER_AUTH_TOKEN", "TWITTER_CT0"],
     emoji="🐦",
+    is_concurrency_safe=True,
 )
 
 registry.register(
@@ -574,6 +578,7 @@ registry.register(
     handler=lambda args, **kw: reddit_read_tool(args["url"], args.get("comment_limit", 10)),
     check_fn=_check_always,
     emoji="🤖",
+    is_concurrency_safe=True,
 )
 
 registry.register(
@@ -595,6 +600,7 @@ registry.register(
     handler=lambda args, **kw: reddit_search_tool(args["query"], args.get("subreddit", ""), args.get("limit", 10)),
     check_fn=_check_always,
     emoji="🔍",
+    is_concurrency_safe=True,
 )
 
 registry.register(
@@ -615,6 +621,7 @@ registry.register(
     handler=lambda args, **kw: rss_fetch_tool(args["url"], args.get("limit", 10)),
     check_fn=_check_always,
     emoji="📡",
+    is_concurrency_safe=True,
 )
 
 registry.register(
@@ -634,4 +641,5 @@ registry.register(
     handler=lambda args, **kw: jina_read_tool(args["url"]),
     check_fn=_check_always,
     emoji="🌐",
+    is_concurrency_safe=True,
 )

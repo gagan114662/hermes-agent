@@ -1409,6 +1409,13 @@ class GatewayRunner:
         logger.info("Stopping gateway...")
         self._running = False
 
+        # Run registered cleanup functions (2s timeout)
+        try:
+            from agent.cleanup_registry import run_all_cleanups
+            run_all_cleanups(timeout=2.0)
+        except Exception:
+            pass
+
         for session_key, agent in list(self._running_agents.items()):
             if agent is _AGENT_PENDING_SENTINEL:
                 continue

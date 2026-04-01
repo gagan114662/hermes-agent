@@ -79,6 +79,8 @@ from hermes_constants import OPENROUTER_BASE_URL
 from agent.prompt_builder import (
     DEFAULT_AGENT_IDENTITY, PLATFORM_HINTS,
     MEMORY_GUIDANCE, SESSION_SEARCH_GUIDANCE, SKILLS_GUIDANCE,
+    TOOL_USE_GUIDANCE, SELF_CORRECTION_GUIDANCE, CRM_INTEGRITY_GUIDANCE,
+    PROACTIVE_BEHAVIORS_GUIDANCE,
 )
 from agent.model_metadata import (
     fetch_model_metadata,
@@ -88,7 +90,7 @@ from agent.model_metadata import (
 )
 from agent.context_compressor import ContextCompressor
 from agent.prompt_caching import apply_anthropic_cache_control
-from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, load_soul_md, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS
+from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, load_soul_md, load_business_profile, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
 from agent.display import (
     KawaiiSpinner, build_tool_preview as _build_tool_preview,
@@ -100,6 +102,8 @@ from agent.trajectory import (
     convert_scratchpad_to_think, has_incomplete_scratchpad,
     save_trajectory as _save_trajectory_to_file,
 )
+from agent.tool_executor import ToolExecutor
+from agent.pipeline import TurnState, TurnPipeline
 from utils import atomic_json_write
 
 HONCHO_TOOL_NAMES = {
@@ -216,7 +220,10 @@ class IterationBudget:
 _NEVER_PARALLEL_TOOLS = frozenset({"clarify"})
 
 # Read-only tools with no shared mutable session state.
-_PARALLEL_SAFE_TOOLS = frozenset({
+# NOTE: This frozenset is the legacy fallback for tools that have not yet
+# migrated to declaring ``is_concurrency_safe=True`` in registry.register().
+# New tools should use the registry flag instead of editing this set.
+_PARALLEL_SAFE_TOOLS_LEGACY = frozenset({
     "ha_get_state",
     "ha_list_entities",
     "ha_list_services",
@@ -232,6 +239,21 @@ _PARALLEL_SAFE_TOOLS = frozenset({
     "web_extract",
     "web_search",
 })
+
+
+def _get_parallel_safe_tools() -> frozenset:
+    """Return the union of registry-declared and legacy safe tools.
+
+    Registry-declared tools (``is_concurrency_safe=True``) take precedence;
+    the legacy set covers tools not yet migrated to self-declaration.
+    ``_NEVER_PARALLEL_TOOLS`` overrides both.
+    """
+    try:
+        from tools.registry import registry
+        declared = registry.get_concurrency_safe_tools()
+    except Exception:
+        declared = frozenset()
+    return (declared | _PARALLEL_SAFE_TOOLS_LEGACY) - _NEVER_PARALLEL_TOOLS
 
 # File tools can run concurrently when they target independent paths.
 _PATH_SCOPED_TOOLS = frozenset({"read_file", "write_file", "patch"})
@@ -305,7 +327,7 @@ def _should_parallelize_tool_batch(tool_calls) -> bool:
             reserved_paths.append(scoped_path)
             continue
 
-        if tool_name not in _PARALLEL_SAFE_TOOLS:
+        if tool_name not in _get_parallel_safe_tools():
             return False
 
     return True
@@ -320,12 +342,8 @@ def _extract_parallel_scope_path(tool_name: str, function_args: dict) -> Path | 
     if not isinstance(raw_path, str) or not raw_path.strip():
         return None
 
-    expanded = Path(raw_path).expanduser()
-    if expanded.is_absolute():
-        return Path(os.path.abspath(str(expanded)))
-
     # Avoid resolve(); the file may not exist yet.
-    return Path(os.path.abspath(str(Path.cwd() / expanded)))
+    return Path(raw_path).expanduser()
 
 
 def _paths_overlap(left: Path, right: Path) -> bool:
@@ -490,8 +508,6 @@ class AIAgent:
         provider_data_collection: str = None,
         session_id: str = None,
         tool_progress_callback: callable = None,
-        tool_start_callback: callable = None,
-        tool_complete_callback: callable = None,
         thinking_callback: callable = None,
         reasoning_callback: callable = None,
         clarify_callback: callable = None,
@@ -511,11 +527,9 @@ class AIAgent:
         honcho_config=None,
         iteration_budget: "IterationBudget" = None,
         fallback_model: Dict[str, Any] = None,
-        credential_pool=None,
         checkpoints_enabled: bool = False,
         checkpoint_max_snapshots: int = 50,
         pass_session_id: bool = False,
-        persist_session: bool = True,
     ):
         """
         Initialize the AI Agent.
@@ -581,8 +595,6 @@ class AIAgent:
         self.background_review_callback = None  # Optional sync callback for gateway delivery
         self.skip_context_files = skip_context_files
         self.pass_session_id = pass_session_id
-        self.persist_session = persist_session
-        self._credential_pool = credential_pool
         self.log_prefix_chars = log_prefix_chars
         self.log_prefix = f"{log_prefix} " if log_prefix else ""
         # Store effective base URL for feature detection (prompt caching, reasoning, etc.)
@@ -626,8 +638,6 @@ class AIAgent:
             ).start()
 
         self.tool_progress_callback = tool_progress_callback
-        self.tool_start_callback = tool_start_callback
-        self.tool_complete_callback = tool_complete_callback
         self.thinking_callback = thinking_callback
         self.reasoning_callback = reasoning_callback
         self._reasoning_deltas_fired = False  # Set by _fire_reasoning_delta, reset per API call
@@ -689,6 +699,10 @@ class AIAgent:
         # fills up.  Purely informational — displayed in CLI output and sent via
         # status_callback for gateway platforms.  Does NOT inject into messages.
         self._context_pressure_warned = False
+
+        # Ultrathink: per-turn flag to boost reasoning effort to max when the
+        # user includes the 'ultrathink' keyword in their message.
+        self._ultrathink_active = False
 
         # Persistent error log -- always writes WARNING+ to ~/.hermes/logs/errors.log
         # so tool failures, API errors, etc. are inspectable after the fact.
@@ -1229,12 +1243,27 @@ class AIAgent:
         self.session_estimated_cost_usd = 0.0
         self.session_cost_status = "unknown"
         self.session_cost_source = "none"
-        
+
+        # Per-tool cost attribution (C3) — also reset in reset_session_state()
+        self._tool_cost_entries: list = []   # List[ToolCostEntry]
+        self._current_turn_tool_names: list = []   # tools called this API turn
+
         if not self.quiet_mode:
             if compression_enabled:
                 print(f"📊 Context limit: {self.context_compressor.context_length:,} tokens (compress at {int(compression_threshold*100)}% = {self.context_compressor.threshold_tokens:,})")
             else:
                 print(f"📊 Context limit: {self.context_compressor.context_length:,} tokens (auto-compression disabled)")
+
+        self._tool_executor = ToolExecutor(self)
+        self._pipeline = TurnPipeline(self)
+
+        # Kairos: init after all other setup
+        try:
+            from agent.kairos import init_kairos
+            self._kairos_active = init_kairos(self)
+        except Exception:
+            logger.exception("Kairos init failed; running without assistant mode")
+            self._kairos_active = False
 
     def reset_session_state(self):
         """Reset all session-scoped token counters to 0 for a fresh session.
@@ -1271,6 +1300,10 @@ class AIAgent:
         # Turn counter (added after reset_session_state was first written — #2635)
         self._user_turn_count = 0
 
+        # Per-tool cost attribution (C3)
+        self._tool_cost_entries: list = []   # List[ToolCostEntry]
+        self._current_turn_tool_names: list = []   # tools called this API turn
+
         # Context compressor internal counters (if present)
         if hasattr(self, "context_compressor") and self.context_compressor:
             self.context_compressor.last_prompt_tokens = 0
@@ -1281,7 +1314,16 @@ class AIAgent:
             self.context_compressor._context_probe_persistable = False
             # Iterative summary from previous session must not bleed into new one (#2635)
             self.context_compressor._previous_summary = None
-    
+
+        # Load buddy companion (non-critical, fire-and-forget)
+        self._buddy = None
+        try:
+            from agent.buddy import load_or_create_buddy
+            seed = getattr(self, 'session_id', None) or 'default'
+            self._buddy = load_or_create_buddy(seed)
+        except Exception:
+            pass
+
     def _safe_print(self, *args, **kwargs):
         """Print that silently handles broken pipes / closed stdout.
 
@@ -1397,7 +1439,6 @@ class AIAgent:
         content = re.sub(r'<thinking>.*?</thinking>', '', content, flags=re.DOTALL | re.IGNORECASE)
         content = re.sub(r'<reasoning>.*?</reasoning>', '', content, flags=re.DOTALL)
         content = re.sub(r'<REASONING_SCRATCHPAD>.*?</REASONING_SCRATCHPAD>', '', content, flags=re.DOTALL)
-        content = re.sub(r'</?(?:think|thinking|reasoning|REASONING_SCRATCHPAD)>\s*', '', content, flags=re.IGNORECASE)
         return content
 
     def _looks_like_codex_intermediate_ack(
@@ -1713,10 +1754,7 @@ class AIAgent:
         """Save session state to both JSON log and SQLite on any exit path.
 
         Ensures conversations are never lost, even on errors or early returns.
-        Skipped when ``persist_session=False`` (ephemeral helper flows).
         """
-        if not self.persist_session:
-            return
         self._apply_persist_user_message_override(messages)
         self._session_messages = messages
         self._save_session_log(messages)
@@ -2542,7 +2580,7 @@ class AIAgent:
             if not self.quiet_mode:
                 print(f"  Honcho write failed: {e}")
 
-    def _build_system_prompt(self, system_message: str = None) -> str:
+    def _build_system_prompt(self, system_message: str = None, user_message: str = "") -> str:
         """
         Assemble the full system prompt from all layers.
         
@@ -2584,6 +2622,12 @@ class AIAgent:
                 _identity = DEFAULT_AGENT_IDENTITY
             prompt_parts = [_identity]
 
+        # Business identity profile (from onboarding)
+        if not self.skip_context_files:
+            _biz_profile = load_business_profile()
+            if _biz_profile:
+                prompt_parts.append(_biz_profile)
+
         # Tool-aware behavioral guidance: only inject when the tools are loaded
         tool_guidance = []
         if "memory" in self.valid_tool_names:
@@ -2594,6 +2638,28 @@ class AIAgent:
             tool_guidance.append(SKILLS_GUIDANCE)
         if tool_guidance:
             prompt_parts.append(" ".join(tool_guidance))
+
+        # C1: Behavioral guidance — tool use, self-correction, CRM integrity, proactive behaviors
+        prompt_parts.append(TOOL_USE_GUIDANCE)
+        prompt_parts.append(SELF_CORRECTION_GUIDANCE)
+        prompt_parts.append(CRM_INTEGRITY_GUIDANCE)
+        prompt_parts.append(PROACTIVE_BEHAVIORS_GUIDANCE)
+
+        # Coordinator: spawn-vs-continue decision framework for delegation
+        try:
+            from agent.coordinator import get_coordinator_prompt_addition
+            prompt_parts.append(get_coordinator_prompt_addition())
+        except Exception:
+            pass
+
+        # Kairos assistant mode addendum
+        try:
+            from agent.kairos import get_kairos_prompt_addendum
+            kairos_addendum = get_kairos_prompt_addendum()
+            if kairos_addendum:
+                prompt_parts.append(kairos_addendum)
+        except Exception:
+            logger.warning("Kairos prompt addendum failed", exc_info=True)
 
         # Tool-use enforcement: tells the model to actually call tools instead
         # of describing intended actions.  Controlled by config.yaml
@@ -2680,14 +2746,52 @@ class AIAgent:
 
         if self._memory_store:
             if self._memory_enabled:
-                mem_block = self._memory_store.format_for_system_prompt("memory")
-                if mem_block:
-                    prompt_parts.append(mem_block)
+                # If topic-file layout exists, use relevance scoring instead of flat store
+                _topic_memories_dir = os.path.expanduser("~/.hermes/memories")
+                _topic_index = os.path.join(_topic_memories_dir, "MEMORY.md")
+                _used_topic_layout = False
+                if os.path.isdir(_topic_memories_dir) and os.path.exists(_topic_index):
+                    # Check this is a topic index (contains markdown links), not flat store
+                    try:
+                        _idx_content = open(_topic_index, encoding="utf-8").read()
+                        if "- [" in _idx_content and "](" in _idx_content:
+                            try:
+                                from agent.memory_selector import select_relevant_memories
+                                _topic_block = select_relevant_memories(
+                                    user_message or "",
+                                    _topic_memories_dir,
+                                )
+                                if _topic_block:
+                                    from agent.prompt_builder import _render_topic_memory_block
+                                    prompt_parts.append(_render_topic_memory_block(_topic_block))
+                                    _used_topic_layout = True
+                            except Exception as _e:
+                                logger.debug("Topic memory selection failed, falling back: %s", _e)
+                    except Exception:
+                        pass
+                if not _used_topic_layout:
+                    mem_block = self._memory_store.format_for_system_prompt("memory")
+                    if mem_block:
+                        prompt_parts.append(mem_block)
             # USER.md is always included when enabled -- Honcho prefetch is additive.
             if self._user_profile_enabled:
                 user_block = self._memory_store.format_for_system_prompt("user")
                 if user_block:
                     prompt_parts.append(user_block)
+
+            # Team shared memory — inject if the file exists (capped at 1000 chars)
+            try:
+                from tools.memory_tool import TEAM_MEMORY_FILE
+                if os.path.exists(TEAM_MEMORY_FILE):
+                    with open(TEAM_MEMORY_FILE, encoding="utf-8") as _tf:
+                        _team_content = _tf.read(1000)
+                    if _team_content.strip():
+                        _sep = "═" * 46
+                        prompt_parts.append(
+                            f"{_sep}\nTEAM SHARED KNOWLEDGE\n{_sep}\n{_team_content.strip()}"
+                        )
+            except Exception:
+                pass
 
         has_skills_tools = any(name in self.valid_tool_names for name in ['skills_list', 'skill_view', 'skill_manage'])
         if has_skills_tools:
@@ -2924,19 +3028,6 @@ class AIAgent:
         return converted or None
 
     @staticmethod
-    def _deterministic_call_id(fn_name: str, arguments: str, index: int = 0) -> str:
-        """Generate a deterministic call_id from tool call content.
-
-        Used as a fallback when the API doesn't provide a call_id.
-        Deterministic IDs prevent cache invalidation — random UUIDs would
-        make every API call's prefix unique, breaking OpenAI's prompt cache.
-        """
-        import hashlib
-        seed = f"{fn_name}:{arguments}:{index}"
-        digest = hashlib.sha256(seed.encode("utf-8", errors="replace")).hexdigest()[:12]
-        return f"call_{digest}"
-
-    @staticmethod
     def _split_responses_tool_id(raw_id: Any) -> tuple[Optional[str], Optional[str]]:
         """Split a stored tool id into (call_id, response_item_id)."""
         if not isinstance(raw_id, str):
@@ -3042,8 +3133,7 @@ class AIAgent:
                                 ):
                                     call_id = f"call_{embedded_response_item_id[len('fc_'):]}"
                                 else:
-                                    _raw_args = str(fn.get("arguments", "{}"))
-                                    call_id = self._deterministic_call_id(fn_name, _raw_args, len(items))
+                                    call_id = f"call_{uuid.uuid4().hex[:12]}"
                             call_id = call_id.strip()
 
                             arguments = fn.get("arguments", "{}")
@@ -3246,10 +3336,9 @@ class AIAgent:
             "model": model,
             "instructions": instructions,
             "input": normalized_input,
+            "tools": normalized_tools,
             "store": False,
         }
-        if normalized_tools is not None:
-            normalized["tools"] = normalized_tools
 
         # Pass through reasoning config
         reasoning = api_kwargs.get("reasoning")
@@ -3408,7 +3497,7 @@ class AIAgent:
                 embedded_call_id, _ = self._split_responses_tool_id(raw_item_id)
                 call_id = raw_call_id if isinstance(raw_call_id, str) and raw_call_id.strip() else embedded_call_id
                 if not isinstance(call_id, str) or not call_id.strip():
-                    call_id = self._deterministic_call_id(fn_name, arguments, len(tool_calls))
+                    call_id = f"call_{uuid.uuid4().hex[:12]}"
                 call_id = call_id.strip()
                 response_item_id = raw_item_id if isinstance(raw_item_id, str) else None
                 response_item_id = self._derive_responses_function_call_id(call_id, response_item_id)
@@ -3429,7 +3518,7 @@ class AIAgent:
                 embedded_call_id, _ = self._split_responses_tool_id(raw_item_id)
                 call_id = raw_call_id if isinstance(raw_call_id, str) and raw_call_id.strip() else embedded_call_id
                 if not isinstance(call_id, str) or not call_id.strip():
-                    call_id = self._deterministic_call_id(fn_name, arguments, len(tool_calls))
+                    call_id = f"call_{uuid.uuid4().hex[:12]}"
                 call_id = call_id.strip()
                 response_item_id = raw_item_id if isinstance(raw_item_id, str) else None
                 response_item_id = self._derive_responses_function_call_id(call_id, response_item_id)
@@ -3494,33 +3583,14 @@ class AIAgent:
 
     @staticmethod
     def _is_openai_client_closed(client: Any) -> bool:
-        """Check if an OpenAI client is closed.
-
-        Handles both property and method forms of is_closed:
-        - httpx.Client.is_closed is a bool property
-        - openai.OpenAI.is_closed is a method returning bool
-
-        Prior bug: getattr(client, "is_closed", False) returned the bound method,
-        which is always truthy, causing unnecessary client recreation on every call.
-        """
         from unittest.mock import Mock
 
         if isinstance(client, Mock):
             return False
-
-        is_closed_attr = getattr(client, "is_closed", None)
-        if is_closed_attr is not None:
-            # Handle method (openai SDK) vs property (httpx)
-            if callable(is_closed_attr):
-                if is_closed_attr():
-                    return True
-            elif bool(is_closed_attr):
-                return True
-
+        if bool(getattr(client, "is_closed", False)):
+            return True
         http_client = getattr(client, "_client", None)
-        if http_client is not None:
-            return bool(getattr(http_client, "is_closed", False))
-        return False
+        return bool(getattr(http_client, "is_closed", False))
 
     def _create_openai_client(self, client_kwargs: dict, *, reason: str, shared: bool) -> Any:
         if self.provider == "copilot-acp" or str(client_kwargs.get("base_url", "")).startswith("acp://copilot"):
@@ -3611,8 +3681,6 @@ class AIAgent:
 
     def _run_codex_stream(self, api_kwargs: dict, client: Any = None, on_first_delta: callable = None):
         """Execute one streaming Responses API request and return the final response."""
-        import httpx as _httpx
-
         active_client = client or self._ensure_primary_openai_client(reason="codex_stream_direct")
         max_stream_retries = 1
         has_tool_calls = False
@@ -3646,22 +3714,6 @@ class AIAgent:
                             if reasoning_text:
                                 self._fire_reasoning_delta(reasoning_text)
                     return stream.get_final_response()
-            except (_httpx.RemoteProtocolError, _httpx.ReadTimeout, _httpx.ConnectError, ConnectionError) as exc:
-                if attempt < max_stream_retries:
-                    logger.debug(
-                        "Codex Responses stream transport failed (attempt %s/%s); retrying. %s error=%s",
-                        attempt + 1,
-                        max_stream_retries + 1,
-                        self._client_log_context(),
-                        exc,
-                    )
-                    continue
-                logger.debug(
-                    "Codex Responses stream transport failed; falling back to create(stream=True). %s error=%s",
-                    self._client_log_context(),
-                    exc,
-                )
-                return self._run_codex_create_stream_fallback(api_kwargs, client=active_client)
             except RuntimeError as exc:
                 err_text = str(exc)
                 missing_completed = "response.completed" in err_text
@@ -3823,100 +3875,6 @@ class AIAgent:
         from agent.anthropic_adapter import _is_oauth_token
         self._is_anthropic_oauth = _is_oauth_token(new_token)
         return True
-
-    def _apply_client_headers_for_base_url(self, base_url: str) -> None:
-        from agent.auxiliary_client import _OR_HEADERS
-
-        normalized = (base_url or "").lower()
-        if "openrouter" in normalized:
-            self._client_kwargs["default_headers"] = dict(_OR_HEADERS)
-        elif "api.githubcopilot.com" in normalized:
-            from hermes_cli.models import copilot_default_headers
-
-            self._client_kwargs["default_headers"] = copilot_default_headers()
-        elif "api.kimi.com" in normalized:
-            self._client_kwargs["default_headers"] = {"User-Agent": "KimiCLI/1.3"}
-        else:
-            self._client_kwargs.pop("default_headers", None)
-
-    def _swap_credential(self, entry) -> None:
-        runtime_key = getattr(entry, "runtime_api_key", None) or getattr(entry, "access_token", "")
-        runtime_base = getattr(entry, "runtime_base_url", None) or getattr(entry, "base_url", None) or self.base_url
-
-        if self.api_mode == "anthropic_messages":
-            from agent.anthropic_adapter import build_anthropic_client, _is_oauth_token
-
-            try:
-                self._anthropic_client.close()
-            except Exception:
-                pass
-
-            self._anthropic_api_key = runtime_key
-            self._anthropic_base_url = runtime_base
-            self._anthropic_client = build_anthropic_client(runtime_key, runtime_base)
-            self._is_anthropic_oauth = _is_oauth_token(runtime_key) if self.provider == "anthropic" else False
-            self.api_key = runtime_key
-            self.base_url = runtime_base
-            return
-
-        self.api_key = runtime_key
-        self.base_url = runtime_base.rstrip("/") if isinstance(runtime_base, str) else runtime_base
-        self._client_kwargs["api_key"] = self.api_key
-        self._client_kwargs["base_url"] = self.base_url
-        self._apply_client_headers_for_base_url(self.base_url)
-        self._replace_primary_openai_client(reason="credential_rotation")
-
-    def _recover_with_credential_pool(
-        self,
-        *,
-        status_code: Optional[int],
-        has_retried_429: bool,
-    ) -> tuple[bool, bool]:
-        """Attempt credential recovery via pool rotation.
-
-        Returns (recovered, has_retried_429).
-        On 429: first occurrence retries same credential (sets flag True).
-                second consecutive 429 rotates to next credential (resets flag).
-        On 402: immediately rotates (billing exhaustion won't resolve with retry).
-        On 401: attempts token refresh before rotating.
-        """
-        pool = self._credential_pool
-        if pool is None or status_code is None:
-            return False, has_retried_429
-
-        if status_code == 402:
-            next_entry = pool.mark_exhausted_and_rotate(status_code=402)
-            if next_entry is not None:
-                logger.info(f"Credential 402 (billing) — rotated to pool entry {getattr(next_entry, 'id', '?')}")
-                self._swap_credential(next_entry)
-                return True, False
-            return False, has_retried_429
-
-        if status_code == 429:
-            if not has_retried_429:
-                return False, True
-            next_entry = pool.mark_exhausted_and_rotate(status_code=429)
-            if next_entry is not None:
-                logger.info(f"Credential 429 (rate limit) — rotated to pool entry {getattr(next_entry, 'id', '?')}")
-                self._swap_credential(next_entry)
-                return True, False
-            return False, True
-
-        if status_code == 401:
-            refreshed = pool.try_refresh_current()
-            if refreshed is not None:
-                logger.info(f"Credential 401 — refreshed pool entry {getattr(refreshed, 'id', '?')}")
-                self._swap_credential(refreshed)
-                return True, has_retried_429
-            # Refresh failed — rotate to next credential instead of giving up.
-            # The failed entry is already marked exhausted by try_refresh_current().
-            next_entry = pool.mark_exhausted_and_rotate(status_code=401)
-            if next_entry is not None:
-                logger.info(f"Credential 401 (refresh failed) — rotated to pool entry {getattr(next_entry, 'id', '?')}")
-                self._swap_credential(next_entry)
-                return True, False
-
-        return False, has_retried_429
 
     def _anthropic_messages_create(self, api_kwargs: dict):
         if self.api_mode == "anthropic_messages":
@@ -4945,10 +4903,30 @@ class AIAgent:
         if _is_nous:
             extra_body["tags"] = ["product=hermes-agent"]
 
+        # Ultrathink: boost reasoning effort to max for this turn
+        if getattr(self, '_ultrathink_active', False):
+            if _is_openrouter or self._supports_reasoning_extra_body():
+                effort = "max" if "opus" in self.model.lower() else "high"
+                if "reasoning" in extra_body:
+                    extra_body["reasoning"]["effort"] = effort
+                else:
+                    extra_body["reasoning"] = {"enabled": True, "effort": effort}
+                logger.info("[ultrathink] Boosted reasoning effort to '%s'", effort)
+
         if extra_body:
             api_kwargs["extra_body"] = extra_body
 
         return api_kwargs
+
+    def _check_ultrathink(self, text: str) -> bool:
+        """Return True if message contains 'ultrathink' keyword."""
+        import re
+        return bool(re.search(r'\bultrathink\b', text, re.IGNORECASE))
+
+    def _strip_ultrathink(self, text: str) -> str:
+        """Remove 'ultrathink' keyword from message before sending to API."""
+        import re
+        return re.sub(r'\bultrathink\b\s*', '', text, flags=re.IGNORECASE).strip()
 
     def _supports_reasoning_extra_body(self) -> bool:
         """Return True when reasoning extra_body is safe to send for this route/model.
@@ -5095,10 +5073,7 @@ class AIAgent:
                     if isinstance(raw_id, str) and raw_id.strip():
                         call_id = raw_id.strip()
                     else:
-                        _fn = getattr(tool_call, "function", None)
-                        _fn_name = getattr(_fn, "name", "") if _fn else ""
-                        _fn_args = getattr(_fn, "arguments", "{}") if _fn else "{}"
-                        call_id = self._deterministic_call_id(_fn_name, _fn_args, len(tool_calls))
+                        call_id = f"call_{uuid.uuid4().hex[:12]}"
                 call_id = call_id.strip()
 
                 response_item_id = getattr(tool_call, "response_item_id", None)
@@ -5369,8 +5344,11 @@ class AIAgent:
             except Exception as e:
                 logger.warning("Session DB compression split failed — new session will NOT be indexed: %s", e)
 
-        # Update token estimate after compaction so pressure calculations
-        # use the post-compression count, not the stale pre-compression one.
+        # Reset context pressure warning and token estimate — usage drops
+        # after compaction.  Without this, the stale last_prompt_tokens from
+        # the previous API call causes the pressure calculation to stay at
+        # >1000% and spam warnings / re-trigger compression in a loop.
+        self._context_pressure_warned = False
         _compressed_est = (
             estimate_tokens_rough(new_system_prompt)
             + estimate_messages_tokens_rough(compressed)
@@ -5378,35 +5356,17 @@ class AIAgent:
         self.context_compressor.last_prompt_tokens = _compressed_est
         self.context_compressor.last_completion_tokens = 0
 
-        # Only reset the pressure warning if compression actually brought
-        # us below the warning level (85% of threshold).  When compression
-        # can't reduce enough (e.g. threshold is very low, or system prompt
-        # alone exceeds the warning level), keep the flag set to prevent
-        # spamming the user with repeated warnings every loop iteration.
-        if self.context_compressor.threshold_tokens > 0:
-            _post_progress = _compressed_est / self.context_compressor.threshold_tokens
-            if _post_progress < 0.85:
-                self._context_pressure_warned = False
-
-        # Clear the file-read dedup cache.  After compression the original
-        # read content is summarised away — if the model re-reads the same
-        # file it needs the full content, not a "file unchanged" stub.
-        try:
-            from tools.file_tools import reset_file_dedup
-            reset_file_dedup(task_id)
-        except Exception:
-            pass
-
         return compressed, new_system_prompt
 
     def _execute_tool_calls(self, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
-        """Execute tool calls from the assistant message and append results to messages.
-
-        Dispatches to concurrent execution only for batches that look
-        independent: read-only tools may always share the parallel path, while
-        file reads/writes may do so only when their target paths do not overlap.
-        """
         tool_calls = assistant_message.tool_calls
+
+        # Track which tools are about to run so cost attribution can
+        # apportion the next API response's token delta across them.
+        self._current_turn_tool_names = [
+            tc.function.name for tc in tool_calls
+            if hasattr(tc, "function") and hasattr(tc.function, "name")
+        ]
 
         # Allow _vprint during tool execution even with stream consumers
         self._executing_tools = True
@@ -5415,7 +5375,6 @@ class AIAgent:
                 return self._execute_tool_calls_sequential(
                     assistant_message, messages, effective_task_id, api_call_count
                 )
-
             return self._execute_tool_calls_concurrent(
                 assistant_message, messages, effective_task_id, api_call_count
             )
@@ -5423,563 +5382,13 @@ class AIAgent:
             self._executing_tools = False
 
     def _invoke_tool(self, function_name: str, function_args: dict, effective_task_id: str) -> str:
-        """Invoke a single tool and return the result string. No display logic.
-
-        Handles both agent-level tools (todo, memory, etc.) and registry-dispatched
-        tools. Used by the concurrent execution path; the sequential path retains
-        its own inline invocation for backward-compatible display handling.
-        """
-        if function_name == "todo":
-            from tools.todo_tool import todo_tool as _todo_tool
-            return _todo_tool(
-                todos=function_args.get("todos"),
-                merge=function_args.get("merge", False),
-                store=self._todo_store,
-            )
-        elif function_name == "session_search":
-            if not self._session_db:
-                return json.dumps({"success": False, "error": "Session database not available."})
-            from tools.session_search_tool import session_search as _session_search
-            return _session_search(
-                query=function_args.get("query", ""),
-                role_filter=function_args.get("role_filter"),
-                limit=function_args.get("limit", 3),
-                db=self._session_db,
-                current_session_id=self.session_id,
-            )
-        elif function_name == "memory":
-            target = function_args.get("target", "memory")
-            from tools.memory_tool import memory_tool as _memory_tool
-            result = _memory_tool(
-                action=function_args.get("action"),
-                target=target,
-                content=function_args.get("content"),
-                old_text=function_args.get("old_text"),
-                store=self._memory_store,
-            )
-            # Also send user observations to Honcho when active
-            if self._honcho and target == "user" and function_args.get("action") == "add":
-                self._honcho_save_user_observation(function_args.get("content", ""))
-            return result
-        elif function_name == "clarify":
-            from tools.clarify_tool import clarify_tool as _clarify_tool
-            return _clarify_tool(
-                question=function_args.get("question", ""),
-                choices=function_args.get("choices"),
-                callback=self.clarify_callback,
-            )
-        elif function_name == "delegate_task":
-            from tools.delegate_tool import delegate_task as _delegate_task
-            return _delegate_task(
-                goal=function_args.get("goal"),
-                context=function_args.get("context"),
-                toolsets=function_args.get("toolsets"),
-                tasks=function_args.get("tasks"),
-                max_iterations=function_args.get("max_iterations"),
-                parent_agent=self,
-            )
-        else:
-            return handle_function_call(
-                function_name, function_args, effective_task_id,
-                enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,
-                honcho_manager=self._honcho,
-                honcho_session_key=self._honcho_session_key,
-            )
+        return self._tool_executor.invoke_tool(function_name, function_args, effective_task_id)
 
     def _execute_tool_calls_concurrent(self, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
-        """Execute multiple tool calls concurrently using a thread pool.
-
-        Results are collected in the original tool-call order and appended to
-        messages so the API sees them in the expected sequence.
-        """
-        tool_calls = assistant_message.tool_calls
-        num_tools = len(tool_calls)
-
-        # ── Pre-flight: interrupt check ──────────────────────────────────
-        if self._interrupt_requested:
-            print(f"{self.log_prefix}⚡ Interrupt: skipping {num_tools} tool call(s)")
-            for tc in tool_calls:
-                messages.append({
-                    "role": "tool",
-                    "content": f"[Tool execution cancelled — {tc.function.name} was skipped due to user interrupt]",
-                    "tool_call_id": tc.id,
-                })
-            return
-
-        # ── Parse args + pre-execution bookkeeping ───────────────────────
-        parsed_calls = []  # list of (tool_call, function_name, function_args)
-        for tool_call in tool_calls:
-            function_name = tool_call.function.name
-
-            # Reset nudge counters
-            if function_name == "memory":
-                self._turns_since_memory = 0
-            elif function_name == "skill_manage":
-                self._iters_since_skill = 0
-
-            try:
-                function_args = json.loads(tool_call.function.arguments)
-            except json.JSONDecodeError:
-                function_args = {}
-            if not isinstance(function_args, dict):
-                function_args = {}
-
-            # Checkpoint for file-mutating tools
-            if function_name in ("write_file", "patch") and self._checkpoint_mgr.enabled:
-                try:
-                    file_path = function_args.get("path", "")
-                    if file_path:
-                        work_dir = self._checkpoint_mgr.get_working_dir_for_path(file_path)
-                        self._checkpoint_mgr.ensure_checkpoint(work_dir, f"before {function_name}")
-                except Exception:
-                    pass
-
-            # Checkpoint before destructive terminal commands
-            if function_name == "terminal" and self._checkpoint_mgr.enabled:
-                try:
-                    cmd = function_args.get("command", "")
-                    if _is_destructive_command(cmd):
-                        cwd = function_args.get("workdir") or os.getenv("TERMINAL_CWD", os.getcwd())
-                        self._checkpoint_mgr.ensure_checkpoint(
-                            cwd, f"before terminal: {cmd[:60]}"
-                        )
-                except Exception:
-                    pass
-
-            parsed_calls.append((tool_call, function_name, function_args))
-
-        # ── Logging / callbacks ──────────────────────────────────────────
-        tool_names_str = ", ".join(name for _, name, _ in parsed_calls)
-        if not self.quiet_mode:
-            print(f"  ⚡ Concurrent: {num_tools} tool calls — {tool_names_str}")
-            for i, (tc, name, args) in enumerate(parsed_calls, 1):
-                args_str = json.dumps(args, ensure_ascii=False)
-                if self.verbose_logging:
-                    print(f"  📞 Tool {i}: {name}({list(args.keys())})")
-                    print(f"     Args: {args_str}")
-                else:
-                    args_preview = args_str[:self.log_prefix_chars] + "..." if len(args_str) > self.log_prefix_chars else args_str
-                    print(f"  📞 Tool {i}: {name}({list(args.keys())}) - {args_preview}")
-
-        for tc, name, args in parsed_calls:
-            if self.tool_progress_callback:
-                try:
-                    preview = _build_tool_preview(name, args)
-                    self.tool_progress_callback(name, preview, args)
-                except Exception as cb_err:
-                    logging.debug(f"Tool progress callback error: {cb_err}")
-
-        for tc, name, args in parsed_calls:
-            if self.tool_start_callback:
-                try:
-                    self.tool_start_callback(tc.id, name, args)
-                except Exception as cb_err:
-                    logging.debug(f"Tool start callback error: {cb_err}")
-
-        # ── Concurrent execution ─────────────────────────────────────────
-        # Each slot holds (function_name, function_args, function_result, duration, error_flag)
-        results = [None] * num_tools
-
-        def _run_tool(index, tool_call, function_name, function_args):
-            """Worker function executed in a thread."""
-            start = time.time()
-            try:
-                result = self._invoke_tool(function_name, function_args, effective_task_id)
-            except Exception as tool_error:
-                result = f"Error executing tool '{function_name}': {tool_error}"
-                logger.error("_invoke_tool raised for %s: %s", function_name, tool_error, exc_info=True)
-            duration = time.time() - start
-            is_error, _ = _detect_tool_failure(function_name, result)
-            results[index] = (function_name, function_args, result, duration, is_error)
-
-        # Start spinner for CLI mode (skip when TUI handles tool progress)
-        spinner = None
-        if self.quiet_mode and not self.tool_progress_callback:
-            face = random.choice(KawaiiSpinner.KAWAII_WAITING)
-            spinner = KawaiiSpinner(f"{face} ⚡ running {num_tools} tools concurrently", spinner_type='dots', print_fn=self._print_fn)
-            spinner.start()
-
-        try:
-            max_workers = min(num_tools, _MAX_TOOL_WORKERS)
-            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = []
-                for i, (tc, name, args) in enumerate(parsed_calls):
-                    f = executor.submit(_run_tool, i, tc, name, args)
-                    futures.append(f)
-
-                # Wait for all to complete (exceptions are captured inside _run_tool)
-                concurrent.futures.wait(futures)
-        finally:
-            if spinner:
-                # Build a summary message for the spinner stop
-                completed = sum(1 for r in results if r is not None)
-                total_dur = sum(r[3] for r in results if r is not None)
-                spinner.stop(f"⚡ {completed}/{num_tools} tools completed in {total_dur:.1f}s total")
-
-        # ── Post-execution: display per-tool results ─────────────────────
-        for i, (tc, name, args) in enumerate(parsed_calls):
-            r = results[i]
-            if r is None:
-                # Shouldn't happen, but safety fallback
-                function_result = f"Error executing tool '{name}': thread did not return a result"
-                tool_duration = 0.0
-            else:
-                function_name, function_args, function_result, tool_duration, is_error = r
-
-                if is_error:
-                    result_preview = function_result[:200] if len(function_result) > 200 else function_result
-                    logger.warning("Tool %s returned error (%.2fs): %s", function_name, tool_duration, result_preview)
-
-                if self.verbose_logging:
-                    logging.debug(f"Tool {function_name} completed in {tool_duration:.2f}s")
-                    logging.debug(f"Tool result ({len(function_result)} chars): {function_result}")
-
-            # Print cute message per tool
-            if self.quiet_mode:
-                cute_msg = _get_cute_tool_message_impl(name, args, tool_duration, result=function_result)
-                self._safe_print(f"  {cute_msg}")
-            elif not self.quiet_mode:
-                if self.verbose_logging:
-                    print(f"  ✅ Tool {i+1} completed in {tool_duration:.2f}s")
-                    print(f"     Result: {function_result}")
-                else:
-                    response_preview = function_result[:self.log_prefix_chars] + "..." if len(function_result) > self.log_prefix_chars else function_result
-                    print(f"  ✅ Tool {i+1} completed in {tool_duration:.2f}s - {response_preview}")
-
-            if self.tool_complete_callback:
-                try:
-                    self.tool_complete_callback(tc.id, name, args, function_result)
-                except Exception as cb_err:
-                    logging.debug(f"Tool complete callback error: {cb_err}")
-
-            # Truncate oversized results
-            MAX_TOOL_RESULT_CHARS = 100_000
-            if len(function_result) > MAX_TOOL_RESULT_CHARS:
-                original_len = len(function_result)
-                function_result = (
-                    function_result[:MAX_TOOL_RESULT_CHARS]
-                    + f"\n\n[Truncated: tool response was {original_len:,} chars, "
-                    f"exceeding the {MAX_TOOL_RESULT_CHARS:,} char limit]"
-                )
-
-            # Append tool result message in order
-            tool_msg = {
-                "role": "tool",
-                "content": function_result,
-                "tool_call_id": tc.id,
-            }
-            messages.append(tool_msg)
-
-        # ── Budget pressure injection ────────────────────────────────────
-        budget_warning = self._get_budget_warning(api_call_count)
-        if budget_warning and messages and messages[-1].get("role") == "tool":
-            last_content = messages[-1]["content"]
-            try:
-                parsed = json.loads(last_content)
-                if isinstance(parsed, dict):
-                    parsed["_budget_warning"] = budget_warning
-                    messages[-1]["content"] = json.dumps(parsed, ensure_ascii=False)
-                else:
-                    messages[-1]["content"] = last_content + f"\n\n{budget_warning}"
-            except (json.JSONDecodeError, TypeError):
-                messages[-1]["content"] = last_content + f"\n\n{budget_warning}"
-            if not self.quiet_mode:
-                remaining = self.max_iterations - api_call_count
-                tier = "⚠️  WARNING" if remaining <= self.max_iterations * 0.1 else "💡 CAUTION"
-                print(f"{self.log_prefix}{tier}: {remaining} iterations remaining")
-
+        return self._tool_executor.execute_concurrent(assistant_message, messages, effective_task_id, api_call_count)
     def _execute_tool_calls_sequential(self, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
-        """Execute tool calls sequentially (original behavior). Used for single calls or interactive tools."""
-        for i, tool_call in enumerate(assistant_message.tool_calls, 1):
-            # SAFETY: check interrupt BEFORE starting each tool.
-            # If the user sent "stop" during a previous tool's execution,
-            # do NOT start any more tools -- skip them all immediately.
-            if self._interrupt_requested:
-                remaining_calls = assistant_message.tool_calls[i-1:]
-                if remaining_calls:
-                    self._vprint(f"{self.log_prefix}⚡ Interrupt: skipping {len(remaining_calls)} tool call(s)", force=True)
-                for skipped_tc in remaining_calls:
-                    skipped_name = skipped_tc.function.name
-                    skip_msg = {
-                        "role": "tool",
-                        "content": f"[Tool execution cancelled — {skipped_name} was skipped due to user interrupt]",
-                        "tool_call_id": skipped_tc.id,
-                    }
-                    messages.append(skip_msg)
-                break
+        return self._tool_executor.execute_sequential(assistant_message, messages, effective_task_id, api_call_count)
 
-            function_name = tool_call.function.name
-
-            # Reset nudge counters when the relevant tool is actually used
-            if function_name == "memory":
-                self._turns_since_memory = 0
-            elif function_name == "skill_manage":
-                self._iters_since_skill = 0
-
-            try:
-                function_args = json.loads(tool_call.function.arguments)
-            except json.JSONDecodeError as e:
-                logging.warning(f"Unexpected JSON error after validation: {e}")
-                function_args = {}
-            if not isinstance(function_args, dict):
-                function_args = {}
-
-            if not self.quiet_mode:
-                args_str = json.dumps(function_args, ensure_ascii=False)
-                if self.verbose_logging:
-                    print(f"  📞 Tool {i}: {function_name}({list(function_args.keys())})")
-                    print(f"     Args: {args_str}")
-                else:
-                    args_preview = args_str[:self.log_prefix_chars] + "..." if len(args_str) > self.log_prefix_chars else args_str
-                    print(f"  📞 Tool {i}: {function_name}({list(function_args.keys())}) - {args_preview}")
-
-            if self.tool_progress_callback:
-                try:
-                    preview = _build_tool_preview(function_name, function_args)
-                    self.tool_progress_callback(function_name, preview, function_args)
-                except Exception as cb_err:
-                    logging.debug(f"Tool progress callback error: {cb_err}")
-
-            if self.tool_start_callback:
-                try:
-                    self.tool_start_callback(tool_call.id, function_name, function_args)
-                except Exception as cb_err:
-                    logging.debug(f"Tool start callback error: {cb_err}")
-
-            # Checkpoint: snapshot working dir before file-mutating tools
-            if function_name in ("write_file", "patch") and self._checkpoint_mgr.enabled:
-                try:
-                    file_path = function_args.get("path", "")
-                    if file_path:
-                        work_dir = self._checkpoint_mgr.get_working_dir_for_path(file_path)
-                        self._checkpoint_mgr.ensure_checkpoint(
-                            work_dir, f"before {function_name}"
-                        )
-                except Exception:
-                    pass  # never block tool execution
-
-            # Checkpoint before destructive terminal commands
-            if function_name == "terminal" and self._checkpoint_mgr.enabled:
-                try:
-                    cmd = function_args.get("command", "")
-                    if _is_destructive_command(cmd):
-                        cwd = function_args.get("workdir") or os.getenv("TERMINAL_CWD", os.getcwd())
-                        self._checkpoint_mgr.ensure_checkpoint(
-                            cwd, f"before terminal: {cmd[:60]}"
-                        )
-                except Exception:
-                    pass  # never block tool execution
-
-            tool_start_time = time.time()
-
-            if function_name == "todo":
-                from tools.todo_tool import todo_tool as _todo_tool
-                function_result = _todo_tool(
-                    todos=function_args.get("todos"),
-                    merge=function_args.get("merge", False),
-                    store=self._todo_store,
-                )
-                tool_duration = time.time() - tool_start_time
-                if self.quiet_mode:
-                    self._vprint(f"  {_get_cute_tool_message_impl('todo', function_args, tool_duration, result=function_result)}")
-            elif function_name == "session_search":
-                if not self._session_db:
-                    function_result = json.dumps({"success": False, "error": "Session database not available."})
-                else:
-                    from tools.session_search_tool import session_search as _session_search
-                    function_result = _session_search(
-                        query=function_args.get("query", ""),
-                        role_filter=function_args.get("role_filter"),
-                        limit=function_args.get("limit", 3),
-                        db=self._session_db,
-                        current_session_id=self.session_id,
-                    )
-                tool_duration = time.time() - tool_start_time
-                if self.quiet_mode:
-                    self._vprint(f"  {_get_cute_tool_message_impl('session_search', function_args, tool_duration, result=function_result)}")
-            elif function_name == "memory":
-                target = function_args.get("target", "memory")
-                from tools.memory_tool import memory_tool as _memory_tool
-                function_result = _memory_tool(
-                    action=function_args.get("action"),
-                    target=target,
-                    content=function_args.get("content"),
-                    old_text=function_args.get("old_text"),
-                    store=self._memory_store,
-                )
-                # Also send user observations to Honcho when active
-                if self._honcho and target == "user" and function_args.get("action") == "add":
-                    self._honcho_save_user_observation(function_args.get("content", ""))
-                tool_duration = time.time() - tool_start_time
-                if self.quiet_mode:
-                    self._vprint(f"  {_get_cute_tool_message_impl('memory', function_args, tool_duration, result=function_result)}")
-            elif function_name == "clarify":
-                from tools.clarify_tool import clarify_tool as _clarify_tool
-                function_result = _clarify_tool(
-                    question=function_args.get("question", ""),
-                    choices=function_args.get("choices"),
-                    callback=self.clarify_callback,
-                )
-                tool_duration = time.time() - tool_start_time
-                if self.quiet_mode:
-                    self._vprint(f"  {_get_cute_tool_message_impl('clarify', function_args, tool_duration, result=function_result)}")
-            elif function_name == "delegate_task":
-                from tools.delegate_tool import delegate_task as _delegate_task
-                tasks_arg = function_args.get("tasks")
-                if tasks_arg and isinstance(tasks_arg, list):
-                    spinner_label = f"🔀 delegating {len(tasks_arg)} tasks"
-                else:
-                    goal_preview = (function_args.get("goal") or "")[:30]
-                    spinner_label = f"🔀 {goal_preview}" if goal_preview else "🔀 delegating"
-                spinner = None
-                if self.quiet_mode and not self.tool_progress_callback:
-                    face = random.choice(KawaiiSpinner.KAWAII_WAITING)
-                    spinner = KawaiiSpinner(f"{face} {spinner_label}", spinner_type='dots', print_fn=self._print_fn)
-                    spinner.start()
-                self._delegate_spinner = spinner
-                _delegate_result = None
-                try:
-                    function_result = _delegate_task(
-                        goal=function_args.get("goal"),
-                        context=function_args.get("context"),
-                        toolsets=function_args.get("toolsets"),
-                        tasks=tasks_arg,
-                        max_iterations=function_args.get("max_iterations"),
-                        parent_agent=self,
-                    )
-                    _delegate_result = function_result
-                finally:
-                    self._delegate_spinner = None
-                    tool_duration = time.time() - tool_start_time
-                    cute_msg = _get_cute_tool_message_impl('delegate_task', function_args, tool_duration, result=_delegate_result)
-                    if spinner:
-                        spinner.stop(cute_msg)
-                    elif self.quiet_mode:
-                        self._vprint(f"  {cute_msg}")
-            elif self.quiet_mode:
-                spinner = None
-                if not self.tool_progress_callback:
-                    face = random.choice(KawaiiSpinner.KAWAII_WAITING)
-                    emoji = _get_tool_emoji(function_name)
-                    preview = _build_tool_preview(function_name, function_args) or function_name
-                    spinner = KawaiiSpinner(f"{face} {emoji} {preview}", spinner_type='dots', print_fn=self._print_fn)
-                    spinner.start()
-                _spinner_result = None
-                try:
-                    function_result = handle_function_call(
-                        function_name, function_args, effective_task_id,
-                        enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,
-                        honcho_manager=self._honcho,
-                        honcho_session_key=self._honcho_session_key,
-                    )
-                    _spinner_result = function_result
-                except Exception as tool_error:
-                    function_result = f"Error executing tool '{function_name}': {tool_error}"
-                    logger.error("handle_function_call raised for %s: %s", function_name, tool_error, exc_info=True)
-                finally:
-                    tool_duration = time.time() - tool_start_time
-                    cute_msg = _get_cute_tool_message_impl(function_name, function_args, tool_duration, result=_spinner_result)
-                    if spinner:
-                        spinner.stop(cute_msg)
-                    else:
-                        self._vprint(f"  {cute_msg}")
-            else:
-                try:
-                    function_result = handle_function_call(
-                        function_name, function_args, effective_task_id,
-                        enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,
-                        honcho_manager=self._honcho,
-                        honcho_session_key=self._honcho_session_key,
-                    )
-                except Exception as tool_error:
-                    function_result = f"Error executing tool '{function_name}': {tool_error}"
-                    logger.error("handle_function_call raised for %s: %s", function_name, tool_error, exc_info=True)
-                tool_duration = time.time() - tool_start_time
-
-            result_preview = function_result if self.verbose_logging else (
-                function_result[:200] if len(function_result) > 200 else function_result
-            )
-
-            # Log tool errors to the persistent error log so [error] tags
-            # in the UI always have a corresponding detailed entry on disk.
-            _is_error_result, _ = _detect_tool_failure(function_name, function_result)
-            if _is_error_result:
-                logger.warning("Tool %s returned error (%.2fs): %s", function_name, tool_duration, result_preview)
-
-            if self.verbose_logging:
-                logging.debug(f"Tool {function_name} completed in {tool_duration:.2f}s")
-                logging.debug(f"Tool result ({len(function_result)} chars): {function_result}")
-
-            if self.tool_complete_callback:
-                try:
-                    self.tool_complete_callback(tool_call.id, function_name, function_args, function_result)
-                except Exception as cb_err:
-                    logging.debug(f"Tool complete callback error: {cb_err}")
-
-            # Guard against tools returning absurdly large content that would
-            # blow up the context window. 100K chars ≈ 25K tokens — generous
-            # enough for any reasonable tool output but prevents catastrophic
-            # context explosions (e.g. accidental base64 image dumps).
-            MAX_TOOL_RESULT_CHARS = 100_000
-            if len(function_result) > MAX_TOOL_RESULT_CHARS:
-                original_len = len(function_result)
-                function_result = (
-                    function_result[:MAX_TOOL_RESULT_CHARS]
-                    + f"\n\n[Truncated: tool response was {original_len:,} chars, "
-                    f"exceeding the {MAX_TOOL_RESULT_CHARS:,} char limit]"
-                )
-
-            tool_msg = {
-                "role": "tool",
-                "content": function_result,
-                "tool_call_id": tool_call.id
-            }
-            messages.append(tool_msg)
-
-            if not self.quiet_mode:
-                if self.verbose_logging:
-                    print(f"  ✅ Tool {i} completed in {tool_duration:.2f}s")
-                    print(f"     Result: {function_result}")
-                else:
-                    response_preview = function_result[:self.log_prefix_chars] + "..." if len(function_result) > self.log_prefix_chars else function_result
-                    print(f"  ✅ Tool {i} completed in {tool_duration:.2f}s - {response_preview}")
-
-            if self._interrupt_requested and i < len(assistant_message.tool_calls):
-                remaining = len(assistant_message.tool_calls) - i
-                self._vprint(f"{self.log_prefix}⚡ Interrupt: skipping {remaining} remaining tool call(s)", force=True)
-                for skipped_tc in assistant_message.tool_calls[i:]:
-                    skipped_name = skipped_tc.function.name
-                    skip_msg = {
-                        "role": "tool",
-                        "content": f"[Tool execution skipped — {skipped_name} was not started. User sent a new message]",
-                        "tool_call_id": skipped_tc.id
-                    }
-                    messages.append(skip_msg)
-                break
-
-            if self.tool_delay > 0 and i < len(assistant_message.tool_calls):
-                time.sleep(self.tool_delay)
-
-        # ── Budget pressure injection ─────────────────────────────────
-        # After all tool calls in this turn are processed, check if we're
-        # approaching max_iterations. If so, inject a warning into the LAST
-        # tool result's JSON so the LLM sees it naturally when reading results.
-        budget_warning = self._get_budget_warning(api_call_count)
-        if budget_warning and messages and messages[-1].get("role") == "tool":
-            last_content = messages[-1]["content"]
-            try:
-                parsed = json.loads(last_content)
-                if isinstance(parsed, dict):
-                    parsed["_budget_warning"] = budget_warning
-                    messages[-1]["content"] = json.dumps(parsed, ensure_ascii=False)
-                else:
-                    messages[-1]["content"] = last_content + f"\n\n{budget_warning}"
-            except (json.JSONDecodeError, TypeError):
-                messages[-1]["content"] = last_content + f"\n\n{budget_warning}"
-            if not self.quiet_mode:
-                remaining = self.max_iterations - api_call_count
-                tier = "⚠️  WARNING" if remaining <= self.max_iterations * 0.1 else "💡 CAUTION"
-                print(f"{self.log_prefix}{tier}: {remaining} iterations remaining")
 
     def _get_budget_warning(self, api_call_count: int) -> Optional[str]:
         """Return a budget pressure string, or None if not yet needed.
@@ -6195,35 +5604,291 @@ class AIAgent:
 
         return final_response
 
-    def run_conversation(
+    def _build_api_messages(
+        self,
+        messages: list,
+        active_system_prompt: str,
+        current_turn_user_idx: int,
+        _plugin_turn_context: str = "",
+    ) -> list:
+        """Normalize messages for a single API call.
+
+        Builds api_messages from the internal messages list:
+        - Injects Honcho turn context into current-turn user message
+        - Moves reasoning fields for multi-provider compatibility
+        - Strips internal-only fields (reasoning, finish_reason)
+        - Applies provider-specific sanitization (Mistral)
+        - Builds effective_system and prepends as system message
+        - Injects prefill messages
+        - Applies prompt caching breakpoints
+        - Strips orphaned tool results/stubs
+
+        Returns the final api_messages list ready for the API client.
+        """
+        # Prepare messages for API call
+        # If we have an ephemeral system prompt, prepend it to the messages
+        # Note: Reasoning is embedded in content via <think> tags for trajectory storage.
+        # However, providers like Moonshot AI require a separate 'reasoning_content' field
+        # on assistant messages with tool_calls. We handle both cases here.
+        api_messages = []
+        for idx, msg in enumerate(messages):
+            api_msg = msg.copy()
+
+            if idx == current_turn_user_idx and msg.get("role") == "user" and self._honcho_turn_context:
+                api_msg["content"] = _inject_honcho_turn_context(
+                    api_msg.get("content", ""), self._honcho_turn_context
+                )
+
+            # For ALL assistant messages, pass reasoning back to the API
+            # This ensures multi-turn reasoning context is preserved
+            if msg.get("role") == "assistant":
+                reasoning_text = msg.get("reasoning")
+                if reasoning_text:
+                    # Add reasoning_content for API compatibility (Moonshot AI, Novita, OpenRouter)
+                    api_msg["reasoning_content"] = reasoning_text
+
+            # Remove 'reasoning' field - it's for trajectory storage only
+            # We've copied it to 'reasoning_content' for the API above
+            if "reasoning" in api_msg:
+                api_msg.pop("reasoning")
+            # Remove finish_reason - not accepted by strict APIs (e.g. Mistral)
+            if "finish_reason" in api_msg:
+                api_msg.pop("finish_reason")
+            # Strip Codex Responses API fields (call_id, response_item_id) for
+            # strict providers like Mistral that reject unknown fields with 422.
+            # Uses new dicts so the internal messages list retains the fields
+            # for Codex Responses compatibility.
+            if "api.mistral.ai" in self._base_url_lower:
+                self._sanitize_tool_calls_for_strict_api(api_msg)
+            # Keep 'reasoning_details' - OpenRouter uses this for multi-turn reasoning context
+            # The signature field helps maintain reasoning continuity
+            api_messages.append(api_msg)
+
+        # Build the final system message: cached prompt + ephemeral system prompt.
+        # Ephemeral additions are API-call-time only (not persisted to session DB).
+        # Honcho later-turn recall is intentionally kept OUT of the system prompt
+        # so the stable cache prefix remains unchanged.
+        effective_system = active_system_prompt or ""
+        if self.ephemeral_system_prompt:
+            effective_system = (effective_system + "\n\n" + self.ephemeral_system_prompt).strip()
+        # Plugin context from pre_llm_call hooks — ephemeral, not cached.
+        if _plugin_turn_context:
+            effective_system = (effective_system + "\n\n" + _plugin_turn_context).strip()
+        if effective_system:
+            api_messages = [{"role": "system", "content": effective_system}] + api_messages
+
+        # Inject ephemeral prefill messages right after the system prompt
+        # but before conversation history. Same API-call-time-only pattern.
+        if self.prefill_messages:
+            sys_offset = 1 if effective_system else 0
+            for idx, pfm in enumerate(self.prefill_messages):
+                api_messages.insert(sys_offset + idx, pfm.copy())
+
+        # Apply Anthropic prompt caching for Claude models via OpenRouter.
+        # Auto-detected: if model name contains "claude" and base_url is OpenRouter,
+        # inject cache_control breakpoints (system + last 3 messages) to reduce
+        # input token costs by ~75% on multi-turn conversations.
+        if self._use_prompt_caching:
+            api_messages = apply_anthropic_cache_control(api_messages, cache_ttl=self._cache_ttl, native_anthropic=(self.api_mode == 'anthropic_messages'))
+
+        # Safety net: strip orphaned tool results / add stubs for missing
+        # results before sending to the API.  Runs unconditionally — not
+        # gated on context_compressor — so orphans from session loading or
+        # manual message manipulation are always caught.
+        api_messages = self._sanitize_api_messages(api_messages)
+
+        return api_messages
+
+    def _build_result(
+        self,
+        api_call_count: int,
+        completed: bool,
+        interrupted: bool,
+        final_response,
+        messages: list,
+        original_user_message: str,
+        _should_review_memory: bool,
+        conversation_history,
+        user_message: str = "",
+        effective_task_id: str = "",
+        sync_honcho: bool = True,
+    ) -> dict:
+        """Build the final result dict and fire post-turn hooks.
+
+        Fires post_llm_call hook, extracts last reasoning, constructs the
+        result dict, triggers background memory/skill review, fires
+        on_session_end hook.
+
+        Returns the result dict ready to be returned from run_conversation().
+        """
+        # Save trajectory if enabled
+        self._save_trajectory(messages, user_message, completed)
+
+        # Clean up VM and browser for this task after conversation completes
+        self._cleanup_task_resources(effective_task_id)
+
+        # Persist session to both JSON log and SQLite
+        self._persist_session(messages, conversation_history)
+
+        # Sync conversation to Honcho for user modeling
+        if final_response and not interrupted and sync_honcho:
+            self._honcho_sync(original_user_message, final_response)
+            self._queue_honcho_prefetch(original_user_message)
+
+        # Plugin hook: post_llm_call
+        # Fired once per turn after the tool-calling loop completes.
+        # Plugins can use this to persist conversation data (e.g. sync
+        # to an external memory system).
+        if final_response and not interrupted:
+            try:
+                from hermes_cli.plugins import invoke_hook as _invoke_hook
+                _invoke_hook(
+                    "post_llm_call",
+                    session_id=self.session_id,
+                    user_message=original_user_message,
+                    assistant_response=final_response,
+                    conversation_history=list(messages),
+                    model=self.model,
+                    platform=getattr(self, "platform", None) or "",
+                )
+            except Exception as exc:
+                logger.warning("post_llm_call hook failed: %s", exc)
+
+        # Extract reasoning from the last assistant message (if any)
+        last_reasoning = None
+        for msg in reversed(messages):
+            if msg.get("role") == "assistant" and msg.get("reasoning"):
+                last_reasoning = msg["reasoning"]
+                break
+
+        # Build result with interrupt info if applicable
+        result = {
+            "final_response": final_response,
+            "last_reasoning": last_reasoning,
+            "messages": messages,
+            "api_calls": api_call_count,
+            "completed": completed,
+            "partial": False,  # True only when stopped due to invalid tool calls
+            "interrupted": interrupted,
+            "response_previewed": getattr(self, "_response_was_previewed", False),
+            "model": self.model,
+            "provider": self.provider,
+            "base_url": self.base_url,
+            "input_tokens": self.session_input_tokens,
+            "output_tokens": self.session_output_tokens,
+            "cache_read_tokens": self.session_cache_read_tokens,
+            "cache_write_tokens": self.session_cache_write_tokens,
+            "reasoning_tokens": self.session_reasoning_tokens,
+            "prompt_tokens": self.session_prompt_tokens,
+            "completion_tokens": self.session_completion_tokens,
+            "total_tokens": self.session_total_tokens,
+            "last_prompt_tokens": getattr(self.context_compressor, "last_prompt_tokens", 0) or 0,
+            "estimated_cost_usd": self.session_estimated_cost_usd,
+            "cost_status": self.session_cost_status,
+            "cost_source": self.session_cost_source,
+            # Per-tool cost breakdown (C3) — list of dicts, one per tool call
+            "tool_cost_entries": [e.to_dict() for e in self._tool_cost_entries],
+        }
+        self._response_was_previewed = False
+
+        # Include interrupt message if one triggered the interrupt
+        if interrupted and self._interrupt_message:
+            result["interrupt_message"] = self._interrupt_message
+
+        # Clear interrupt state after handling
+        self.clear_interrupt()
+
+        # Clear stream callback so it doesn't leak into future calls
+        self._stream_callback = None
+
+        # Check skill trigger NOW — based on how many tool iterations THIS turn used.
+        _should_review_skills = False
+        if (self._skill_nudge_interval > 0
+                and self._iters_since_skill >= self._skill_nudge_interval
+                and "skill_manage" in self.valid_tool_names):
+            _should_review_skills = True
+            self._iters_since_skill = 0
+
+        # Background memory/skill review — runs AFTER the response is delivered
+        # so it never competes with the user's task for model attention.
+        if final_response and not interrupted and (_should_review_memory or _should_review_skills):
+            try:
+                self._spawn_background_review(
+                    messages_snapshot=list(messages),
+                    review_memory=_should_review_memory,
+                    review_skills=_should_review_skills,
+                )
+            except Exception:
+                pass  # Background review is best-effort
+
+        # Auto-extract memories in background (fire-and-forget)
+        if final_response and not interrupted:
+            try:
+                from agent.extract_memories import maybe_extract_memories
+                maybe_extract_memories(messages=messages, agent=self)
+            except Exception:
+                pass
+
+        # Stop hooks: fire-and-forget actions on conversation end
+        try:
+            from agent.stop_hooks import run_stop_hooks
+            run_stop_hooks(
+                agent=self,
+                messages=messages,
+                final_response=final_response or "",
+                completed=completed,
+                interrupted=interrupted,
+            )
+        except Exception:
+            pass
+
+        # Dream: nightly memory consolidation (fire-and-forget, gates checked inside)
+        try:
+            from agent.dream import maybe_dream
+            maybe_dream(agent=self)
+        except Exception:
+            pass
+
+        # Buddy XP gain
+        try:
+            if hasattr(self, '_buddy') and self._buddy and final_response:
+                self._buddy.gain_xp(1)
+                from agent.buddy import save_buddy
+                save_buddy(self._buddy)
+        except Exception:
+            pass
+
+        # Plugin hook: on_session_end
+        # Fired at the very end of every run_conversation call.
+        # Plugins can use this for cleanup, flushing buffers, etc.
+        try:
+            from hermes_cli.plugins import invoke_hook as _invoke_hook
+            _invoke_hook(
+                "on_session_end",
+                session_id=self.session_id,
+                completed=completed,
+                interrupted=interrupted,
+                model=self.model,
+                platform=getattr(self, "platform", None) or "",
+            )
+        except Exception as exc:
+            logger.warning("on_session_end hook failed: %s", exc)
+
+        return result
+
+    def _prepare_turn(
         self,
         user_message: str,
-        system_message: str = None,
-        conversation_history: List[Dict[str, Any]] = None,
-        task_id: str = None,
-        stream_callback: Optional[callable] = None,
-        persist_user_message: Optional[str] = None,
+        system_message,
+        conversation_history,
+        task_id,
+        stream_callback,
+        persist_user_message,
         sync_honcho: bool = True,
-    ) -> Dict[str, Any]:
-        """
-        Run a complete conversation with tool calling until completion.
+    ) -> dict:
+        """Pre-loop setup: sanitize inputs, init messages, resolve system prompt, preflight compress.
 
-        Args:
-            user_message (str): The user's message/question
-            system_message (str): Custom system message (optional, overrides ephemeral_system_prompt if provided)
-            conversation_history (List[Dict]): Previous conversation messages (optional)
-            task_id (str): Unique identifier for this task to isolate VMs between concurrent tasks (optional, auto-generated if not provided)
-            stream_callback: Optional callback invoked with each text delta during streaming.
-                Used by the TTS pipeline to start audio generation before the full response.
-                When None (default), API calls use the standard non-streaming path.
-            persist_user_message: Optional clean user message to store in
-                transcripts/history when user_message contains API-only
-                synthetic prefixes.
-            sync_honcho: When False, skip writing the final synthetic turn back
-                to Honcho or queuing follow-up prefetch work.
-
-        Returns:
-            Dict: Complete conversation result with final response and message history
+        Returns a dict with all mutable state the while-loop needs.
         """
         # Guard stdio against OSError from broken pipes (systemd/headless/daemon).
         # Installed once, transparent when streams are healthy, prevents crash on write.
@@ -6237,13 +5902,22 @@ class AIAgent:
         if isinstance(persist_user_message, str):
             persist_user_message = _sanitize_surrogates(persist_user_message)
 
+        # Detect ultrathink keyword in user message before appending to messages.
+        # Strip the keyword so it is never sent to the API verbatim.
+        if self._check_ultrathink(user_message):
+            self._ultrathink_active = True
+            user_message = self._strip_ultrathink(user_message)
+            logger.info("[ultrathink] Keyword detected — boosting reasoning to max")
+        else:
+            self._ultrathink_active = False
+
         # Store stream callback for _interruptible_api_call to pick up
         self._stream_callback = stream_callback
         self._persist_user_message_idx = None
         self._persist_user_message_override = persist_user_message
         # Generate unique task_id if not provided to isolate VMs between concurrent tasks
         effective_task_id = task_id or str(uuid.uuid4())
-        
+
         # Reset retry counters and iteration budget at the start of each turn
         # so subagent usage from a previous turn doesn't eat into the next one.
         self._invalid_tool_retries = 0
@@ -6258,7 +5932,7 @@ class AIAgent:
         # They are initialized in __init__ and must persist across run_conversation
         # calls so that nudge logic accumulates correctly in CLI mode.
         self.iteration_budget = IterationBudget(self.max_iterations)
-        
+
         # Initialize conversation (copy to avoid mutating the caller's list)
         messages = list(conversation_history) if conversation_history else []
 
@@ -6269,18 +5943,18 @@ class AIAgent:
         # making tool calls in ALL subsequent turns.
         if messages:
             _strip_budget_warnings_from_history(messages)
-        
+
         # Hydrate todo store from conversation history (gateway creates a fresh
         # AIAgent per message, so the in-memory store is empty -- we need to
         # recover the todo state from the most recent todo tool response in history)
         if conversation_history and not self._todo_store.has_items():
             self._hydrate_todo_store(conversation_history)
-        
+
         # Prefill messages (few-shot priming) are injected at API-call time only,
         # never stored in the messages list. This keeps them ephemeral: they won't
         # be saved to session DB, session logs, or batch trajectories, but they're
         # automatically re-applied on every API call (including session continuations).
-        
+
         # Track user turns for memory flush and periodic nudge logic
         self._user_turn_count += 1
 
@@ -6326,10 +6000,10 @@ class AIAgent:
         messages.append(user_msg)
         current_turn_user_idx = len(messages) - 1
         self._persist_user_message_idx = current_turn_user_idx
-        
+
         if not self.quiet_mode:
             self._safe_print(f"💬 Starting conversation: '{user_message[:60]}{'...' if len(user_message) > 60 else ''}'")
-        
+
         # ── System prompt (cached per session for prefix caching) ──
         # Built once on first call, reused for all subsequent calls.
         # Only rebuilt after context compression events (which invalidate
@@ -6357,7 +6031,7 @@ class AIAgent:
                 self._cached_system_prompt = stored_prompt
             else:
                 # First turn of a new session — build from scratch.
-                self._cached_system_prompt = self._build_system_prompt(system_message)
+                self._cached_system_prompt = self._build_system_prompt(system_message, user_message=user_message or "")
                 # Bake Honcho context into the prompt so it's stable for
                 # the entire session (not re-fetched per turn).
                 if self._honcho_context:
@@ -6432,12 +6106,6 @@ class AIAgent:
                     )
                     if len(messages) >= _orig_len:
                         break  # Cannot compress further
-                    # Compression created a new session — clear the history
-                    # reference so _flush_messages_to_session_db writes ALL
-                    # compressed messages to the new session's SQLite, not
-                    # skipping them because conversation_history is still the
-                    # pre-compression length.
-                    conversation_history = None
                     # Re-estimate after compression
                     _preflight_tokens = estimate_request_tokens_rough(
                         messages,
@@ -6475,6 +6143,94 @@ class AIAgent:
         except Exception as exc:
             logger.warning("pre_llm_call hook failed: %s", exc)
 
+        return {
+            "user_message": user_message,
+            "persist_user_message": persist_user_message,
+            "messages": messages,
+            "active_system_prompt": active_system_prompt,
+            "effective_task_id": effective_task_id,
+            "current_turn_user_idx": current_turn_user_idx,
+            "_plugin_turn_context": _plugin_turn_context,
+            "original_user_message": original_user_message,
+            "_should_review_memory": _should_review_memory,
+        }
+
+    def run_conversation(
+        self,
+        user_message: str,
+        system_message: str = None,
+        conversation_history: List[Dict[str, Any]] = None,
+        task_id: str = None,
+        stream_callback: Optional[callable] = None,
+        persist_user_message: Optional[str] = None,
+        sync_honcho: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Run a complete conversation with tool calling until completion.
+
+        Args:
+            user_message (str): The user's message/question
+            system_message (str): Custom system message (optional, overrides ephemeral_system_prompt if provided)
+            conversation_history (List[Dict]): Previous conversation messages (optional)
+            task_id (str): Unique identifier for this task to isolate VMs between concurrent tasks (optional, auto-generated if not provided)
+            stream_callback: Optional callback invoked with each text delta during streaming.
+                Used by the TTS pipeline to start audio generation before the full response.
+                When None (default), API calls use the standard non-streaming path.
+            persist_user_message: Optional clean user message to store in
+                transcripts/history when user_message contains API-only
+                synthetic prefixes.
+            sync_honcho: When False, skip writing the final synthetic turn back
+                to Honcho or queuing follow-up prefetch work.
+
+        Returns:
+            Dict: Complete conversation result with final response and message history
+        """
+        _turn = self._prepare_turn(
+            user_message=user_message,
+            system_message=system_message,
+            conversation_history=conversation_history,
+            task_id=task_id,
+            stream_callback=stream_callback,
+            persist_user_message=persist_user_message,
+            sync_honcho=sync_honcho,
+        )
+        user_message = _turn["user_message"]
+        persist_user_message = _turn["persist_user_message"]
+        messages = _turn["messages"]
+        active_system_prompt = _turn["active_system_prompt"]
+        effective_task_id = _turn["effective_task_id"]
+        current_turn_user_idx = _turn["current_turn_user_idx"]
+        _plugin_turn_context = _turn["_plugin_turn_context"]
+        original_user_message = _turn["original_user_message"]
+        _should_review_memory = _turn["_should_review_memory"]
+
+        # Clear magic docs registry for fresh session
+        try:
+            from agent.magic_docs import clear_registry
+            clear_registry()
+        except Exception:
+            pass
+
+        # Inject pre-loaded context from speculation (if available) on first turn
+        if not conversation_history:
+            try:
+                from agent.speculation import get_speculator
+                spec_context = get_speculator().get_context_injection(timeout=0.5)
+                if spec_context:
+                    if hasattr(self, 'ephemeral_system_prompt'):
+                        self.ephemeral_system_prompt = (self.ephemeral_system_prompt or "") + "\n\n" + spec_context
+                    logger.debug("[speculation] Injected %d chars of pre-loaded context", len(spec_context))
+            except Exception:
+                pass
+
+        # Prevent Mac from sleeping during agent work
+        try:
+            from agent.prevent_sleep import start_prevent_sleep
+            start_prevent_sleep()
+            _prevent_sleep_started = True
+        except Exception:
+            _prevent_sleep_started = False
+
         # Main conversation loop
         api_call_count = 0
         final_response = None
@@ -6483,10 +6239,10 @@ class AIAgent:
         length_continue_retries = 0
         truncated_response_prefix = ""
         compression_attempts = 0
-        
+
         # Clear any stale interrupt state at start
         self.clear_interrupt()
-        
+
         while api_call_count < self.max_iterations and self.iteration_budget.remaining > 0:
             # Reset per-turn checkpoint dedup so each iteration can take one snapshot
             self._checkpoint_mgr.new_turn()
@@ -6526,77 +6282,12 @@ class AIAgent:
                     and "skill_manage" in self.valid_tool_names):
                 self._iters_since_skill += 1
             
-            # Prepare messages for API call
-            # If we have an ephemeral system prompt, prepend it to the messages
-            # Note: Reasoning is embedded in content via <think> tags for trajectory storage.
-            # However, providers like Moonshot AI require a separate 'reasoning_content' field
-            # on assistant messages with tool_calls. We handle both cases here.
-            api_messages = []
-            for idx, msg in enumerate(messages):
-                api_msg = msg.copy()
-
-                if idx == current_turn_user_idx and msg.get("role") == "user" and self._honcho_turn_context:
-                    api_msg["content"] = _inject_honcho_turn_context(
-                        api_msg.get("content", ""), self._honcho_turn_context
-                    )
-
-                # For ALL assistant messages, pass reasoning back to the API
-                # This ensures multi-turn reasoning context is preserved
-                if msg.get("role") == "assistant":
-                    reasoning_text = msg.get("reasoning")
-                    if reasoning_text:
-                        # Add reasoning_content for API compatibility (Moonshot AI, Novita, OpenRouter)
-                        api_msg["reasoning_content"] = reasoning_text
-
-                # Remove 'reasoning' field - it's for trajectory storage only
-                # We've copied it to 'reasoning_content' for the API above
-                if "reasoning" in api_msg:
-                    api_msg.pop("reasoning")
-                # Remove finish_reason - not accepted by strict APIs (e.g. Mistral)
-                if "finish_reason" in api_msg:
-                    api_msg.pop("finish_reason")
-                # Strip Codex Responses API fields (call_id, response_item_id) for
-                # strict providers like Mistral that reject unknown fields with 422.
-                # Uses new dicts so the internal messages list retains the fields
-                # for Codex Responses compatibility.
-                if "api.mistral.ai" in self._base_url_lower:
-                    self._sanitize_tool_calls_for_strict_api(api_msg)
-                # Keep 'reasoning_details' - OpenRouter uses this for multi-turn reasoning context
-                # The signature field helps maintain reasoning continuity
-                api_messages.append(api_msg)
-
-            # Build the final system message: cached prompt + ephemeral system prompt.
-            # Ephemeral additions are API-call-time only (not persisted to session DB).
-            # Honcho later-turn recall is intentionally kept OUT of the system prompt
-            # so the stable cache prefix remains unchanged.
-            effective_system = active_system_prompt or ""
-            if self.ephemeral_system_prompt:
-                effective_system = (effective_system + "\n\n" + self.ephemeral_system_prompt).strip()
-            # Plugin context from pre_llm_call hooks — ephemeral, not cached.
-            if _plugin_turn_context:
-                effective_system = (effective_system + "\n\n" + _plugin_turn_context).strip()
-            if effective_system:
-                api_messages = [{"role": "system", "content": effective_system}] + api_messages
-
-            # Inject ephemeral prefill messages right after the system prompt
-            # but before conversation history. Same API-call-time-only pattern.
-            if self.prefill_messages:
-                sys_offset = 1 if effective_system else 0
-                for idx, pfm in enumerate(self.prefill_messages):
-                    api_messages.insert(sys_offset + idx, pfm.copy())
-
-            # Apply Anthropic prompt caching for Claude models via OpenRouter.
-            # Auto-detected: if model name contains "claude" and base_url is OpenRouter,
-            # inject cache_control breakpoints (system + last 3 messages) to reduce
-            # input token costs by ~75% on multi-turn conversations.
-            if self._use_prompt_caching:
-                api_messages = apply_anthropic_cache_control(api_messages, cache_ttl=self._cache_ttl, native_anthropic=(self.api_mode == 'anthropic_messages'))
-
-            # Safety net: strip orphaned tool results / add stubs for missing
-            # results before sending to the API.  Runs unconditionally — not
-            # gated on context_compressor — so orphans from session loading or
-            # manual message manipulation are always caught.
-            api_messages = self._sanitize_api_messages(api_messages)
+            api_messages = self._build_api_messages(
+                messages=messages,
+                active_system_prompt=active_system_prompt,
+                current_turn_user_idx=current_turn_user_idx,
+                _plugin_turn_context=_plugin_turn_context,
+            )
 
             # Calculate approximate request size for logging
             total_chars = sum(len(str(msg)) for msg in api_messages)
@@ -6637,7 +6328,6 @@ class AIAgent:
             codex_auth_retry_attempted = False
             anthropic_auth_retry_attempted = False
             nous_auth_retry_attempted = False
-            has_retried_429 = False
             restart_with_compressed_messages = False
             restart_with_length_continuation = False
 
@@ -7027,6 +6717,31 @@ class AIAgent:
                         self.session_cost_status = cost_result.status
                         self.session_cost_source = cost_result.source
 
+                        # Per-tool cost attribution (C3): apportion this API
+                        # call's token delta equally across the tools that ran
+                        # in the preceding turn to produce it.
+                        if self._current_turn_tool_names:
+                            try:
+                                from agent.usage_pricing import ToolCostEntry
+                                from decimal import Decimal as _Decimal
+                                n = len(self._current_turn_tool_names)
+                                per_tool_cost = (
+                                    (cost_result.amount_usd / _Decimal(n))
+                                    if cost_result.amount_usd is not None else None
+                                )
+                                for _tname in self._current_turn_tool_names:
+                                    self._tool_cost_entries.append(ToolCostEntry(
+                                        tool_name=_tname,
+                                        input_tokens_delta=canonical_usage.input_tokens // n,
+                                        output_tokens_delta=canonical_usage.output_tokens // n,
+                                        cache_read_tokens_delta=canonical_usage.cache_read_tokens // n,
+                                        cache_write_tokens_delta=canonical_usage.cache_write_tokens // n,
+                                        estimated_cost_usd=per_tool_cost,
+                                    ))
+                                self._current_turn_tool_names = []
+                            except Exception:
+                                pass  # never block the agent loop
+
                         # Persist token counts to session DB for /insights.
                         # Gateway sessions persist via session_store.update_session()
                         # after run_conversation returns, so only persist here for
@@ -7073,7 +6788,14 @@ class AIAgent:
                             if not self.quiet_mode:
                                 self._vprint(f"{self.log_prefix}   💾 Cache: {cached:,}/{prompt:,} tokens ({hit_pct:.0f}% hit, {written:,} written)")
                     
-                    has_retried_429 = False  # Reset on success
+                    # Save cache params for forked subagents to reuse
+                    try:
+                        from agent.prompt_caching import build_cache_safe_params, save_cache_safe_params
+                        _system_prompt = self.system_prompt if hasattr(self, 'system_prompt') else ""
+                        save_cache_safe_params(build_cache_safe_params(_system_prompt, api_messages))
+                    except Exception:
+                        pass
+
                     break  # Success, exit retry loop
 
                 except InterruptedError:
@@ -7116,12 +6838,6 @@ class AIAgent:
                         # prompt or prefill.  Fall through to normal error path.
 
                     status_code = getattr(api_error, "status_code", None)
-                    recovered_with_pool, has_retried_429 = self._recover_with_credential_pool(
-                        status_code=status_code,
-                        has_retried_429=has_retried_429,
-                    )
-                    if recovered_with_pool:
-                        continue
                     if (
                         self.api_mode == "codex_responses"
                         and self.provider == "openai-codex"
@@ -7230,17 +6946,10 @@ class AIAgent:
                         or "quota" in error_msg
                     )
                     if is_rate_limited and self._fallback_index < len(self._fallback_chain):
-                        # Don't eagerly fallback if credential pool rotation may
-                        # still recover.  The pool's retry-then-rotate cycle needs
-                        # at least one more attempt to fire — jumping to a fallback
-                        # provider here short-circuits it.
-                        pool = self._credential_pool
-                        pool_may_recover = pool is not None and pool.has_available()
-                        if not pool_may_recover:
-                            self._emit_status("⚠️ Rate limited — switching to fallback provider...")
-                            if self._try_activate_fallback():
-                                retry_count = 0
-                                continue
+                        self._emit_status("⚠️ Rate limited — switching to fallback provider...")
+                        if self._try_activate_fallback():
+                            retry_count = 0
+                            continue
 
                     is_payload_too_large = (
                         status_code == 413
@@ -7253,7 +6962,6 @@ class AIAgent:
                         compression_attempts += 1
                         if compression_attempts > max_compression_attempts:
                             self._vprint(f"{self.log_prefix}❌ Max compression attempts ({max_compression_attempts}) reached for payload-too-large error.", force=True)
-                            self._vprint(f"{self.log_prefix}   💡 Try /new to start a fresh conversation, or /compress to retry compression.", force=True)
                             logging.error(f"{self.log_prefix}413 compression failed after {max_compression_attempts} attempts.")
                             self._persist_session(messages, conversation_history)
                             return {
@@ -7278,7 +6986,6 @@ class AIAgent:
                             break
                         else:
                             self._vprint(f"{self.log_prefix}❌ Payload too large and cannot compress further.", force=True)
-                            self._vprint(f"{self.log_prefix}   💡 Try /new to start a fresh conversation, or /compress to retry compression.", force=True)
                             logging.error(f"{self.log_prefix}413 payload too large. Cannot compress further.")
                             self._persist_session(messages, conversation_history)
                             return {
@@ -7355,7 +7062,6 @@ class AIAgent:
                         compression_attempts += 1
                         if compression_attempts > max_compression_attempts:
                             self._vprint(f"{self.log_prefix}❌ Max compression attempts ({max_compression_attempts}) reached.", force=True)
-                            self._vprint(f"{self.log_prefix}   💡 Try /new to start a fresh conversation, or /compress to retry compression.", force=True)
                             logging.error(f"{self.log_prefix}Context compression failed after {max_compression_attempts} attempts.")
                             self._persist_session(messages, conversation_history)
                             return {
@@ -7382,7 +7088,7 @@ class AIAgent:
                         else:
                             # Can't compress further and already at minimum tier
                             self._vprint(f"{self.log_prefix}❌ Context length exceeded and cannot compress further.", force=True)
-                            self._vprint(f"{self.log_prefix}   💡 The conversation has accumulated too much content. Try /new to start fresh, or /compress to manually trigger compression.", force=True)
+                            self._vprint(f"{self.log_prefix}   💡 The conversation has accumulated too much content.", force=True)
                             logging.error(f"{self.log_prefix}Context length exceeded: {approx_tokens:,} tokens. Cannot compress further.")
                             self._persist_session(messages, conversation_history)
                             return {
@@ -7971,10 +7677,6 @@ class AIAgent:
                             approx_tokens=self.context_compressor.last_prompt_tokens,
                             task_id=effective_task_id,
                         )
-                        # Compression created a new session — clear history so
-                        # _flush_messages_to_session_db writes compressed messages
-                        # to the new session (see preflight compression comment).
-                        conversation_history = None
                     
                     # Save session log incrementally (so progress is visible even if interrupted)
                     self._session_messages = messages
@@ -8202,121 +7904,29 @@ class AIAgent:
         # Determine if conversation completed successfully
         completed = final_response is not None and api_call_count < self.max_iterations
 
-        # Save trajectory if enabled
-        self._save_trajectory(messages, user_message, completed)
+        _result = self._build_result(
+            api_call_count=api_call_count,
+            completed=completed,
+            interrupted=interrupted,
+            final_response=final_response,
+            messages=messages,
+            original_user_message=original_user_message,
+            _should_review_memory=_should_review_memory,
+            conversation_history=conversation_history,
+            user_message=user_message,
+            effective_task_id=effective_task_id,
+            sync_honcho=sync_honcho,
+        )
 
-        # Clean up VM and browser for this task after conversation completes
-        self._cleanup_task_resources(effective_task_id)
-
-        # Persist session to both JSON log and SQLite
-        self._persist_session(messages, conversation_history)
-
-        # Sync conversation to Honcho for user modeling
-        if final_response and not interrupted and sync_honcho:
-            self._honcho_sync(original_user_message, final_response)
-            self._queue_honcho_prefetch(original_user_message)
-
-        # Plugin hook: post_llm_call
-        # Fired once per turn after the tool-calling loop completes.
-        # Plugins can use this to persist conversation data (e.g. sync
-        # to an external memory system).
-        if final_response and not interrupted:
+        # Release sleep prevention
+        if _prevent_sleep_started:
             try:
-                from hermes_cli.plugins import invoke_hook as _invoke_hook
-                _invoke_hook(
-                    "post_llm_call",
-                    session_id=self.session_id,
-                    user_message=original_user_message,
-                    assistant_response=final_response,
-                    conversation_history=list(messages),
-                    model=self.model,
-                    platform=getattr(self, "platform", None) or "",
-                )
-            except Exception as exc:
-                logger.warning("post_llm_call hook failed: %s", exc)
-
-        # Extract reasoning from the last assistant message (if any)
-        last_reasoning = None
-        for msg in reversed(messages):
-            if msg.get("role") == "assistant" and msg.get("reasoning"):
-                last_reasoning = msg["reasoning"]
-                break
-
-        # Build result with interrupt info if applicable
-        result = {
-            "final_response": final_response,
-            "last_reasoning": last_reasoning,
-            "messages": messages,
-            "api_calls": api_call_count,
-            "completed": completed,
-            "partial": False,  # True only when stopped due to invalid tool calls
-            "interrupted": interrupted,
-            "response_previewed": getattr(self, "_response_was_previewed", False),
-            "model": self.model,
-            "provider": self.provider,
-            "base_url": self.base_url,
-            "input_tokens": self.session_input_tokens,
-            "output_tokens": self.session_output_tokens,
-            "cache_read_tokens": self.session_cache_read_tokens,
-            "cache_write_tokens": self.session_cache_write_tokens,
-            "reasoning_tokens": self.session_reasoning_tokens,
-            "prompt_tokens": self.session_prompt_tokens,
-            "completion_tokens": self.session_completion_tokens,
-            "total_tokens": self.session_total_tokens,
-            "last_prompt_tokens": getattr(self.context_compressor, "last_prompt_tokens", 0) or 0,
-            "estimated_cost_usd": self.session_estimated_cost_usd,
-            "cost_status": self.session_cost_status,
-            "cost_source": self.session_cost_source,
-        }
-        self._response_was_previewed = False
-        
-        # Include interrupt message if one triggered the interrupt
-        if interrupted and self._interrupt_message:
-            result["interrupt_message"] = self._interrupt_message
-        
-        # Clear interrupt state after handling
-        self.clear_interrupt()
-
-        # Clear stream callback so it doesn't leak into future calls
-        self._stream_callback = None
-
-        # Check skill trigger NOW — based on how many tool iterations THIS turn used.
-        _should_review_skills = False
-        if (self._skill_nudge_interval > 0
-                and self._iters_since_skill >= self._skill_nudge_interval
-                and "skill_manage" in self.valid_tool_names):
-            _should_review_skills = True
-            self._iters_since_skill = 0
-
-        # Background memory/skill review — runs AFTER the response is delivered
-        # so it never competes with the user's task for model attention.
-        if final_response and not interrupted and (_should_review_memory or _should_review_skills):
-            try:
-                self._spawn_background_review(
-                    messages_snapshot=list(messages),
-                    review_memory=_should_review_memory,
-                    review_skills=_should_review_skills,
-                )
+                from agent.prevent_sleep import stop_prevent_sleep
+                stop_prevent_sleep()
             except Exception:
-                pass  # Background review is best-effort
+                pass
 
-        # Plugin hook: on_session_end
-        # Fired at the very end of every run_conversation call.
-        # Plugins can use this for cleanup, flushing buffers, etc.
-        try:
-            from hermes_cli.plugins import invoke_hook as _invoke_hook
-            _invoke_hook(
-                "on_session_end",
-                session_id=self.session_id,
-                completed=completed,
-                interrupted=interrupted,
-                model=self.model,
-                platform=getattr(self, "platform", None) or "",
-            )
-        except Exception as exc:
-            logger.warning("on_session_end hook failed: %s", exc)
-
-        return result
+        return _result
 
     def chat(self, message: str, stream_callback: Optional[callable] = None) -> str:
         """
