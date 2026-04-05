@@ -15,10 +15,28 @@ import json
 import os
 import sys
 import time
+import urllib.request
 import httpx
 
 DO_BASE = "https://api.digitalocean.com/v2"
 HERMES_REPO = "https://github.com/NousResearch/hermes-agent.git"
+
+
+def buy_vapi_phone(vapi_api_key: str, area_code: str = "415") -> dict:
+    """Purchase a Vapi phone number for a new customer. Returns {id, number}."""
+    payload = json.dumps({"provider": "twilio", "areaCode": area_code}).encode()
+    req = urllib.request.Request(
+        "https://api.vapi.ai/phone-number",
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {vapi_api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        data = json.loads(resp.read())
+    return {"id": data.get("id", ""), "number": data.get("number", "")}
 
 
 def _do_headers():
@@ -91,6 +109,9 @@ def provision_vm(customer_id: str, customer_config: dict) -> dict:
         f"TWILIO_PHONE_NUMBER={customer_config.get('twilio_number', '')}",
         f"CUSTOMER_ID={customer_id}",
         f"BUSINESS_NAME={customer_config.get('business_name', '')}",
+        f"CONTROL_PLANE_URL={os.environ.get('CONTROL_PLANE_URL', '')}",
+        f"VAPI_WEBHOOK_SECRET={os.environ.get('VAPI_WEBHOOK_SECRET', '')}",
+        f"PAYPAL_WEBHOOK_ID={os.environ.get('PAYPAL_WEBHOOK_ID', '')}",
     ]
 
     hermes_config = (
@@ -136,11 +157,28 @@ def provision_vm(customer_id: str, customer_config: dict) -> dict:
         networks = d.get("networks", {}).get("v4", [])
         public_ips = [n["ip_address"] for n in networks if n["type"] == "public"]
         if public_ips:
+            ip = public_ips[0]
+
+            # Auto-provision Vapi phone number
+            vapi_key = customer_config.get("vapi_api_key") or os.environ.get("VAPI_API_KEY", "")
+            vapi_phone: dict = {}
+            if vapi_key:
+                try:
+                    vapi_phone = buy_vapi_phone(vapi_key)
+                    # Patch the .env on the VM with the real phone ID
+                    env_lines.append(f"VAPI_PHONE_ID={vapi_phone.get('id', '')}")
+                    env_lines.append(f"VAPI_PHONE_NUMBER={vapi_phone.get('number', '')}")
+                    print(f"Vapi phone provisioned: {vapi_phone.get('number')}")
+                except Exception as e:
+                    print(f"Warning: Vapi phone provisioning failed (non-fatal): {e}")
+
             return {
                 "droplet_id": droplet_id,
-                "ip": public_ips[0],
+                "ip": ip,
                 "customer_id": customer_id,
                 "status": "provisioning",
+                "vapi_phone_number": vapi_phone.get("number", ""),
+                "vapi_phone_id": vapi_phone.get("id", ""),
             }
 
     raise TimeoutError("VM did not get an IP within 150 seconds")
