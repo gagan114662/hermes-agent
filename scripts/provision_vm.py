@@ -112,6 +112,19 @@ def provision_vm(customer_id: str, customer_config: dict) -> dict:
         f"CONTROL_PLANE_URL={os.environ.get('CONTROL_PLANE_URL', '')}",
         f"VAPI_WEBHOOK_SECRET={os.environ.get('VAPI_WEBHOOK_SECRET', '')}",
         f"PAYPAL_WEBHOOK_ID={os.environ.get('PAYPAL_WEBHOOK_ID', '')}",
+        # Booking (Cal.com)
+        f"CALCOM_API_KEY={customer_config.get('calcom_api_key', '')}",
+        f"CALCOM_EVENT_ID={customer_config.get('calcom_event_id', '')}",
+        # Invoicing (Crater)
+        f"CRATER_BASE_URL={customer_config.get('crater_base_url', '')}",
+        f"CRATER_API_TOKEN={customer_config.get('crater_api_token', '')}",
+        f"CRATER_COMPANY_ID={customer_config.get('crater_company_id', '')}",
+        # Email marketing (Mautic)
+        f"MAUTIC_BASE_URL={customer_config.get('mautic_base_url', '')}",
+        f"MAUTIC_USERNAME={customer_config.get('mautic_username', '')}",
+        f"MAUTIC_PASSWORD={customer_config.get('mautic_password', '')}",
+        # WhatsApp
+        f"TWILIO_WHATSAPP_NUMBER={customer_config.get('twilio_whatsapp_number', '')}",
     ]
 
     hermes_config = (
