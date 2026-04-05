@@ -135,17 +135,56 @@ async def _provision(update: Update, context: ContextTypes.DEFAULT_TYPE, custome
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from scripts.provision_vm import provision_vm
 
+    await update.message.reply_text("⏳ Setting up your AI employee... this takes about 2 minutes.")
     try:
         result = provision_vm(customer_id, dict(context.user_data))
+        ip = result.get("ip", "unknown")
+        phone = result.get("vapi_phone_number", "being set up")
         await update.message.reply_text(
-            f"✅ {context.user_data.get('agent_name')} is live!\n\n"
-            f"VM IP: {result['ip']}\n"
-            f"Customer ID: {customer_id}\n\n"
-            "Phone number and Telegram bot credentials will arrive in ~5 minutes."
+            f"✅ Your AI employee is live!\n\n"
+            f"📞 Phone: {phone}\n"
+            f"💬 Telegram: @hermes114bot\n\n"
+            f"It will start working within 5 minutes."
         )
+        # Notify owner
+        owner_id = os.environ.get("TELEGRAM_OWNER_ID", "")
+        if owner_id:
+            await context.bot.send_message(
+                chat_id=owner_id,
+                text=f"🎉 New customer live!\nID: {customer_id}\nIP: {ip}\nPhone: {phone}\nBusiness: {context.user_data.get('business_name', '?')}",
+            )
+        # Notify control plane
+        control_plane_url = os.environ.get("CONTROL_PLANE_URL", "")
+        if control_plane_url:
+            import urllib.request as _ureq, json as _json
+            payload = _json.dumps({
+                "customer_id": customer_id,
+                "ip": ip,
+                "phone": phone,
+                "telegram_chat_id": str(update.effective_chat.id),
+            }).encode()
+            req = _ureq.Request(
+                f"{control_plane_url}/internal/customer-ready",
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                _ureq.urlopen(req, timeout=10)
+            except Exception:
+                pass  # Non-fatal
     except Exception as e:
         logger.error("Provisioning failed for %s: %s", customer_id, e)
-        await update.message.reply_text("❌ Provisioning failed. Please contact support.")
+        await update.message.reply_text(
+            "⚠️ Setup hit a snag. Our team has been notified and will fix it within 1 hour. "
+            "You will not be charged if we cannot deliver."
+        )
+        owner_id = os.environ.get("TELEGRAM_OWNER_ID", "")
+        if owner_id:
+            await context.bot.send_message(
+                chat_id=owner_id,
+                text=f"🚨 Provisioning FAILED\nCustomer: {customer_id}\nError: {e}\nData: {dict(context.user_data)}",
+            )
 
 
 def main() -> None:
