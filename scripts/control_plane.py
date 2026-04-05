@@ -9,9 +9,14 @@ Env vars:
     CONTROL_PLANE_PORT      — Port to bind (default 8080)
 """
 import asyncio
+import ipaddress
 import json
 import logging
 import os
+import sqlite3
+import urllib.parse
+import urllib.request
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -24,49 +29,85 @@ from fastapi import FastAPI, HTTPException, Request, Response
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="hermes-control-plane")
-
 
 # ---------------------------------------------------------------------------
-# Helpers
+# SQLite setup
 # ---------------------------------------------------------------------------
 
-def _customers_path() -> Path:
-    """Return path to ~/.hermes/customers.json, creating dirs as needed."""
-    home = Path(os.environ.get("HOME", Path.home()))
-    hermes_dir = home / ".hermes"
-    hermes_dir.mkdir(parents=True, exist_ok=True)
-    return hermes_dir / "customers.json"
+DB_PATH = Path(os.environ.get("HOME", Path.home())) / ".hermes" / "customers.db"
 
 
-def _load_customers() -> dict:
-    path = _customers_path()
-    if path.exists():
+def init_db() -> None:
+    """Initialize SQLite DB and migrate from JSON if needed."""
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS customers (
+            customer_id TEXT PRIMARY KEY,
+            telegram_chat_id TEXT,
+            paypal_payer_id TEXT,
+            email TEXT,
+            ip TEXT,
+            phone TEXT,
+            status TEXT DEFAULT 'onboarding',
+            created_at TEXT,
+            updated_at TEXT
+        )
+    """)
+    conn.commit()
+    # Migrate from JSON if exists
+    json_path = DB_PATH.parent / "customers.json"
+    if json_path.exists():
         try:
-            return json.loads(path.read_text())
-        except Exception:
-            return {"customers": {}}
-    return {"customers": {}}
+            data = json.loads(json_path.read_text())
+            for cid, c in data.get("customers", {}).items():
+                conn.execute(
+                    "INSERT OR IGNORE INTO customers "
+                    "(customer_id, email, paypal_payer_id, status, created_at, updated_at) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (
+                        cid,
+                        c.get("email", ""),
+                        c.get("payer_id", ""),
+                        c.get("status", "onboarding"),
+                        c.get("created_at", ""),
+                        c.get("created_at", ""),
+                    ),
+                )
+            conn.commit()
+            json_path.rename(json_path.with_suffix(".json.bak"))
+            logger.info("Migrated customers.json → customers.db")
+        except Exception as exc:
+            logger.warning("JSON migration failed (non-fatal): %s", exc)
+    conn.close()
 
 
-def _save_customers(data: dict) -> None:
-    import tempfile
-    path = _customers_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # Write to temp file in same directory, then atomic rename
-    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    yield
+
+
+app = FastAPI(title="hermes-control-plane", lifespan=lifespan)
+
+
+# ---------------------------------------------------------------------------
+# PayPal IP allowlist
+# ---------------------------------------------------------------------------
+
+PAYPAL_IP_RANGES = [
+    ipaddress.ip_network("64.4.240.0/21"),
+    ipaddress.ip_network("212.112.232.0/21"),
+    ipaddress.ip_network("173.0.80.0/20"),
+]
+
+
+def is_paypal_ip(ip_str: str) -> bool:
     try:
-        os.write(fd, json.dumps(data, indent=2).encode())
-        os.close(fd)
-        os.chmod(tmp, 0o600)  # owner-only permissions
-        os.replace(tmp, path)
-    except Exception:
-        os.close(fd)
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+        ip = ipaddress.ip_address(ip_str)
+        return any(ip in net for net in PAYPAL_IP_RANGES)
+    except ValueError:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +149,7 @@ def parse_paypal_ipn(params: dict) -> Optional[dict]:
         "txn_id": params.get("txn_id", ""),
         "subscr_id": params.get("subscr_id", ""),
         "amount": params.get("mc_gross", "0"),
+        "payer_id": params.get("payer_id", ""),
     }
 
 
@@ -165,6 +207,12 @@ async def health():
 @app.post("/paypal-ipn")
 async def paypal_ipn(request: Request):
     """Receive PayPal IPN notifications for new subscriptions."""
+    # PayPal IP allowlist check
+    client_ip = request.client.host if request.client else ""
+    if not is_paypal_ip(client_ip):
+        logger.warning("Rejected PayPal IPN from non-PayPal IP: %s", client_ip)
+        raise HTTPException(status_code=403, detail="Forbidden")
+
     raw_body = await request.body()
 
     # Verify with PayPal
@@ -181,25 +229,103 @@ async def paypal_ipn(request: Request):
     if not customer:
         return Response(status_code=200)  # Not a completed payment, ignore
 
-    # Persist — deduplicate by txn_id
-    data = _load_customers()
+    # Persist to SQLite — deduplicate by txn_id (used as customer_id)
     txn_id = customer["txn_id"]
-    if txn_id in data["customers"]:
+    now = datetime.now(timezone.utc).isoformat()
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    existing = conn.execute(
+        "SELECT customer_id FROM customers WHERE customer_id=?", (txn_id,)
+    ).fetchone()
+    if existing:
+        conn.close()
         logger.info("Duplicate IPN for txn %s — ignoring", txn_id)
         return {"status": "ok", "duplicate": True}
 
-    data["customers"][txn_id] = {
-        **customer,
-        "status": "onboarding",
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
-    _save_customers(data)
+    conn.execute(
+        "INSERT INTO customers (customer_id, email, paypal_payer_id, telegram_chat_id, status, created_at, updated_at) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (
+            txn_id,
+            customer.get("email", ""),
+            customer.get("payer_id", ""),
+            customer.get("telegram_id", ""),
+            "onboarding",
+            now,
+            now,
+        ),
+    )
+    conn.commit()
+    conn.close()
     logger.info("New customer: %s (%s)", customer["name"].strip(), customer["email"])
 
     asyncio.create_task(_notify_customer(customer))
     asyncio.create_task(_notify_owner(customer))
 
     return Response(status_code=200)  # PayPal requires 200 OK
+
+
+@app.post("/internal/customer-ready")
+async def customer_ready(request: Request) -> dict:
+    body = await request.json()
+    customer_id = body.get("customer_id", "")
+    ip = body.get("ip", "")
+    phone = body.get("phone", "")
+    telegram_chat_id = body.get("telegram_chat_id", "")
+    now = datetime.now(timezone.utc).isoformat()
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "UPDATE customers SET ip=?, phone=?, telegram_chat_id=?, status='active', updated_at=? WHERE customer_id=?",
+        (ip, phone, telegram_chat_id, now, customer_id),
+    )
+    conn.commit()
+    conn.close()
+    # Notify customer via Telegram
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    if bot_token and telegram_chat_id:
+        msg = (
+            f"🎉 Your AI employee is ready!\n\n"
+            f"📞 Phone: {phone}\n\n"
+            f"Start sending it tasks via @hermes114bot"
+        )
+        try:
+            urllib.request.urlopen(
+                f"https://api.telegram.org/bot{bot_token}/sendMessage"
+                f"?chat_id={urllib.parse.quote(str(telegram_chat_id))}"
+                f"&text={urllib.parse.quote(msg)}",
+                timeout=10,
+            )
+        except Exception as exc:
+            logger.warning("Telegram notify failed in customer-ready: %s", exc)
+    return {"ok": True}
+
+
+@app.post("/admin")
+async def admin(request: Request) -> dict:
+    body = await request.json()
+    if str(body.get("owner_id")) != os.environ.get("TELEGRAM_OWNER_ID", ""):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    command = body.get("command", "").strip()
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    if command == "/customers":
+        rows = conn.execute(
+            "SELECT customer_id, email, status, phone, created_at FROM customers ORDER BY created_at DESC"
+        ).fetchall()
+        conn.close()
+        lines = [
+            f"{r['customer_id']} | {r['email']} | {r['status']} | {r['phone']}"
+            for r in rows
+        ]
+        return {"result": "\n".join(lines) or "No customers yet"}
+    elif command == "/revenue":
+        count = conn.execute(
+            "SELECT COUNT(*) FROM customers WHERE status='active'"
+        ).fetchone()[0]
+        conn.close()
+        return {"result": f"{count} active customers — ${count * 299}/mo MRR"}
+    conn.close()
+    return {"result": f"Unknown command: {command}"}
 
 
 # ---------------------------------------------------------------------------
