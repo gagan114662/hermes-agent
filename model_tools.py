@@ -169,6 +169,10 @@ def _discover_tools():
         "tools.social_media_tool",
         "tools.google_image_tool",
         "tools.mcp_autoconfig",
+        "tools.booking_tool",
+        "tools.invoicing_tool",
+        "tools.email_marketing_tool",
+        # "tools.google_workspace_tool",  # disabled: triggers gogcli keychain popup on every startup
     ]
     import importlib
     for mod_name in _modules:

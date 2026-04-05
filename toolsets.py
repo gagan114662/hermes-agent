@@ -78,6 +78,10 @@ _HERMES_CORE_TOOLS = [
     "honcho_context", "honcho_profile", "honcho_search", "honcho_conclude",
     # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
     "ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service",
+    # Google Workspace (Gmail, Calendar, Sheets) via gogcli
+    "gmail_search", "gmail_get", "gmail_send", "gmail_reply",
+    "calendar_list", "calendar_create",
+    "sheets_get", "sheets_append",
     # Customer CRM
     "crm_save", "crm_log", "crm_find", "crm_deal",
     # Prospect tracker (outbound pipeline)
@@ -95,6 +99,14 @@ _HERMES_CORE_TOOLS = [
 # These can include individual tools or reference other toolsets
 TOOLSETS = {
     # Basic toolsets - individual tool categories
+    "google-workspace": {
+        "description": "Google Workspace tools: Gmail search/send/reply, Google Calendar list/create, Google Sheets read/append — via gogcli",
+        "tools": [
+            "gmail_search", "gmail_get", "gmail_send", "gmail_reply",
+            "calendar_list", "calendar_create",
+            "sheets_get", "sheets_append",
+        ],
+    },
     "reach": {
         "description": "Platform access tools: YouTube transcripts, Twitter/X search, Reddit, RSS feeds, and clean web reading via Jina",
         "tools": [
@@ -165,8 +177,26 @@ TOOLSETS = {
     },
     
     "messaging": {
-        "description": "Cross-platform messaging: send messages to Telegram, Discord, Slack, SMS, etc.",
-        "tools": ["send_message"],
+        "description": "Cross-platform messaging: send messages to Telegram, Discord, Slack, SMS, WhatsApp, etc.",
+        "tools": ["send_message", "sms_send", "whatsapp_send"],
+        "includes": []
+    },
+
+    "booking": {
+        "description": "Appointment booking via Cal.com: create booking links, list available slots, manage upcoming appointments.",
+        "tools": ["booking_create_link", "booking_list_slots", "booking_list_upcoming", "booking_cancel", "booking_reschedule"],
+        "includes": []
+    },
+
+    "invoicing": {
+        "description": "Invoicing & payments via Crater: create invoices, send quotes/estimates, record payments, list outstanding bills.",
+        "tools": ["invoice_create", "invoice_send", "invoice_list", "estimate_create", "payment_record"],
+        "includes": []
+    },
+
+    "email-marketing": {
+        "description": "Email marketing via Mautic: manage contacts, run drip campaigns, send broadcasts, track open/click stats.",
+        "tools": ["email_contact_add", "email_campaign_send", "email_broadcast_send", "email_list_campaigns", "email_list_emails", "email_stats", "email_segment_add_contact"],
         "includes": []
     },
     
