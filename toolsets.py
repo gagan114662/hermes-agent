@@ -195,6 +195,30 @@ TOOLSETS = {
         "tools": ["email_contact_add", "email_campaign_send", "email_broadcast_send", "email_list_campaigns", "email_list_emails", "email_stats", "email_segment_add_contact"],
         "includes": []
     },
+
+    "whatsapp": {
+        "description": "WhatsApp messaging via self-hosted Evolution API — no Twilio needed. Send text, media, and button messages; read chat history.",
+        "tools": ["wa_send_text", "wa_send_media", "wa_send_button", "wa_get_messages", "wa_get_chats", "wa_instance_status", "wa_get_qr"],
+        "includes": []
+    },
+
+    "voice": {
+        "description": "Voice calls via self-hosted Fonoster — open source Vapi/Twilio alternative. Make calls, list history, manage numbers.",
+        "tools": ["fonoster_call_make", "fonoster_call_list", "fonoster_number_list", "fonoster_app_list", "fonoster_agent_create"],
+        "includes": []
+    },
+
+    "sms-android": {
+        "description": "Free SMS via Android phone as gateway — no Twilio, no per-message fees. Send single or bulk SMS, check delivery.",
+        "tools": ["android_sms_send", "android_sms_send_bulk", "android_sms_status", "android_sms_health"],
+        "includes": []
+    },
+
+    "easy-appointments": {
+        "description": "Appointment booking via self-hosted Easy!Appointments — no API key, just Basic Auth. List/create/cancel bookings, check availability.",
+        "tools": ["easyapp_list_appointments", "easyapp_create_appointment", "easyapp_cancel_appointment", "easyapp_list_services", "easyapp_list_providers", "easyapp_get_availability"],
+        "includes": []
+    },
     
     "rl": {
         "description": "RL training tools for running reinforcement learning on Tinker-Atropos",
