@@ -123,8 +123,26 @@ def provision_vm(customer_id: str, customer_config: dict) -> dict:
         f"MAUTIC_BASE_URL={customer_config.get('mautic_base_url', '')}",
         f"MAUTIC_USERNAME={customer_config.get('mautic_username', '')}",
         f"MAUTIC_PASSWORD={customer_config.get('mautic_password', '')}",
-        # WhatsApp
+        # WhatsApp via Twilio (paid)
         f"TWILIO_WHATSAPP_NUMBER={customer_config.get('twilio_whatsapp_number', '')}",
+        # WhatsApp via Evolution API (free, self-hosted)
+        f"EVOLUTION_API_URL={customer_config.get('evolution_api_url', os.environ.get('EVOLUTION_API_URL', ''))}",
+        f"EVOLUTION_API_KEY={customer_config.get('evolution_api_key', os.environ.get('EVOLUTION_API_KEY', ''))}",
+        f"EVOLUTION_INSTANCE={customer_config.get('evolution_instance', 'default')}",
+        # Voice via Fonoster (free, self-hosted)
+        f"FONOSTER_ACCESS_KEY_ID={customer_config.get('fonoster_key_id', os.environ.get('FONOSTER_ACCESS_KEY_ID', ''))}",
+        f"FONOSTER_ACCESS_KEY_SECRET={customer_config.get('fonoster_key_secret', os.environ.get('FONOSTER_ACCESS_KEY_SECRET', ''))}",
+        f"FONOSTER_APP_REF={customer_config.get('fonoster_app_ref', os.environ.get('FONOSTER_APP_REF', ''))}",
+        f"FONOSTER_FROM_NUMBER={customer_config.get('fonoster_from_number', '')}",
+        f"FONOSTER_API_URL={customer_config.get('fonoster_api_url', os.environ.get('FONOSTER_API_URL', ''))}",
+        # SMS via Android gateway (free)
+        f"ANDROID_SMS_GATEWAY_URL={customer_config.get('android_sms_url', os.environ.get('ANDROID_SMS_GATEWAY_URL', ''))}",
+        f"ANDROID_SMS_GATEWAY_USER={customer_config.get('android_sms_user', 'user')}",
+        f"ANDROID_SMS_GATEWAY_PASSWORD={customer_config.get('android_sms_password', os.environ.get('ANDROID_SMS_GATEWAY_PASSWORD', ''))}",
+        # Easy!Appointments booking (free, self-hosted)
+        f"EASYAPP_URL={customer_config.get('easyapp_url', os.environ.get('EASYAPP_URL', ''))}",
+        f"EASYAPP_USERNAME={customer_config.get('easyapp_username', os.environ.get('EASYAPP_USERNAME', ''))}",
+        f"EASYAPP_PASSWORD={customer_config.get('easyapp_password', os.environ.get('EASYAPP_PASSWORD', ''))}",
     ]
 
     hermes_config = (
