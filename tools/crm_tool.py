@@ -127,6 +127,14 @@ def crm_log_fn(phone: str, channel: str, summary: str) -> str:
     _save(data)
 
     name = contact.get("name", phone)
+
+    # Auto-update business wiki in background (Karpathy LLM-wiki pattern)
+    try:
+        from tools.wiki_tool import crm_log_wiki_hook
+        crm_log_wiki_hook(phone=phone, channel=channel, summary=summary, contact_name=name)
+    except Exception:
+        pass  # wiki hook is non-critical
+
     return f"Interaction logged for {name} ({channel}): {summary[:80]}"
 
 

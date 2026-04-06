@@ -85,6 +85,8 @@ _HERMES_CORE_TOOLS = [
     # People search + personalized outreach (zero API keys — uses Ollama + page-agent)
     "prospect_search", "prospect_enrich", "outreach_draft", "outreach_send",
     "outreach_sequence", "email_finder",
+    # Business wiki — self-updating knowledge base (Karpathy LLM-wiki pattern)
+    "wiki_update", "wiki_query", "wiki_read", "wiki_list", "wiki_ingest",
     # Social media scheduling (Buffer)
     "social_profiles", "social_post", "social_queue", "social_analytics",
     # Direct social media posting + content generation
