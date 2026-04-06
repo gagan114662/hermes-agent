@@ -177,6 +177,7 @@ def _discover_tools():
         "tools.sms_android_tool",
         "tools.easy_appointments_tool",
         "tools.outreach_tool",
+        "tools.wiki_tool",
         # "tools.google_workspace_tool",  # disabled: triggers gogcli keychain popup on every startup
     ]
     import importlib
