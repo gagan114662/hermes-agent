@@ -64,10 +64,17 @@ cat > /root/.hermes/config.yaml << 'CFGEOF'
 CFGEOF
 npm install -g openwork-orchestrator
 npm install -g @steipete/bird
+npm install -g @page-agent/mcp
+# Install Ollama (local LLM — no API key required)
+curl -fsSL https://ollama.com/install.sh | sh
+systemctl enable ollama
+systemctl start ollama
+sleep 10
+ollama pull gemma3:4b
 cat > /etc/systemd/system/hermes-gateway.service << 'SVCEOF'
 [Unit]
 Description=Hermes Gateway
-After=network.target
+After=network.target ollama.service
 [Service]
 Type=simple
 WorkingDirectory=/opt/hermes
@@ -95,15 +102,8 @@ def provision_vm(customer_id: str, customer_config: dict) -> dict:
     region = os.environ.get("DO_REGION", "nyc3")
 
     env_lines = [
-        f"HERMES_INFERENCE_PROVIDER=anthropic",
-        f"CLAUDE_CODE_OAUTH_TOKEN={customer_config.get('claude_token', '')}",
+        f"HERMES_INFERENCE_PROVIDER=ollama",
         f"TELEGRAM_BOT_TOKEN={customer_config.get('telegram_token', '')}",
-        f"VAPI_API_KEY={customer_config.get('vapi_api_key', '')}",
-        f"VAPI_PHONE_ID={customer_config.get('vapi_phone_id', '')}",
-        f"VAPI_ASSISTANT_ID={customer_config.get('vapi_assistant_id', '')}",
-        f"HEYGEN_API_KEY={customer_config.get('heygen_api_key', '')}",
-        f"HEYGEN_AVATAR_ID={customer_config.get('heygen_avatar_id', '')}",
-        f"HEYGEN_VOICE_ID={customer_config.get('heygen_voice_id', '')}",
         f"TWILIO_ACCOUNT_SID={customer_config.get('twilio_sid', '')}",
         f"TWILIO_AUTH_TOKEN={customer_config.get('twilio_token', '')}",
         f"TWILIO_PHONE_NUMBER={customer_config.get('twilio_number', '')}",
@@ -146,6 +146,21 @@ def provision_vm(customer_id: str, customer_config: dict) -> dict:
     ]
 
     hermes_config = (
+        f"model:\n"
+        f"  default: gemma3:4b\n"
+        f"  provider: ollama\n"
+        f"  base_url: 'http://localhost:11434'\n"
+        f"  api_key: 'ollama'\n"
+        f"fallback_providers: []\n"
+        f"fallback_model: {{}}\n"
+        f"mcp_servers:\n"
+        f"  page-agent:\n"
+        f"    command: /usr/local/bin/page-agent-mcp\n"
+        f"    args: []\n"
+        f"    env:\n"
+        f"      LLM_MODEL_NAME: gemma3:4b\n"
+        f"      LLM_API_KEY: ollama\n"
+        f"      LLM_BASE_URL: 'http://localhost:11434/v1'\n"
         f"agent:\n"
         f"  name: \"{customer_config.get('agent_name', 'Alex')}\"\n"
         f"  personality: \"{customer_config.get('personality', 'professional and helpful')}\"\n"
@@ -166,7 +181,7 @@ def provision_vm(customer_id: str, customer_config: dict) -> dict:
     payload = {
         "name": f"hermes-agent-{customer_id}",
         "region": region,
-        "size": "s-2vcpu-2gb",
+        "size": "s-2vcpu-4gb",
         "image": "ubuntu-22-04-x64",
         "ssh_keys": [ssh_key_id] if ssh_key_id else [],
         "user_data": cloud_init,
