@@ -87,6 +87,12 @@ _HERMES_CORE_TOOLS = [
     "outreach_sequence", "email_finder",
     # Business wiki — self-updating knowledge base (Karpathy LLM-wiki pattern)
     "wiki_update", "wiki_query", "wiki_read", "wiki_list", "wiki_ingest",
+    # SDLC framework — professional systems builder
+    "discovery_run", "discovery_read",
+    "scope_create", "scope_check", "scope_read",
+    "prd_generate", "prd_read",
+    "project_create", "project_standup", "project_update", "project_milestone_check", "project_list",
+    "feedback_log", "feedback_list", "feedback_resolve",
     # Social media scheduling (Buffer)
     "social_profiles", "social_post", "social_queue", "social_analytics",
     # Direct social media posting + content generation
