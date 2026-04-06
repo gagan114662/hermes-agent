@@ -86,6 +86,9 @@ _HERMES_CORE_TOOLS = [
     "crm_save", "crm_log", "crm_find", "crm_deal",
     # Prospect tracker (outbound pipeline)
     "prospect_add", "prospect_update", "prospect_list", "prospect_digest",
+    # People search + personalized outreach (zero API keys — uses Ollama + page-agent)
+    "prospect_search", "prospect_enrich", "outreach_draft", "outreach_send",
+    "outreach_sequence", "email_finder",
     # Social media scheduling (Buffer)
     "social_profiles", "social_post", "social_queue", "social_analytics",
     # Direct social media posting + content generation
