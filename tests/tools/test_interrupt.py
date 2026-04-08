@@ -93,9 +93,12 @@ class TestPreToolCheck:
         # Import and call the method
         import types
         from run_agent import AIAgent
+        from agent.tool_executor import ToolExecutor
         # Bind the real methods to our mock so dispatch works correctly
         agent._execute_tool_calls_sequential = types.MethodType(AIAgent._execute_tool_calls_sequential, agent)
         agent._execute_tool_calls_concurrent = types.MethodType(AIAgent._execute_tool_calls_concurrent, agent)
+        # Set up a real ToolExecutor so _execute_tool_calls shim works
+        agent._tool_executor = ToolExecutor(agent)
         AIAgent._execute_tool_calls(agent, assistant_msg, messages, "default")
 
         # All 3 should be skipped

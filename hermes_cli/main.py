@@ -634,6 +634,14 @@ def cmd_chat(args):
     if getattr(args, "source", None):
         os.environ["HERMES_SESSION_SOURCE"] = args.source
 
+    # --assistant: enable Kairos always-on autonomous agent mode
+    if getattr(args, "assistant", False):
+        try:
+            from agent.kairos import set_kairos_active
+            set_kairos_active(True)
+        except Exception:
+            pass
+
     # Import and run the CLI
     from cli import main as cli_main
     
@@ -4304,6 +4312,12 @@ For more help on a command:
         "--source",
         default=None,
         help="Session source tag for filtering (default: cli). Use 'tool' for third-party integrations that should not appear in user session lists."
+    )
+    chat_parser.add_argument(
+        "--assistant",
+        action="store_true",
+        default=False,
+        help="Enable Kairos always-on assistant mode (concise, proactive, continuity-aware)"
     )
     chat_parser.set_defaults(func=cmd_chat)
 

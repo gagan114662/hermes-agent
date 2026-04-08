@@ -115,15 +115,21 @@ class TestMemoryStoreAdd:
         assert result["success"] is False
 
     def test_add_duplicate_rejected(self, store):
-        store.add("memory", "fact A")
-        result = store.add("memory", "fact A")
+        store.add("memory", "Python project version 3.12")
+        result = store.add("memory", "Python project version 3.12")
         assert result["success"] is True  # No error, just a note
         assert len(store.memory_entries) == 1  # Not duplicated
 
     def test_add_exceeding_limit_rejected(self, store):
-        # Fill up to near limit
-        store.add("memory", "x" * 490)
-        result = store.add("memory", "this will exceed the limit")
+        # Fill up to near limit with a long meaningful entry
+        long_entry = (
+            "Project uses Python 3.12 with FastAPI, PostgreSQL, and Redis cache. "
+            "Deployed on AWS EC2 with SSL certificates from Let's Encrypt. "
+            "CI/CD pipeline configured with GitHub Actions for automated testing "
+            "and deployment to staging and production environments."
+        )
+        store.add("memory", long_entry)  # ~310 chars, passes quality
+        result = store.add("memory", long_entry + " Additional deployment notes for monitoring.")
         assert result["success"] is False
         assert "exceed" in result["error"].lower()
 
@@ -142,7 +148,7 @@ class TestMemoryStoreReplace:
         assert "Python 3.11 project" not in result["entries"]
 
     def test_replace_no_match(self, store):
-        store.add("memory", "fact A")
+        store.add("memory", "Python project version 3.12")
         result = store.replace("memory", "nonexistent", "new")
         assert result["success"] is False
 
@@ -248,7 +254,7 @@ class TestMemoryToolDispatcher:
         assert result["success"] is False
 
     def test_add_via_tool(self, store):
-        result = json.loads(memory_tool(action="add", target="memory", content="via tool", store=store))
+        result = json.loads(memory_tool(action="add", target="memory", content="Python 3.12 project uses FastAPI and PostgreSQL", store=store))
         assert result["success"] is True
 
     def test_replace_requires_old_text(self, store):

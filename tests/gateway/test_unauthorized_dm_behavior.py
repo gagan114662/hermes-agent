@@ -61,6 +61,9 @@ def _make_runner(platform: Platform, config: GatewayConfig):
     runner.pairing_store = MagicMock()
     runner.pairing_store.is_approved.return_value = False
     runner.pairing_store._is_rate_limited.return_value = False
+    from gateway.rate_limiter import RateResult
+    runner.rate_limiter = MagicMock()
+    runner.rate_limiter.check.return_value = RateResult(limited=False, remaining=100, retry_after=0, user_key="")
     return runner, adapter
 
 

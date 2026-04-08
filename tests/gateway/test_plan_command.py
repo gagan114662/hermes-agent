@@ -45,6 +45,8 @@ def _make_runner():
     runner._show_reasoning = False
     runner._is_user_authorized = lambda _source: True
     runner._set_session_env = lambda _context: None
+    runner.rate_limiter = MagicMock()
+    from gateway.rate_limiter import RateResult; runner.rate_limiter.check.return_value = RateResult(limited=False, remaining=100, retry_after=0, user_key="")
     runner._run_agent = AsyncMock(
         return_value={
             "final_response": "planned",

@@ -830,6 +830,57 @@ class BasePlatformAdapter(ABC):
             text = f"{caption}\n{text}"
         return await self.send(chat_id=chat_id, content=text, reply_to=reply_to)
 
+    def _strip_code_dumps(self, text: str) -> str:
+        """Strip raw code blocks and inline code dumps from user-facing messages.
+
+        The model sometimes outputs raw Python/JS/websocket code instead of
+        using tools. This safety net removes code before it reaches the user.
+        """
+        if not text:
+            return text
+
+        # Remove fenced code blocks (```...```)
+        cleaned = re.sub(r'```[\s\S]*?```', '', text)
+
+        # Remove lines that look like raw code (common patterns the model dumps)
+        code_patterns = [
+            r'^.*(?:import\s+(?:json|websocket|urllib|base64|time|os|sys)|from\s+\w+\s+import).*$',
+            r'^.*(?:json\.loads|json\.dumps|urllib\.request|websocket\.create_connection).*$',
+            r'^.*(?:ws\.send|ws\.recv|ws\.close)\(.*$',
+            r'^.*(?:def\s+\w+\(|class\s+\w+[:(]).*$',
+            r'^.*(?:execute_code|Runtime\.evaluate|DOM\.setFileInputFiles|Page\.captureScreenshot).*$',
+            r'^.*(?:document\.querySelector|querySelectorAll|\.click\(\)|\.href).*$',
+        ]
+        lines = cleaned.split('\n')
+        code_line_count = 0
+        for line in lines:
+            for pattern in code_patterns:
+                if re.match(pattern, line.strip()):
+                    code_line_count += 1
+                    break
+
+        # If more than 30% of lines look like code, replace entire response
+        if len(lines) > 3 and code_line_count / len(lines) > 0.3:
+            logger.warning("Stripped code-heavy response (%d/%d lines were code)", code_line_count, len(lines))
+            return "I ran into an issue with that task. Let me try a different approach."
+
+        # Otherwise just remove the code lines
+        if code_line_count > 0:
+            filtered = []
+            for line in lines:
+                is_code = False
+                for pattern in code_patterns:
+                    if re.match(pattern, line.strip()):
+                        is_code = True
+                        break
+                if not is_code:
+                    filtered.append(line)
+            cleaned = '\n'.join(filtered).strip()
+            # Collapse multiple blank lines
+            cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
+
+        return cleaned.strip() if cleaned.strip() else "Working on it — I'll update you shortly."
+
     @staticmethod
     def extract_media(content: str) -> Tuple[List[Tuple[str, bool]], str]:
         """
@@ -1265,6 +1316,10 @@ class BasePlatformAdapter(ABC):
                 text_content = re.sub(r"MEDIA:\s*\S+", "", text_content).strip()
                 if images:
                     logger.info("[%s] extract_images found %d image(s) in response (%d chars)", self.name, len(images), len(response))
+
+                # Strip raw code blocks that should never reach the user
+                # (model sometimes dumps Python/JS/websocket code instead of using tools)
+                text_content = self._strip_code_dumps(text_content)
 
                 # Auto-detect bare local file paths for native media delivery
                 # (helps small models that don't use MEDIA: syntax)

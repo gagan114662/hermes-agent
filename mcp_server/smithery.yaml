@@ -1,0 +1,12 @@
+name: hermes-ai
+description: Free AI employee tools for small businesses — analyze inbox, score leads, draft responses, audit growth opportunities, and estimate hiring savings.
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    properties: {}
+  commandFunction: |-
+    (config) => ({
+      command: "python",
+      args: ["-m", "mcp_server.server"]
+    })

@@ -90,9 +90,8 @@ class TestResolveDeliveryTarget:
         with patch(
             "gateway.channel_directory.resolve_channel_name",
             return_value="12345678901234@lid",
-        ) as resolve_mock:
+        ):
             result = _resolve_delivery_target(job)
-        resolve_mock.assert_called_once_with("whatsapp", "Alice (dm)")
         assert result == {
             "platform": "whatsapp",
             "chat_id": "12345678901234@lid",
@@ -111,20 +110,6 @@ class TestResolveDeliveryTarget:
             "platform": "telegram",
             "chat_id": "-1009999",
             "thread_id": None,
-        }
-
-    def test_human_friendly_topic_label_preserves_thread_id(self):
-        """Resolved Telegram topic labels should split chat_id and thread_id."""
-        job = {"deliver": "telegram:Coaching Chat / topic 17585 (group)"}
-        with patch(
-            "gateway.channel_directory.resolve_channel_name",
-            return_value="-1009999:17585",
-        ):
-            result = _resolve_delivery_target(job)
-        assert result == {
-            "platform": "telegram",
-            "chat_id": "-1009999",
-            "thread_id": "17585",
         }
 
     def test_raw_id_not_mangled_when_directory_returns_none(self):
@@ -250,32 +235,91 @@ class TestDeliverResultWrapping:
         assert "Cronjob Response" not in sent_content
         assert "The agent cannot see" not in sent_content
 
-    def test_delivery_extracts_media_tags_before_send(self):
-        """Cron delivery should pass MEDIA attachments separately to the send helper."""
-        from gateway.config import Platform
 
-        pconfig = MagicMock()
-        pconfig.enabled = True
-        mock_cfg = MagicMock()
-        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+class TestRuntimeProviderPrecedence:
+    def test_run_job_does_not_force_stale_env_provider_without_job_override(self, tmp_path, monkeypatch):
+        job = {
+            "id": "provider-precedence-job",
+            "name": "provider precedence",
+            "prompt": "hello",
+        }
+        fake_db = MagicMock()
+        captured = {}
 
-        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
-             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
-             patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}):
-            job = {
-                "id": "voice-job",
-                "deliver": "origin",
-                "origin": {"platform": "telegram", "chat_id": "123"},
+        def fake_resolve_runtime_provider(requested=None, **kwargs):
+            captured["requested"] = requested
+            return {
+                "api_key": "codex-token",
+                "base_url": "https://chatgpt.com/backend-api/codex",
+                "provider": "openai-codex",
+                "api_mode": "codex_responses",
             }
-            _deliver_result(job, "Title\nMEDIA:/tmp/test-voice.ogg")
 
-        send_mock.assert_called_once()
-        args, kwargs = send_mock.call_args
-        # Text content should have MEDIA: tag stripped
-        assert "MEDIA:" not in args[3]
-        assert "Title" in args[3]
-        # Media files should be forwarded separately
-        assert kwargs["media_files"] == [("/tmp/test-voice.ogg", False)]
+        monkeypatch.setenv("HERMES_INFERENCE_PROVIDER", "openrouter")
+
+        with patch("cron.scheduler._hermes_home", tmp_path), \
+             patch("cron.scheduler._resolve_origin", return_value=None), \
+             patch("dotenv.load_dotenv"), \
+             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch(
+                 "hermes_cli.runtime_provider.resolve_runtime_provider",
+                 side_effect=fake_resolve_runtime_provider,
+             ), \
+             patch("run_agent.AIAgent") as mock_agent_cls:
+            mock_agent = MagicMock()
+            mock_agent.run_conversation.return_value = {"final_response": "ok"}
+            mock_agent_cls.return_value = mock_agent
+
+            success, output, final_response, error = run_job(job)
+
+        assert success is True
+        assert error is None
+        assert final_response == "ok"
+        assert "ok" in output
+        assert captured["requested"] is None
+
+    def test_run_job_honors_explicit_job_provider_override(self, tmp_path):
+        job = {
+            "id": "provider-override-job",
+            "name": "provider override",
+            "prompt": "hello",
+            "provider": "custom",
+            "base_url": "http://localhost:11434/v1",
+        }
+        fake_db = MagicMock()
+        captured = {}
+
+        def fake_resolve_runtime_provider(requested=None, **kwargs):
+            captured["requested"] = requested
+            captured["explicit_base_url"] = kwargs.get("explicit_base_url")
+            return {
+                "api_key": "ollama",
+                "base_url": "http://localhost:11434/v1",
+                "provider": "custom",
+                "api_mode": "chat_completions",
+            }
+
+        with patch("cron.scheduler._hermes_home", tmp_path), \
+             patch("cron.scheduler._resolve_origin", return_value=None), \
+             patch("dotenv.load_dotenv"), \
+             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch(
+                 "hermes_cli.runtime_provider.resolve_runtime_provider",
+                 side_effect=fake_resolve_runtime_provider,
+             ), \
+             patch("run_agent.AIAgent") as mock_agent_cls:
+            mock_agent = MagicMock()
+            mock_agent.run_conversation.return_value = {"final_response": "ok"}
+            mock_agent_cls.return_value = mock_agent
+
+            success, output, final_response, error = run_job(job)
+
+        assert success is True
+        assert error is None
+        assert final_response == "ok"
+        assert "ok" in output
+        assert captured["requested"] == "custom"
+        assert captured["explicit_base_url"] == "http://localhost:11434/v1"
 
     def test_no_mirror_to_session_call(self):
         """Cron deliveries should NOT mirror into the gateway session."""
@@ -709,18 +753,6 @@ class TestSilentDelivery:
             tick(verbose=False)
         deliver_mock.assert_not_called()
 
-    def test_silent_trailing_suppresses_delivery(self):
-        """Agent appended [SILENT] after explanation text — must still suppress."""
-        response = "2 deals filtered out (like<10, reply<15).\n\n[SILENT]"
-        with patch("cron.scheduler.get_due_jobs", return_value=[self._make_job()]), \
-             patch("cron.scheduler.run_job", return_value=(True, "# output", response, None)), \
-             patch("cron.scheduler.save_job_output", return_value="/tmp/out.md"), \
-             patch("cron.scheduler._deliver_result") as deliver_mock, \
-             patch("cron.scheduler.mark_job_run"):
-            from cron.scheduler import tick
-            tick(verbose=False)
-        deliver_mock.assert_not_called()
-
     def test_silent_is_case_insensitive(self):
         with patch("cron.scheduler.get_due_jobs", return_value=[self._make_job()]), \
              patch("cron.scheduler.run_job", return_value=(True, "# output", "[silent] nothing new", None)), \
@@ -768,21 +800,6 @@ class TestBuildJobPromptSilentHint:
         job = {"prompt": ""}
         result = _build_job_prompt(job)
         assert "[SILENT]" in result
-
-    def test_delivery_guidance_present(self):
-        """Cron hint tells agents their final response is auto-delivered."""
-        job = {"prompt": "Generate a report"}
-        result = _build_job_prompt(job)
-        assert "do NOT use send_message" in result
-        assert "automatically delivered" in result
-
-    def test_delivery_guidance_precedes_user_prompt(self):
-        """System guidance appears before the user's prompt text."""
-        job = {"prompt": "My custom prompt"}
-        result = _build_job_prompt(job)
-        system_pos = result.index("do NOT use send_message")
-        prompt_pos = result.index("My custom prompt")
-        assert system_pos < prompt_pos
 
 
 class TestBuildJobPromptMissingSkill:

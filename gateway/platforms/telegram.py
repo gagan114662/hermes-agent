@@ -2074,6 +2074,17 @@ class TelegramAdapter(BasePlatformAdapter):
 
         event = self._build_message_event(update.message, MessageType.TEXT)
         event.text = self._clean_bot_trigger_text(event.text)
+
+        # Proactive speculation: start read-only tools immediately while we prepare
+        try:
+            from agent.speculation import get_speculator, reset_speculator
+            reset_speculator()
+            speculator = get_speculator()
+            speculator.speculate_async(event.text or "")
+            logger.debug("[telegram] Speculation started for message")
+        except Exception as e:
+            logger.debug("[telegram] Speculation init failed: %s", e)
+
         self._enqueue_text_event(event)
     
     async def _handle_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2311,6 +2322,19 @@ class TelegramAdapter(BasePlatformAdapter):
                 event.media_urls = [cached_path]
                 event.media_types = ["audio/ogg"]
                 logger.info("[Telegram] Cached user voice at %s", cached_path)
+
+                # Transcribe via Whisper so the agent receives text instead of a raw audio file
+                try:
+                    from agent.voice_mode import transcribe_ogg_bytes
+                    transcribed = await transcribe_ogg_bytes(bytes(audio_bytes))
+                    if transcribed:
+                        event.text = f"[Voice message]: {transcribed}"
+                        logger.info("[telegram] Voice message transcribed: %.60s", transcribed)
+                    else:
+                        event.text = event.text or "[Voice message — transcription failed]"
+                except Exception as transcribe_err:
+                    logger.error("[telegram] Voice transcription error: %s", transcribe_err)
+                    event.text = event.text or "[Voice message — could not transcribe]"
             except Exception as e:
                 logger.warning("[Telegram] Failed to cache voice: %s", e, exc_info=True)
         elif msg.audio:

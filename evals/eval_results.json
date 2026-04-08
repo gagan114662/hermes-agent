@@ -1,0 +1,154 @@
+{
+  "score": 0.985,
+  "total_weighted": 0.985,
+  "max_weighted": 1.0,
+  "results": [
+    {
+      "id": "execution_language",
+      "category": "execution_language",
+      "composite": 1.0,
+      "scores": {
+        "score": 1.0
+      },
+      "explanations": [],
+      "violations": [],
+      "weight": 0.25,
+      "elapsed": 0,
+      "tool_calls": [],
+      "response_length": 0,
+      "response_preview": ""
+    },
+    {
+      "id": "tool_coverage",
+      "category": "tool_coverage",
+      "composite": 1.0,
+      "scores": {
+        "score": 1.0
+      },
+      "explanations": [],
+      "violations": [],
+      "weight": 0.2,
+      "elapsed": 0,
+      "tool_calls": [],
+      "response_length": 0,
+      "response_preview": ""
+    },
+    {
+      "id": "platform_workflows",
+      "category": "platform_workflows",
+      "composite": 1.0,
+      "scores": {
+        "score": 1.0
+      },
+      "explanations": [],
+      "violations": [],
+      "weight": 0.15,
+      "elapsed": 0,
+      "tool_calls": [],
+      "response_length": 0,
+      "response_preview": ""
+    },
+    {
+      "id": "identity",
+      "category": "identity",
+      "composite": 1.0,
+      "scores": {
+        "score": 1.0
+      },
+      "explanations": [],
+      "violations": [],
+      "weight": 0.1,
+      "elapsed": 0,
+      "tool_calls": [],
+      "response_length": 0,
+      "response_preview": ""
+    },
+    {
+      "id": "guardrails",
+      "category": "guardrails",
+      "composite": 1.0,
+      "scores": {
+        "score": 1.0
+      },
+      "explanations": [],
+      "violations": [],
+      "weight": 0.15,
+      "elapsed": 0,
+      "tool_calls": [],
+      "response_length": 0,
+      "response_preview": ""
+    },
+    {
+      "id": "simplicity",
+      "category": "simplicity",
+      "composite": 0.7,
+      "scores": {
+        "score": 0.7
+      },
+      "explanations": [
+        "Getting long (124 lines) \u2014 look for redundancy",
+        "Too many sections (33)"
+      ],
+      "violations": [],
+      "weight": 0.05,
+      "elapsed": 0,
+      "tool_calls": [],
+      "response_length": 0,
+      "response_preview": ""
+    },
+    {
+      "id": "toolset_registration",
+      "category": "toolset_registration",
+      "composite": 1.0,
+      "scores": {
+        "score": 1.0
+      },
+      "explanations": [],
+      "violations": [],
+      "weight": 0.1,
+      "elapsed": 0,
+      "tool_calls": [],
+      "response_length": 0,
+      "response_preview": ""
+    }
+  ],
+  "elapsed": 0.007,
+  "model": "static-analysis",
+  "timestamp": "2026-03-30T23:29:13",
+  "scenarios_count": 7,
+  "pass_count": 7,
+  "fail_count": 0,
+  "categories": {
+    "execution_language": {
+      "score": 1.0,
+      "notes": []
+    },
+    "tool_coverage": {
+      "score": 1.0,
+      "notes": []
+    },
+    "platform_workflows": {
+      "score": 1.0,
+      "notes": []
+    },
+    "identity": {
+      "score": 1.0,
+      "notes": []
+    },
+    "guardrails": {
+      "score": 1.0,
+      "notes": []
+    },
+    "simplicity": {
+      "score": 0.7,
+      "notes": [
+        "Getting long (124 lines) \u2014 look for redundancy",
+        "Too many sections (33)"
+      ]
+    },
+    "toolset_registration": {
+      "score": 1.0,
+      "notes": []
+    }
+  }
+}

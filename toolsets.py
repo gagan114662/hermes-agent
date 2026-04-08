@@ -31,8 +31,21 @@ from typing import List, Dict, Any, Set, Optional
 _HERMES_CORE_TOOLS = [
     # Web
     "web_search", "web_extract",
+    # Voice calls (Vapi)
+    "vapi_call", "vapi_calls",
+    # Avatar video (HeyGen)
+    "heygen_video",
+    # SMS (Twilio)
+    "sms_send",
+    # Reach tools (YouTube, Twitter/X, Reddit, RSS, Jina)
+    "youtube_get", "youtube_search",
+    "twitter_read", "twitter_search",
+    "reddit_read", "reddit_search",
+    "rss_fetch", "jina_read",
     # Terminal + process management
     "terminal", "process",
+    # Desktop control (visible Terminal.app + Claude Code session)
+    "terminal_run", "terminal_type", "claude_code_send",
     # File manipulation
     "read_file", "write_file", "patch", "search_files",
     # Vision + image generation
@@ -44,6 +57,7 @@ _HERMES_CORE_TOOLS = [
     "browser_type", "browser_scroll", "browser_back",
     "browser_press", "browser_get_images",
     "browser_vision", "browser_console",
+    "browser_upload_file", "browser_save_image",
     # Text-to-speech
     "text_to_speech",
     # Planning & memory
@@ -60,6 +74,35 @@ _HERMES_CORE_TOOLS = [
     "send_message",
     # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
     "ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service",
+    # Google Workspace (Gmail, Calendar, Sheets) via gogcli
+    "gmail_search", "gmail_get", "gmail_send", "gmail_reply",
+    "calendar_list", "calendar_create",
+    "sheets_get", "sheets_append",
+    # Customer CRM
+    "crm_save", "crm_log", "crm_find", "crm_deal",
+    # Prospect tracker (outbound pipeline)
+    "prospect_add", "prospect_update", "prospect_list", "prospect_digest",
+    # People search + personalized outreach (zero API keys — uses Ollama + page-agent)
+    "prospect_search", "prospect_enrich", "outreach_draft", "outreach_send",
+    "outreach_sequence", "email_finder",
+    # Business wiki — self-updating knowledge base (Karpathy LLM-wiki pattern)
+    "wiki_update", "wiki_query", "wiki_read", "wiki_list", "wiki_ingest",
+    # Second Brain — multi-vault domain knowledge system
+    "second_brain_scaffold", "second_brain_list",
+    "second_brain_ingest", "second_brain_ingest_all",
+    "second_brain_query", "second_brain_lint",
+    # SDLC framework — professional systems builder
+    "discovery_run", "discovery_read",
+    "scope_create", "scope_check", "scope_read",
+    "prd_generate", "prd_read",
+    "project_create", "project_standup", "project_update", "project_milestone_check", "project_list",
+    "feedback_log", "feedback_list", "feedback_resolve",
+    # Social media scheduling (Buffer)
+    "social_profiles", "social_post", "social_queue", "social_analytics",
+    # Direct social media posting + content generation
+    "twitter_post", "linkedin_post", "social_post_auto", "social_content",
+    # MCP Auto-Configurator
+    "mcp_autoconfig",
 ]
 
 
@@ -67,6 +110,25 @@ _HERMES_CORE_TOOLS = [
 # These can include individual tools or reference other toolsets
 TOOLSETS = {
     # Basic toolsets - individual tool categories
+    "google-workspace": {
+        "description": "Google Workspace tools: Gmail search/send/reply, Google Calendar list/create, Google Sheets read/append — via gogcli",
+        "tools": [
+            "gmail_search", "gmail_get", "gmail_send", "gmail_reply",
+            "calendar_list", "calendar_create",
+            "sheets_get", "sheets_append",
+        ],
+        "includes": [],
+    },
+    "reach": {
+        "description": "Platform access tools: YouTube transcripts, Twitter/X search, Reddit, RSS feeds, and clean web reading via Jina",
+        "tools": [
+            "youtube_get", "youtube_search",
+            "twitter_read", "twitter_search",
+            "reddit_read", "reddit_search",
+            "rss_fetch", "jina_read",
+        ],
+        "includes": [],
+    },
     "web": {
         "description": "Web research and content extraction tools",
         "tools": ["web_search", "web_extract"],
@@ -108,14 +170,26 @@ TOOLSETS = {
         "tools": ["skills_list", "skill_view", "skill_manage"],
         "includes": []
     },
+
+    "second-brain": {
+        "description": "Multi-vault domain knowledge system — scaffold dedicated second brain vaults, ingest source files into wiki pages, query accumulated knowledge, and audit wiki health",
+        "tools": [
+            "second_brain_scaffold", "second_brain_list",
+            "second_brain_ingest", "second_brain_ingest_all",
+            "second_brain_query", "second_brain_lint",
+            "read_file", "write_file", "search_files",
+        ],
+        "includes": []
+    },
     
     "browser": {
         "description": "Browser automation for web interaction (navigate, click, type, scroll, iframes, hold-click) with web search for finding URLs",
         "tools": [
             "browser_navigate", "browser_snapshot", "browser_click",
             "browser_type", "browser_scroll", "browser_back",
-            "browser_press", "browser_get_images",
-            "browser_vision", "browser_console", "web_search"
+            "browser_press", "browser_close", "browser_get_images",
+            "browser_vision", "browser_console", "web_search",
+            "browser_upload_file", "browser_save_image"
         ],
         "includes": []
     },
@@ -127,8 +201,50 @@ TOOLSETS = {
     },
     
     "messaging": {
-        "description": "Cross-platform messaging: send messages to Telegram, Discord, Slack, SMS, etc.",
-        "tools": ["send_message"],
+        "description": "Cross-platform messaging: send messages to Telegram, Discord, Slack, SMS, WhatsApp, etc.",
+        "tools": ["send_message", "sms_send", "whatsapp_send"],
+        "includes": []
+    },
+
+    "booking": {
+        "description": "Appointment booking via Cal.com: create booking links, list available slots, manage upcoming appointments.",
+        "tools": ["booking_create_link", "booking_list_slots", "booking_list_upcoming", "booking_cancel", "booking_reschedule"],
+        "includes": []
+    },
+
+    "invoicing": {
+        "description": "Invoicing & payments via Crater: create invoices, send quotes/estimates, record payments, list outstanding bills.",
+        "tools": ["invoice_create", "invoice_send", "invoice_list", "estimate_create", "payment_record"],
+        "includes": []
+    },
+
+    "email-marketing": {
+        "description": "Email marketing via Mautic: manage contacts, run drip campaigns, send broadcasts, track open/click stats.",
+        "tools": ["email_contact_add", "email_campaign_send", "email_broadcast_send", "email_list_campaigns", "email_list_emails", "email_stats", "email_segment_add_contact"],
+        "includes": []
+    },
+
+    "whatsapp": {
+        "description": "WhatsApp messaging via self-hosted Evolution API — no Twilio needed. Send text, media, and button messages; read chat history.",
+        "tools": ["wa_send_text", "wa_send_media", "wa_send_button", "wa_get_messages", "wa_get_chats", "wa_instance_status", "wa_get_qr"],
+        "includes": []
+    },
+
+    "voice": {
+        "description": "Voice calls via self-hosted Fonoster — open source Vapi/Twilio alternative. Make calls, list history, manage numbers.",
+        "tools": ["fonoster_call_make", "fonoster_call_list", "fonoster_number_list", "fonoster_app_list", "fonoster_agent_create"],
+        "includes": []
+    },
+
+    "sms-android": {
+        "description": "Free SMS via Android phone as gateway — no Twilio, no per-message fees. Send single or bulk SMS, check delivery.",
+        "tools": ["android_sms_send", "android_sms_send_bulk", "android_sms_status", "android_sms_health"],
+        "includes": []
+    },
+
+    "easy-appointments": {
+        "description": "Appointment booking via self-hosted Easy!Appointments — no API key, just Basic Auth. List/create/cancel bookings, check availability.",
+        "tools": ["easyapp_list_appointments", "easyapp_create_appointment", "easyapp_cancel_appointment", "easyapp_list_services", "easyapp_list_providers", "easyapp_get_availability"],
         "includes": []
     },
     
@@ -198,6 +314,18 @@ TOOLSETS = {
     "homeassistant": {
         "description": "Home Assistant smart home control and monitoring",
         "tools": ["ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service"],
+        "includes": []
+    },
+
+    "social_media": {
+        "description": "Social media scheduling and management via Buffer (post, schedule, queue, analytics)",
+        "tools": ["social_profiles", "social_post", "social_queue", "social_analytics"],
+        "includes": []
+    },
+
+    "social_media_direct": {
+        "description": "Direct social media posting (Twitter API, LinkedIn API) and smart auto-routing with content generation",
+        "tools": ["twitter_post", "linkedin_post", "social_post_auto", "social_content"],
         "includes": []
     },
 

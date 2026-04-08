@@ -62,6 +62,8 @@ def _make_runner(session_entry: SessionEntry):
     runner._send_voice_reply = AsyncMock()
     runner._capture_gateway_honcho_if_configured = lambda *args, **kwargs: None
     runner._emit_gateway_run_progress = AsyncMock()
+    runner.rate_limiter = MagicMock()
+    from gateway.rate_limiter import RateResult; runner.rate_limiter.check.return_value = RateResult(limited=False, remaining=100, retry_after=0, user_key="")
     return runner
 
 

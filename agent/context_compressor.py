@@ -15,6 +15,7 @@ Improvements over v1:
 
 import logging
 import time
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from agent.auxiliary_client import call_llm
@@ -22,6 +23,19 @@ from agent.model_metadata import (
     get_model_context_length,
     estimate_messages_tokens_rough,
 )
+
+
+@dataclass
+class CollapseCommit:
+    """Record of a single compression event."""
+    timestamp: float
+    tokens_before: int
+    tokens_after: int
+    summary_length: int
+
+    @property
+    def tokens_saved(self) -> int:
+        return self.tokens_before - self.tokens_after
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +61,6 @@ _PRUNED_TOOL_PLACEHOLDER = "[Old tool output cleared to save context space]"
 
 # Chars per token rough estimate
 _CHARS_PER_TOKEN = 4
-_SUMMARY_FAILURE_COOLDOWN_SECONDS = 600
 
 
 class ContextCompressor:
@@ -120,7 +133,45 @@ class ContextCompressor:
 
         # Stores the previous compaction summary for iterative updates
         self._previous_summary: Optional[str] = None
-        self._summary_failure_cooldown_until: float = 0.0
+
+        # CC-style armed/urgent states
+        self.arm_threshold: float = 0.65     # warn at 65% — context getting large
+        self.urgent_threshold: float = 0.80  # force compress at 80% — don't wait
+        self.armed: bool = False
+        self.collapse_commits: list = []      # history of CollapseCommit
+
+    def check_arm_state(self, current_tokens: int) -> bool:
+        """Check if context should be armed (65% threshold). Returns True if newly armed."""
+        ratio = current_tokens / self.context_length
+        if ratio >= self.arm_threshold and not self.armed:
+            self.armed = True
+            logger.warning(
+                "[context-collapse] Context at %.0f%% (%d/%d tokens) — armed for compression",
+                ratio * 100, current_tokens, self.context_length
+            )
+            return True
+        elif ratio < self.arm_threshold and self.armed:
+            self.armed = False
+        return False
+
+    def should_force_compress(self, current_tokens: int) -> bool:
+        """Return True if context is at urgent threshold (80%) — compress immediately."""
+        return current_tokens / self.context_length >= self.urgent_threshold
+
+    def _record_commit(self, tokens_before: int, tokens_after: int, summary_length: int) -> None:
+        """Record a compression event."""
+        self.collapse_commits.append(CollapseCommit(
+            timestamp=time.time(),
+            tokens_before=tokens_before,
+            tokens_after=tokens_after,
+            summary_length=summary_length,
+        ))
+        logger.info(
+            "[context-collapse] Commit #%d: %d→%d tokens saved (%.0f%%)",
+            len(self.collapse_commits),
+            tokens_before, tokens_after,
+            (1 - tokens_after/tokens_before) * 100 if tokens_before > 0 else 0
+        )
 
     def update_from_response(self, usage: Dict[str, Any]):
         """Update tracked token usage from API response."""
@@ -131,11 +182,27 @@ class ContextCompressor:
     def should_compress(self, prompt_tokens: int = None) -> bool:
         """Check if context exceeds the compression threshold."""
         tokens = prompt_tokens if prompt_tokens is not None else self.last_prompt_tokens
+        self.check_arm_state(tokens)
+        # Force compress at urgent threshold regardless of normal threshold
+        if self.should_force_compress(tokens):
+            logger.warning(
+                "[context-collapse] URGENT: Context at %.0f%% — forcing compression",
+                tokens / self.context_length * 100
+            )
+            return True
         return tokens >= self.threshold_tokens
 
     def should_compress_preflight(self, messages: List[Dict[str, Any]]) -> bool:
         """Quick pre-flight check using rough estimate (before API call)."""
         rough_estimate = estimate_messages_tokens_rough(messages)
+        self.check_arm_state(rough_estimate)
+        # Force compress at urgent threshold regardless of normal threshold
+        if self.should_force_compress(rough_estimate):
+            logger.warning(
+                "[context-collapse] URGENT: Context at %.0f%% — forcing compression",
+                rough_estimate / self.context_length * 100
+            )
+            return True
         return rough_estimate >= self.threshold_tokens
 
     def get_status(self) -> Dict[str, Any]:
@@ -261,14 +328,6 @@ class ContextCompressor:
         the middle turns without a summary rather than inject a useless
         placeholder.
         """
-        now = time.monotonic()
-        if now < self._summary_failure_cooldown_until:
-            logger.debug(
-                "Skipping context summary during cooldown (%.0fs remaining)",
-                self._summary_failure_cooldown_until - now,
-            )
-            return None
-
         summary_budget = self._compute_summary_budget(turns_to_summarize)
         content_to_summarize = self._serialize_for_summary(turns_to_summarize)
 
@@ -356,6 +415,7 @@ Write only the summary body. Do not include any preamble or prefix."""
             call_kwargs = {
                 "task": "compression",
                 "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.3,
                 "max_tokens": summary_budget * 2,
                 # timeout resolved from auxiliary.compression.timeout config by call_llm
             }
@@ -369,23 +429,13 @@ Write only the summary body. Do not include any preamble or prefix."""
             summary = content.strip()
             # Store for iterative updates on next compaction
             self._previous_summary = summary
-            self._summary_failure_cooldown_until = 0.0
             return self._with_summary_prefix(summary)
         except RuntimeError:
-            self._summary_failure_cooldown_until = time.monotonic() + _SUMMARY_FAILURE_COOLDOWN_SECONDS
             logging.warning("Context compression: no provider available for "
-                            "summary. Middle turns will be dropped without summary "
-                            "for %d seconds.",
-                            _SUMMARY_FAILURE_COOLDOWN_SECONDS)
+                            "summary. Middle turns will be dropped without summary.")
             return None
         except Exception as e:
-            self._summary_failure_cooldown_until = time.monotonic() + _SUMMARY_FAILURE_COOLDOWN_SECONDS
-            logging.warning(
-                "Failed to generate context summary: %s. "
-                "Further summary attempts paused for %d seconds.",
-                e,
-                _SUMMARY_FAILURE_COOLDOWN_SECONDS,
-            )
+            logging.warning("Failed to generate context summary: %s", e)
             return None
 
     @staticmethod
@@ -668,7 +718,7 @@ Write only the summary body. Do not include any preamble or prefix."""
                 compressed.append({"role": summary_role, "content": summary})
         else:
             if not self.quiet_mode:
-                logger.debug("No summary model available — middle turns dropped without summary")
+                logger.warning("No summary model available — middle turns dropped without summary")
 
         for i in range(compress_end, n_messages):
             msg = messages[i].copy()
@@ -682,9 +732,10 @@ Write only the summary body. Do not include any preamble or prefix."""
 
         compressed = self._sanitize_tool_pairs(compressed)
 
+        new_estimate = estimate_messages_tokens_rough(compressed)
+        saved_estimate = display_tokens - new_estimate
+
         if not self.quiet_mode:
-            new_estimate = estimate_messages_tokens_rough(compressed)
-            saved_estimate = display_tokens - new_estimate
             logger.info(
                 "Compressed: %d -> %d messages (~%d tokens saved)",
                 n_messages,
@@ -692,5 +743,13 @@ Write only the summary body. Do not include any preamble or prefix."""
                 saved_estimate,
             )
             logger.info("Compression #%d complete", self.compression_count)
+
+        # Record this compression event in the collapse commit history
+        summary_len = len(summary) if summary else 0
+        self._record_commit(
+            tokens_before=display_tokens,
+            tokens_after=new_estimate,
+            summary_length=summary_len,
+        )
 
         return compressed

@@ -132,13 +132,51 @@ def _strip_yaml_frontmatter(content: str) -> str:
 # =========================================================================
 
 DEFAULT_AGENT_IDENTITY = (
-    "You are Hermes Agent, an intelligent AI assistant created by Nous Research. "
+    "You are Hermes Agent, a dedicated AI employee created by Nous Research — not a "
+    "general-purpose assistant. You remember the team's history, know their deals and "
+    "contacts, and work proactively toward their sales goals. You stay consistent across "
+    "conversations: what you learned last week is still known today. You treat each "
+    "interaction as part of an ongoing working relationship, not a one-off query. "
     "You are helpful, knowledgeable, and direct. You assist users with a wide "
     "range of tasks including answering questions, writing and editing code, "
     "analyzing information, creative work, and executing actions via your tools. "
     "You communicate clearly, admit uncertainty when appropriate, and prioritize "
     "being genuinely useful over being verbose unless otherwise directed below. "
     "Be targeted and efficient in your exploration and investigations."
+)
+
+TOOL_USE_GUIDANCE = (
+    "## Tool Use\n"
+    "- Use web_search before stating facts about companies, people, or recent events\n"
+    "- Use memory(action=\"add\") immediately when you learn something durable about a contact or deal\n"
+    "- Use delegate_task for research that can run independently while you continue working\n"
+    "- Never call a tool twice for the same information in the same turn\n"
+    "- If a tool returns an error, try once with adjusted params before telling the user it failed"
+)
+
+SELF_CORRECTION_GUIDANCE = (
+    "## When Things Go Wrong\n"
+    "- If an API call fails: retry once with simplified params, then explain clearly\n"
+    "- If a web search returns no results: try 2-3 rephrased queries before saying \"not found\"\n"
+    "- If context grows very large: summarize previous findings before making more tool calls\n"
+    "- If you're unsure whether to proceed or ask: ask when the action is irreversible, proceed when it's reversible\n"
+    "- If a delegate_task returns an error: try a simpler version of the task, not the same task again"
+)
+
+CRM_INTEGRITY_GUIDANCE = (
+    "## CRM Data Integrity\n"
+    "- Never invent contact details, company names, or deal values — only state what was given or retrieved\n"
+    "- If asked about a contact not in memory: say \"I don't have data on [name]\" rather than guessing\n"
+    "- Always attribute CRM data to its source: \"According to your CRM notes, ...\"\n"
+    "- When updating deal stages, confirm the stage name exactly as it exists in the system"
+)
+
+PROACTIVE_BEHAVIORS_GUIDANCE = (
+    "## Proactive Behaviors\n"
+    "- After completing a research task, proactively suggest the next logical step\n"
+    "- When you add something to memory, briefly mention what you saved: \"I've noted that...\"\n"
+    "- If you notice a pattern across multiple deals/contacts, flag it unprompted\n"
+    "- Remind the user of follow-up tasks you've noted when they start a new conversation"
 )
 
 MEMORY_GUIDANCE = (
@@ -832,6 +870,45 @@ def load_soul_md() -> Optional[str]:
         return None
 
 
+def load_business_profile() -> Optional[str]:
+    """Load ~/.hermes/business_profile.json and return an identity prompt snippet.
+
+    This gives the agent a concrete business identity: "You are Alex, an AI
+    employee at Mike's Plumbing."  Populated during onboarding.
+    """
+    profile_path = get_hermes_home() / "business_profile.json"
+    if not profile_path.exists():
+        return None
+    try:
+        profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.debug("Could not load business_profile.json: %s", e)
+        return None
+
+    agent_name = profile.get("agent_name", "Hermes")
+    biz = profile.get("business_name", "")
+    industry = profile.get("industry", "")
+    product = profile.get("product", "")
+    target = profile.get("target_customer", "")
+    tone = profile.get("tone", "friendly")
+    hours = profile.get("hours", "")
+    goal = profile.get("goal", "")
+
+    lines = [
+        f"You are {agent_name}, an AI employee at {biz}." if biz else f"You are {agent_name}.",
+        f"Industry: {industry}." if industry else "",
+        f"Product/service: {product}." if product else "",
+        f"Target customer: {target}." if target else "",
+        f"Communicate in a {tone} tone." if tone else "",
+        f"Business hours: {hours}." if hours else "",
+        f"Primary goal: {goal}." if goal else "",
+        "",
+        f"When reaching out to prospects or responding to customers, introduce yourself as {agent_name} from {biz}." if biz else "",
+        "Always represent the business professionally. You ARE the business to anyone you interact with.",
+    ]
+    return "\n".join(line for line in lines if line)
+
+
 def _load_hermes_md(cwd_path: Path) -> str:
     """.hermes.md / HERMES.md — walk to git root."""
     hermes_md_path = _find_hermes_md(cwd_path)
@@ -957,3 +1034,16 @@ def build_context_files_prompt(cwd: Optional[str] = None, skip_soul: bool = Fals
     if not sections:
         return ""
     return "# Project Context\n\nThe following project context files have been loaded and should be followed:\n\n" + "\n".join(sections)
+
+
+def _render_topic_memory_block(content: str) -> str:
+    """Render topic-file memory content for system prompt injection.
+
+    Wraps content in a consistent header block matching the style used
+    by MemoryStore._render_block() for the flat store.
+    """
+    if not content:
+        return ""
+    separator = "═" * 46
+    header = "MEMORY (relevant topic files)"
+    return f"{separator}\n{header}\n{separator}\n{content}"

@@ -2085,6 +2085,7 @@ registry.register(
     check_fn=check_web_api_key,
     requires_env=_web_requires_env(),
     emoji="🔍",
+    is_concurrency_safe=True,
 )
 registry.register(
     name="web_extract",
@@ -2096,4 +2097,5 @@ registry.register(
     requires_env=_web_requires_env(),
     is_async=True,
     emoji="📄",
+    is_concurrency_safe=True,
 )

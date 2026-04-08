@@ -219,14 +219,157 @@ def _resolve_cdp_override(cdp_url: str) -> str:
     return raw
 
 
+def _auto_launch_chrome_cdp(port: int = 9222) -> str:
+    """Auto-launch Chrome with the user's real profile and CDP enabled.
+
+    This allows Hermes to use the user's existing logins (Instagram, Twitter,
+    LinkedIn, etc.) instead of starting a fresh browser with no cookies.
+
+    Returns the CDP URL if successful, empty string otherwise.
+    """
+    import platform as _plat
+    import socket
+    import time as _time
+
+    # First check if Chrome is already running with CDP
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=1):
+            logger.info("Chrome CDP already available on port %d", port)
+            return f"http://localhost:{port}"
+    except (ConnectionRefusedError, OSError):
+        pass
+
+    # Find Chrome binary
+    sys_name = _plat.system()
+    if sys_name == "Darwin":
+        candidates = [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+            "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+        ]
+    elif sys_name == "Linux":
+        import shutil
+        candidates = [p for p in [
+            shutil.which("google-chrome"),
+            shutil.which("google-chrome-stable"),
+            shutil.which("chromium-browser"),
+            shutil.which("chromium"),
+        ] if p]
+    else:
+        candidates = []
+
+    chrome_bin = next((c for c in candidates if os.path.isfile(c)), None)
+    if not chrome_bin:
+        logger.debug("No Chrome binary found for auto-launch")
+        return ""
+
+    # Find user's default Chrome profile
+    if sys_name == "Darwin":
+        user_data_dir = os.path.expanduser(
+            "~/Library/Application Support/Google/Chrome"
+        )
+    elif sys_name == "Linux":
+        user_data_dir = os.path.expanduser("~/.config/google-chrome")
+    else:
+        user_data_dir = ""
+
+    try:
+        import subprocess as _sp
+        import shutil
+
+        # Chrome requires a non-default --user-data-dir for CDP.
+        # Create a Hermes profile dir and copy login cookies from the real profile.
+        hermes_profile = os.path.expanduser("~/.hermes/chrome-profile")
+        os.makedirs(hermes_profile, exist_ok=True)
+        if user_data_dir and os.path.isdir(user_data_dir):
+            real_default = os.path.join(user_data_dir, "Default")
+            hermes_default = os.path.join(hermes_profile, "Default")
+            os.makedirs(hermes_default, exist_ok=True)
+            for fname in ("Cookies", "Login Data", "Web Data",
+                          "Preferences", "Secure Preferences"):
+                src = os.path.join(real_default, fname)
+                dst = os.path.join(hermes_default, fname)
+                if os.path.exists(src):
+                    try:
+                        shutil.copy2(src, dst)
+                    except Exception:
+                        pass
+            # Copy Local State from Chrome root
+            ls_src = os.path.join(user_data_dir, "Local State")
+            ls_dst = os.path.join(hermes_profile, "Local State")
+            if os.path.exists(ls_src):
+                try:
+                    shutil.copy2(ls_src, ls_dst)
+                except Exception:
+                    pass
+
+        _sp.Popen(
+            [chrome_bin, f"--remote-debugging-port={port}",
+             f"--user-data-dir={hermes_profile}",
+             "--no-first-run", "--no-default-browser-check",
+             "--headless=new"],
+            stdout=_sp.DEVNULL,
+            stderr=_sp.DEVNULL,
+            start_new_session=True,
+        )
+
+        # Wait for CDP to become available
+        for _ in range(15):
+            _time.sleep(1)
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=1):
+                    logger.info("Chrome launched with CDP on port %d (user profile)", port)
+                    return f"http://localhost:{port}"
+            except (ConnectionRefusedError, OSError):
+                continue
+
+        logger.warning("Chrome launched but CDP port %d not reachable after 15s", port)
+        return ""
+    except Exception as e:
+        logger.warning("Failed to auto-launch Chrome: %s", e)
+        return ""
+
+
 def _get_cdp_override() -> str:
     """Return a normalized user-supplied CDP URL override, or empty string.
 
     When ``BROWSER_CDP_URL`` is set (e.g. via ``/browser connect``), we skip
     both Browserbase and the local headless launcher and connect directly to
     the supplied Chrome DevTools Protocol endpoint.
+
+    If ``BROWSER_USE_REAL_CHROME`` is set (or no cloud provider is configured),
+    automatically launches Chrome with the user's real profile and CDP enabled
+    so the agent can use existing logins (Instagram, Twitter, LinkedIn, etc.).
     """
-    return _resolve_cdp_override(os.environ.get("BROWSER_CDP_URL", ""))
+    # Explicit CDP URL takes priority
+    explicit = _resolve_cdp_override(os.environ.get("BROWSER_CDP_URL", ""))
+    if explicit:
+        return explicit
+
+    # Auto-connect to real Chrome if enabled
+    hermes_home = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+    env_path = hermes_home / ".env"
+    use_real = os.environ.get("BROWSER_USE_REAL_CHROME", "").strip().lower()
+
+    # Also check .env file for the setting
+    if not use_real and env_path.exists():
+        try:
+            with open(env_path) as f:
+                for line in f:
+                    if line.strip().startswith("BROWSER_USE_REAL_CHROME="):
+                        use_real = line.split("=", 1)[1].strip().strip('"').lower()
+                        break
+        except Exception:
+            pass
+
+    if use_real in ("1", "true", "yes"):
+        cdp_url = _auto_launch_chrome_cdp()
+        if cdp_url:
+            # Cache it so we don't re-launch every time
+            os.environ["BROWSER_CDP_URL"] = cdp_url
+            return _resolve_cdp_override(cdp_url)
+
+    return ""
 
 
 # ============================================================================
@@ -660,6 +803,38 @@ BROWSER_TOOL_SCHEMAS = [
                 "expression": {
                     "type": "string",
                     "description": "JavaScript expression to evaluate in the page context. Runs in the browser like DevTools console — full access to DOM, window, document. Return values are serialized to JSON. Example: 'document.title' or 'document.querySelectorAll(\"a\").length'"
+                }
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "browser_upload_file",
+        "description": "Upload a file to the page by setting it on a <input type='file'> element. Bypasses the native OS file picker dialog by using Chrome DevTools Protocol directly. Use this AFTER navigating to an upload page (e.g., Instagram Create Post dialog). Works with Instagram, Twitter, LinkedIn, and any site with a file upload input. The file must exist on disk — use browser_save_image to save images from web pages first.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "file_path": {
+                    "type": "string",
+                    "description": "Absolute path to the file to upload (e.g., /Users/name/.hermes/generated-images/photo.png)"
+                }
+            },
+            "required": ["file_path"]
+        }
+    },
+    {
+        "name": "browser_save_image",
+        "description": "Save an image from the current page to disk. Finds images on the page and downloads them using CDP, bypassing the OS save dialog. Use this to save AI-generated images from Google AI Studio, or any image visible on a web page. Returns the file path of the saved image. Use css_selector to target a specific image, or leave empty to save the largest image on the page.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "css_selector": {
+                    "type": "string",
+                    "description": "CSS selector to find the image element (e.g., 'img.generated-image', 'canvas', '[data-testid=\"image\"]'). If empty, saves the largest image on the page."
+                },
+                "filename": {
+                    "type": "string",
+                    "description": "Optional filename for the saved image (e.g., 'instagram_post.png'). If omitted, auto-generated from timestamp."
                 }
             },
             "required": []
@@ -2015,7 +2190,7 @@ def cleanup_browser(task_id: Optional[str] = None) -> None:
 def cleanup_all_browsers() -> None:
     """
     Clean up all active browser sessions.
-    
+
     Useful for cleanup on shutdown.
     """
     with _cleanup_lock:
@@ -2024,10 +2199,458 @@ def cleanup_all_browsers() -> None:
         cleanup_browser(task_id)
 
 
+# Auto-register with cleanup registry
+try:
+    from agent.cleanup_registry import register_cleanup as _register_cleanup
+    _register_cleanup(cleanup_all_browsers)
+except ImportError:
+    pass
+
+
+def browser_upload_file(file_path: str, task_id: Optional[str] = None) -> str:
+    """Upload a file to a file input element on the page using CDP protocol.
+
+    This bypasses the native OS file picker by communicating directly with
+    Chrome DevTools Protocol.  The function:
+    1. Finds the first ``<input type="file">`` on the page via CDP.
+    2. Sets the file using ``DOM.setFileInputFiles``.
+    3. Dispatches a ``change`` event so the page picks it up.
+
+    Works with Instagram, Twitter, LinkedIn, and any other site that uses
+    a standard file input for uploads.
+
+    Args:
+        file_path: Absolute path to the file on disk.
+        task_id: Task identifier for session isolation.
+
+    Returns:
+        JSON string with upload result.
+    """
+    import urllib.request
+    import urllib.error
+
+    effective_task_id = task_id or "default"
+
+    # Validate file exists
+    if not os.path.isfile(file_path):
+        return json.dumps({
+            "success": False,
+            "error": f"File not found: {file_path}",
+        })
+
+    # Get CDP URL from the session or env
+    cdp_http_url = None
+    with _cleanup_lock:
+        session_info = _active_sessions.get(effective_task_id)
+    if session_info and session_info.get("cdp_url"):
+        raw = session_info["cdp_url"]
+        # Convert ws:// to http:// for REST calls
+        cdp_http_url = raw.replace("ws://", "http://").replace("wss://", "https://")
+        # Strip path (e.g. /devtools/browser/xxx) for the HTTP API
+        from urllib.parse import urlparse
+        parsed = urlparse(cdp_http_url)
+        cdp_http_url = f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"
+    if not cdp_http_url:
+        # Try env
+        env_url = os.environ.get("BROWSER_CDP_URL", "")
+        if env_url:
+            cdp_http_url = env_url.replace("ws://", "http://").replace("wss://", "https://")
+            from urllib.parse import urlparse
+            parsed = urlparse(cdp_http_url)
+            cdp_http_url = f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"
+
+    if not cdp_http_url:
+        return json.dumps({
+            "success": False,
+            "error": "No CDP connection available. Browser must be running with CDP enabled.",
+        })
+
+    try:
+        # Step 1: Get the first page/tab's WebSocket debugger URL
+        pages_url = f"{cdp_http_url}/json"
+        req = urllib.request.Request(pages_url)
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            pages = json.loads(resp.read())
+
+        # Find the active page (not devtools or extension)
+        ws_url = None
+        for page in pages:
+            if page.get("type") == "page":
+                ws_url = page.get("webSocketDebuggerUrl")
+                if ws_url:
+                    break
+
+        if not ws_url:
+            return json.dumps({
+                "success": False,
+                "error": "No active browser page found via CDP.",
+            })
+
+        # Step 2: Send CDP commands via WebSocket
+        import websocket  # websocket-client
+
+        ws = websocket.create_connection(ws_url, timeout=10)
+        cmd_id = 1
+
+        def send_cdp(method: str, params: dict = None) -> dict:
+            nonlocal cmd_id
+            msg = {"id": cmd_id, "method": method, "params": params or {}}
+            ws.send(json.dumps(msg))
+            # Read responses until we get the one matching our id
+            while True:
+                resp_raw = ws.recv()
+                resp_data = json.loads(resp_raw)
+                if resp_data.get("id") == cmd_id:
+                    cmd_id += 1
+                    return resp_data
+                # Skip events
+
+        try:
+            # Enable DOM
+            send_cdp("DOM.enable")
+
+            # Get document root
+            doc = send_cdp("DOM.getDocument", {"depth": 0})
+            root_node_id = doc["result"]["root"]["nodeId"]
+
+            # Find file input
+            query = send_cdp("DOM.querySelector", {
+                "nodeId": root_node_id,
+                "selector": 'input[type="file"]',
+            })
+            file_input_id = query["result"].get("nodeId", 0)
+
+            if not file_input_id:
+                # Some sites use hidden file inputs — try broader search
+                query = send_cdp("DOM.querySelectorAll", {
+                    "nodeId": root_node_id,
+                    "selector": "input[type=file]",
+                })
+                node_ids = query["result"].get("nodeIds", [])
+                if node_ids:
+                    file_input_id = node_ids[0]
+
+            if not file_input_id:
+                ws.close()
+                return json.dumps({
+                    "success": False,
+                    "error": "No <input type='file'> found on the page. "
+                             "Navigate to the upload dialog first (click Create/+ button).",
+                })
+
+            # Set the file on the input
+            result = send_cdp("DOM.setFileInputFiles", {
+                "nodeId": file_input_id,
+                "files": [file_path],
+            })
+
+            if "error" in result:
+                ws.close()
+                return json.dumps({
+                    "success": False,
+                    "error": f"CDP setFileInputFiles failed: {result['error']}",
+                })
+
+            # Dispatch change event to trigger the page's handlers
+            # Resolve to a Runtime object first
+            resolve = send_cdp("DOM.resolveNode", {"nodeId": file_input_id})
+            object_id = resolve.get("result", {}).get("object", {}).get("objectId")
+
+            if object_id:
+                send_cdp("Runtime.callFunctionOn", {
+                    "objectId": object_id,
+                    "functionDeclaration": """function() {
+                        this.dispatchEvent(new Event('change', {bubbles: true}));
+                        this.dispatchEvent(new Event('input', {bubbles: true}));
+                    }""",
+                    "returnByValue": True,
+                })
+
+        finally:
+            ws.close()
+
+        logger.info("File uploaded via CDP: %s", file_path)
+        return json.dumps({
+            "success": True,
+            "file": file_path,
+            "message": "File set on input element. The page should now show the upload preview.",
+        })
+
+    except ImportError:
+        # websocket-client not installed — use a subprocess fallback
+        logger.warning("websocket-client not installed, trying pip install")
+        try:
+            subprocess.check_call(
+                [sys.executable, "-m", "pip", "install", "websocket-client", "-q"],
+                timeout=30,
+            )
+            # Retry recursively after install
+            return browser_upload_file(file_path, task_id)
+        except Exception as install_err:
+            return json.dumps({
+                "success": False,
+                "error": f"websocket-client not installed and auto-install failed: {install_err}. "
+                         f"Run: pip install websocket-client",
+            })
+    except Exception as e:
+        logger.error("browser_upload_file failed: %s", e, exc_info=True)
+        return json.dumps({
+            "success": False,
+            "error": str(e),
+        })
+
+
+def browser_save_image(
+    css_selector: str = "",
+    filename: str = "",
+    task_id: Optional[str] = None,
+) -> str:
+    """Save an image from the current page to disk using CDP.
+
+    Supports ``<img>`` elements (any src: https, blob, data URI) and
+    ``<canvas>`` elements.  Uses Chrome DevTools Protocol to evaluate
+    JavaScript that fetches the image data as base64, then writes it
+    to ``~/.hermes/generated-images/``.
+
+    Args:
+        css_selector: CSS selector for the target image.  If empty,
+            picks the largest ``<img>`` on the page.
+        filename: Optional output filename.  Auto-generated if omitted.
+        task_id: Task identifier for session isolation.
+
+    Returns:
+        JSON string with ``success``, ``file_path``, and ``size_bytes``.
+    """
+    import base64 as _b64
+    import urllib.request
+    import urllib.error
+    import time as _time
+
+    effective_task_id = task_id or "default"
+
+    # ---------- resolve CDP HTTP base URL ----------
+    cdp_http_url = None
+    with _cleanup_lock:
+        session_info = _active_sessions.get(effective_task_id)
+    if session_info and session_info.get("cdp_url"):
+        raw = session_info["cdp_url"]
+        cdp_http_url = raw.replace("ws://", "http://").replace("wss://", "https://")
+        from urllib.parse import urlparse
+        parsed = urlparse(cdp_http_url)
+        cdp_http_url = f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"
+    if not cdp_http_url:
+        env_url = os.environ.get("BROWSER_CDP_URL", "")
+        if env_url:
+            cdp_http_url = env_url.replace("ws://", "http://").replace("wss://", "https://")
+            from urllib.parse import urlparse
+            parsed = urlparse(cdp_http_url)
+            cdp_http_url = f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"
+    if not cdp_http_url:
+        return json.dumps({"success": False, "error": "No CDP connection."})
+
+    try:
+        # ---------- get first page WS URL ----------
+        pages_url = f"{cdp_http_url}/json"
+        req = urllib.request.Request(pages_url)
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            pages = json.loads(resp.read())
+        ws_url = None
+        for page in pages:
+            if page.get("type") == "page":
+                ws_url = page.get("webSocketDebuggerUrl")
+                if ws_url:
+                    break
+        if not ws_url:
+            return json.dumps({"success": False, "error": "No active page found."})
+
+        import websocket
+        ws = websocket.create_connection(ws_url, timeout=30)
+        cmd_id = 1
+
+        def send_cdp(method, params=None):
+            nonlocal cmd_id
+            msg = {"id": cmd_id, "method": method, "params": params or {}}
+            ws.send(json.dumps(msg))
+            while True:
+                resp_raw = ws.recv()
+                resp_data = json.loads(resp_raw)
+                if resp_data.get("id") == cmd_id:
+                    cmd_id += 1
+                    return resp_data
+
+        try:
+            # JS that finds the image, converts to base64 data URL
+            if css_selector:
+                find_js = f'''
+                (function() {{
+                    var el = document.querySelector({json.dumps(css_selector)});
+                    if (!el) return JSON.stringify({{error: "Element not found: {css_selector}"}});
+                    return _extractImage(el);
+                }})()
+                '''
+            else:
+                find_js = '''
+                (function() {
+                    // Find the largest image on the page
+                    var imgs = Array.from(document.querySelectorAll('img'));
+                    var canvases = Array.from(document.querySelectorAll('canvas'));
+                    var best = null;
+                    var bestArea = 0;
+                    imgs.forEach(function(img) {
+                        var area = (img.naturalWidth || img.width) * (img.naturalHeight || img.height);
+                        if (area > bestArea) { bestArea = area; best = img; }
+                    });
+                    canvases.forEach(function(c) {
+                        var area = c.width * c.height;
+                        if (area > bestArea) { bestArea = area; best = c; }
+                    });
+                    if (!best) return JSON.stringify({error: "No images found on page"});
+                    return _extractImage(best);
+                })()
+                '''
+
+            # Helper function injected first
+            helper_js = '''
+            window._extractImage = function(el) {
+                try {
+                    if (el.tagName === 'CANVAS') {
+                        return JSON.stringify({data: el.toDataURL('image/png'), width: el.width, height: el.height});
+                    }
+                    // For <img>, draw to canvas to get data
+                    var canvas = document.createElement('canvas');
+                    var w = el.naturalWidth || el.width;
+                    var h = el.naturalHeight || el.height;
+                    canvas.width = w;
+                    canvas.height = h;
+                    var ctx = canvas.getContext('2d');
+                    ctx.drawImage(el, 0, 0);
+                    try {
+                        return JSON.stringify({data: canvas.toDataURL('image/png'), width: w, height: h});
+                    } catch(e) {
+                        // Cross-origin tainted canvas — return the src URL instead
+                        return JSON.stringify({src: el.src, width: w, height: h});
+                    }
+                } catch(e) {
+                    return JSON.stringify({error: e.message});
+                }
+            };
+            "ok"
+            '''
+
+            # Inject helper
+            send_cdp("Runtime.evaluate", {"expression": helper_js})
+
+            # Extract image
+            result = send_cdp("Runtime.evaluate", {
+                "expression": find_js,
+                "returnByValue": True,
+            })
+            value = result.get("result", {}).get("result", {}).get("value", "")
+            if not value:
+                ws.close()
+                return json.dumps({"success": False, "error": "No result from image extraction JS."})
+
+            img_info = json.loads(value)
+
+            if "error" in img_info:
+                ws.close()
+                return json.dumps({"success": False, "error": img_info["error"]})
+
+            # Prepare output dir
+            images_dir = Path(os.path.expanduser("~/.hermes/generated-images"))
+            images_dir.mkdir(parents=True, exist_ok=True)
+
+            ts = int(_time.time())
+            out_filename = filename or f"browser_saved_{ts}.png"
+            if not out_filename.endswith((".png", ".jpg", ".jpeg", ".webp")):
+                out_filename += ".png"
+            out_path = images_dir / out_filename
+
+            if "data" in img_info:
+                # data:image/png;base64,...
+                data_url = img_info["data"]
+                # Strip data URL prefix
+                if "," in data_url:
+                    b64_data = data_url.split(",", 1)[1]
+                else:
+                    b64_data = data_url
+                with open(out_path, "wb") as f:
+                    f.write(_b64.b64decode(b64_data))
+            elif "src" in img_info:
+                # Cross-origin image — fetch via CDP network
+                src = img_info["src"]
+                if src.startswith("blob:"):
+                    # Fetch blob via JS
+                    blob_js = f'''
+                    (async function() {{
+                        try {{
+                            var resp = await fetch("{src}");
+                            var blob = await resp.blob();
+                            return new Promise(function(resolve) {{
+                                var reader = new FileReader();
+                                reader.onloadend = function() {{ resolve(reader.result); }};
+                                reader.readAsDataURL(blob);
+                            }});
+                        }} catch(e) {{
+                            return "ERROR:" + e.message;
+                        }}
+                    }})()
+                    '''
+                    blob_result = send_cdp("Runtime.evaluate", {
+                        "expression": blob_js,
+                        "awaitPromise": True,
+                        "returnByValue": True,
+                    })
+                    data_url = blob_result.get("result", {}).get("result", {}).get("value", "")
+                    if data_url and not data_url.startswith("ERROR:"):
+                        b64_data = data_url.split(",", 1)[1] if "," in data_url else data_url
+                        with open(out_path, "wb") as f:
+                            f.write(_b64.b64decode(b64_data))
+                    else:
+                        ws.close()
+                        return json.dumps({"success": False, "error": f"Could not fetch blob: {data_url}"})
+                else:
+                    # Regular URL — download directly
+                    req = urllib.request.Request(src)
+                    with urllib.request.urlopen(req, timeout=30) as resp:
+                        with open(out_path, "wb") as f:
+                            f.write(resp.read())
+            else:
+                ws.close()
+                return json.dumps({"success": False, "error": "No image data or src URL extracted."})
+
+        finally:
+            ws.close()
+
+        file_size = out_path.stat().st_size
+        logger.info("Image saved from browser: %s (%d bytes)", out_path, file_size)
+        return json.dumps({
+            "success": True,
+            "file_path": str(out_path),
+            "filename": out_filename,
+            "size_bytes": file_size,
+            "width": img_info.get("width", 0),
+            "height": img_info.get("height", 0),
+        })
+
+    except ImportError:
+        try:
+            subprocess.check_call(
+                [sys.executable, "-m", "pip", "install", "websocket-client", "-q"],
+                timeout=30,
+            )
+            return browser_save_image(css_selector, filename, task_id)
+        except Exception as e:
+            return json.dumps({"success": False, "error": f"websocket-client not installed: {e}"})
+    except Exception as e:
+        logger.error("browser_save_image failed: %s", e, exc_info=True)
+        return json.dumps({"success": False, "error": str(e)})
+
+
 def get_active_browser_sessions() -> Dict[str, Dict[str, str]]:
     """
     Get information about active browser sessions.
-    
+
     Returns:
         Dict mapping task_id to session info (session_name, bb_session_id, cdp_url)
     """
@@ -2197,4 +2820,24 @@ registry.register(
     handler=lambda args, **kw: browser_console(clear=args.get("clear", False), expression=args.get("expression"), task_id=kw.get("task_id")),
     check_fn=check_browser_requirements,
     emoji="🖥️",
+)
+registry.register(
+    name="browser_upload_file",
+    toolset="browser",
+    schema=_BROWSER_SCHEMA_MAP["browser_upload_file"],
+    handler=lambda args, **kw: browser_upload_file(file_path=args.get("file_path", ""), task_id=kw.get("task_id")),
+    check_fn=check_browser_requirements,
+    emoji="📤",
+)
+registry.register(
+    name="browser_save_image",
+    toolset="browser",
+    schema=_BROWSER_SCHEMA_MAP["browser_save_image"],
+    handler=lambda args, **kw: browser_save_image(
+        css_selector=args.get("css_selector", ""),
+        filename=args.get("filename", ""),
+        task_id=kw.get("task_id"),
+    ),
+    check_fn=check_browser_requirements,
+    emoji="💾",
 )

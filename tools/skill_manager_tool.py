@@ -301,6 +301,35 @@ def _create_skill(name: str, content: str, category: str = None) -> Dict[str, An
     if err:
         return {"success": False, "error": err}
 
+    # ── Learning guardrails: quality scoring + skill count limit ──────────────
+    _quality = 0.0
+    try:
+        from agent.learning_validator import check_skill, check_skill_limit
+        from agent.learning_journal import record_skill_event
+
+        _quality, quality_err = check_skill(name, content)
+        if quality_err:
+            record_skill_event(
+                action="create", name=name,
+                previous_content=None, current_content=content,
+                quality=_quality, outcome="rejected", error=quality_err,
+            )
+            return {"success": False, "error": quality_err, "quality_score": _quality}
+
+        skill_count = sum(1 for _ in SKILLS_DIR.rglob("SKILL.md")) if SKILLS_DIR.exists() else 0
+        limit_err = check_skill_limit(skill_count)
+        if limit_err:
+            record_skill_event(
+                action="create", name=name,
+                previous_content=None, current_content=content,
+                quality=_quality, outcome="rejected", error=limit_err,
+            )
+            return {"success": False, "error": limit_err}
+
+        _lv_available = True
+    except ImportError:
+        _lv_available = False
+
     # Check for name collisions across all directories
     existing = _find_skill(name)
     if existing:
@@ -321,13 +350,27 @@ def _create_skill(name: str, content: str, category: str = None) -> Dict[str, An
     scan_error = _security_scan_skill(skill_dir)
     if scan_error:
         shutil.rmtree(skill_dir, ignore_errors=True)
+        if _lv_available:
+            record_skill_event(
+                action="create", name=name,
+                previous_content=None, current_content=content,
+                quality=_quality, outcome="rejected", error=scan_error,
+            )
         return {"success": False, "error": scan_error}
+
+    if _lv_available:
+        record_skill_event(
+            action="create", name=name,
+            previous_content=None, current_content=content,
+            quality=_quality, outcome="accepted",
+        )
 
     result = {
         "success": True,
         "message": f"Skill '{name}' created.",
         "path": str(skill_dir.relative_to(SKILLS_DIR)),
         "skill_md": str(skill_md),
+        "quality_score": _quality,
     }
     if category:
         result["category"] = category
@@ -348,6 +391,24 @@ def _edit_skill(name: str, content: str) -> Dict[str, Any]:
     if err:
         return {"success": False, "error": err}
 
+    # ── Learning guardrails: quality scoring ──────────────────────────────────
+    _quality = 0.0
+    _lv_available = False
+    try:
+        from agent.learning_validator import check_skill
+        from agent.learning_journal import record_skill_event
+        _quality, quality_err = check_skill(name, content)
+        if quality_err:
+            record_skill_event(
+                action="edit", name=name,
+                previous_content=None, current_content=content,
+                quality=_quality, outcome="rejected", error=quality_err,
+            )
+            return {"success": False, "error": quality_err, "quality_score": _quality}
+        _lv_available = True
+    except ImportError:
+        pass
+
     existing = _find_skill(name)
     if not existing:
         return {"success": False, "error": f"Skill '{name}' not found. Use skills_list() to see available skills."}
@@ -362,12 +423,26 @@ def _edit_skill(name: str, content: str) -> Dict[str, Any]:
     if scan_error:
         if original_content is not None:
             _atomic_write_text(skill_md, original_content)
+        if _lv_available:
+            record_skill_event(
+                action="edit", name=name,
+                previous_content=original_content, current_content=content,
+                quality=_quality, outcome="rejected", error=scan_error,
+            )
         return {"success": False, "error": scan_error}
+
+    if _lv_available:
+        record_skill_event(
+            action="edit", name=name,
+            previous_content=original_content, current_content=content,
+            quality=_quality, outcome="accepted",
+        )
 
     return {
         "success": True,
         "message": f"Skill '{name}' updated.",
         "path": str(existing["path"]),
+        "quality_score": _quality,
     }
 
 
