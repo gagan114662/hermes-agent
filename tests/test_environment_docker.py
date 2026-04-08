@@ -173,12 +173,10 @@ class TestDockerEnvironment:
     def test_cleanup_stops_container(self):
         env = self._make_env()
         env._container_id = "abc123"
-        mock_result = MagicMock()
-        mock_result.returncode = 0
-        with patch("subprocess.run", return_value=mock_result) as mock_run:
+        with patch("subprocess.Popen") as mock_popen:
             env.cleanup()
-        # Should have called docker rm
-        calls = [str(c) for c in mock_run.call_args_list]
+        # cleanup uses Popen with shell=True; container ID must appear in the command
+        calls = [str(c) for c in mock_popen.call_args_list]
         assert any("abc123" in str(c) for c in calls)
 
     def test_cleanup_when_no_container(self):

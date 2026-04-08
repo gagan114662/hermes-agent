@@ -41,6 +41,8 @@ def _make_runner():
     runner._voice_mode = {}
     runner._background_tasks = set()
     runner._is_user_authorized = lambda _source: True
+    runner.rate_limiter = MagicMock()
+    from gateway.rate_limiter import RateResult; runner.rate_limiter.check.return_value = RateResult(limited=False, remaining=100, retry_after=0, user_key="")
     return runner
 
 

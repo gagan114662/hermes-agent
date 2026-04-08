@@ -15,10 +15,20 @@ def _make_daytona_env(image="ubuntu:22.04", **kwargs):
     mock_sandbox.id = "sandbox-xyz"
     mock_sandbox.state = MagicMock()
 
+    # Make process.exec("echo $HOME").result.strip() return a real string so
+    # __init__ doesn't overwrite self.cwd with a MagicMock.
+    mock_sandbox.process.exec.return_value.result.strip.return_value = "/home/daytona"
+
     mock_daytona_mod = MagicMock()
-    mock_daytona_mod.Daytona.return_value = MagicMock()
-    mock_daytona_mod.Daytona.return_value.create.return_value = mock_sandbox
-    mock_daytona_mod.Daytona.return_value.get.side_effect = Exception("not found")
+    mock_client = MagicMock()
+    mock_client.create.return_value = mock_sandbox
+    mock_client.get.side_effect = Exception("not found")
+    # list() must return empty items so the legacy fallback doesn't hijack _sandbox
+    mock_page = MagicMock()
+    mock_page.items = []
+    mock_client.list.return_value = mock_page
+    mock_daytona_mod = MagicMock()
+    mock_daytona_mod.Daytona.return_value = mock_client
     mock_daytona_mod.CreateSandboxFromImageParams = MagicMock()
     mock_daytona_mod.DaytonaError = Exception
     mock_daytona_mod.Resources = MagicMock()
