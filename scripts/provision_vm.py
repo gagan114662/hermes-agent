@@ -70,7 +70,7 @@ curl -fsSL https://ollama.com/install.sh | sh
 systemctl enable ollama
 systemctl start ollama
 sleep 10
-ollama pull gemma3:4b
+ollama pull llama3.2:3b
 cat > /etc/systemd/system/hermes-gateway.service << 'SVCEOF'
 [Unit]
 Description=Hermes Gateway
@@ -147,7 +147,7 @@ def provision_vm(customer_id: str, customer_config: dict) -> dict:
 
     hermes_config = (
         f"model:\n"
-        f"  default: gemma3:4b\n"
+        f"  default: llama3.2:3b\n"
         f"  provider: ollama\n"
         f"  base_url: 'http://localhost:11434'\n"
         f"  api_key: 'ollama'\n"

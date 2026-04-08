@@ -91,6 +91,10 @@ _HERMES_CORE_TOOLS = [
     "outreach_sequence", "email_finder",
     # Business wiki — self-updating knowledge base (Karpathy LLM-wiki pattern)
     "wiki_update", "wiki_query", "wiki_read", "wiki_list", "wiki_ingest",
+    # Second Brain — multi-vault domain knowledge system
+    "second_brain_scaffold", "second_brain_list",
+    "second_brain_ingest", "second_brain_ingest_all",
+    "second_brain_query", "second_brain_lint",
     # SDLC framework — professional systems builder
     "discovery_run", "discovery_read",
     "scope_create", "scope_check", "scope_read",
@@ -117,6 +121,7 @@ TOOLSETS = {
             "calendar_list", "calendar_create",
             "sheets_get", "sheets_append",
         ],
+        "includes": [],
     },
     "reach": {
         "description": "Platform access tools: YouTube transcripts, Twitter/X search, Reddit, RSS feeds, and clean web reading via Jina",
@@ -126,6 +131,7 @@ TOOLSETS = {
             "reddit_read", "reddit_search",
             "rss_fetch", "jina_read",
         ],
+        "includes": [],
     },
     "web": {
         "description": "Web research and content extraction tools",
@@ -166,6 +172,17 @@ TOOLSETS = {
     "skills": {
         "description": "Access, create, edit, and manage skill documents with specialized instructions and knowledge",
         "tools": ["skills_list", "skill_view", "skill_manage"],
+        "includes": []
+    },
+
+    "second-brain": {
+        "description": "Multi-vault domain knowledge system — scaffold dedicated second brain vaults, ingest source files into wiki pages, query accumulated knowledge, and audit wiki health",
+        "tools": [
+            "second_brain_scaffold", "second_brain_list",
+            "second_brain_ingest", "second_brain_ingest_all",
+            "second_brain_query", "second_brain_lint",
+            "read_file", "write_file", "search_files",
+        ],
         "includes": []
     },
     

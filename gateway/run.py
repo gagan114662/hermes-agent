@@ -286,9 +286,11 @@ def _resolve_runtime_agent_kwargs() -> dict:
     )
 
     try:
-        runtime = resolve_runtime_provider(
-            requested=os.getenv("HERMES_INFERENCE_PROVIDER"),
-        )
+        # Let resolve_runtime_provider() apply its normal precedence:
+        # config.yaml model.provider first, env override second. Passing the
+        # env var explicitly here would force stale process state to win over
+        # the saved Hermes config during gateway runs.
+        runtime = resolve_runtime_provider()
     except Exception as exc:
         raise RuntimeError(format_runtime_provider_error(exc)) from exc
 
@@ -497,7 +499,11 @@ class GatewayRunner:
         # DM pairing store for code-based user authorization
         from gateway.pairing import PairingStore
         self.pairing_store = PairingStore()
-        
+
+        # Per-user message rate limiter
+        from gateway.rate_limiter import RateLimiter
+        self.rate_limiter = RateLimiter()
+
         # Event hook system
         from gateway.hooks import HookRegistry
         self.hooks = HookRegistry()
@@ -1741,6 +1747,43 @@ class GatewayRunner:
                     self.pairing_store._record_rate_limit(platform_name, source.user_id)
             return None
         
+        # ── Rate limiting ──────────────────────────────────────────────────────
+        platform_name_rl = source.platform.value if source.platform else "unknown"
+        rl_result = self.rate_limiter.check(platform_name_rl, source.user_id or "")
+        if rl_result.limited:
+            adapter = self.adapters.get(source.platform)
+            if adapter and source.chat_id:
+                try:
+                    await adapter.send(
+                        source.chat_id,
+                        f"You're sending messages too fast. Please wait {rl_result.retry_after}s."
+                    )
+                except Exception:
+                    pass
+            return None
+
+        # ── Input sanitization ─────────────────────────────────────────────────
+        if event.text:
+            try:
+                from agent.sanitizer import sanitize_message
+                event.text = sanitize_message(
+                    event.text,
+                    source_id=f"{platform_name_rl}:{source.user_id}",
+                )
+            except Exception:
+                pass  # sanitizer failure must never block a message
+
+        # ── Audit context (propagated into tool dispatch for this turn) ────────
+        try:
+            from tools.audit import set_audit_context
+            set_audit_context(
+                user_id=source.user_id or "",
+                platform=platform_name_rl,
+                session_id=self._session_key_for_source(source),
+            )
+        except Exception:
+            pass
+
         # PRIORITY handling when an agent is already running for this session.
         # Default behavior is to interrupt immediately so user text/stop messages
         # are handled with minimal latency.
@@ -2914,6 +2957,11 @@ class GatewayRunner:
         finally:
             # Clear session env
             self._clear_session_env()
+            try:
+                from tools.audit import clear_audit_context
+                clear_audit_context()
+            except Exception:
+                pass
     
     def _format_session_info(self) -> str:
         """Resolve current model config and return a formatted info block.

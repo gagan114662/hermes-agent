@@ -1,0 +1,35 @@
+# Pre-commit hook configuration for Hermes Agent.
+# Install: pip install pre-commit && pre-commit install
+# Run manually: pre-commit run --all-files
+
+repos:
+  # Hermes custom secret scanner
+  - repo: local
+    hooks:
+      - id: scan-secrets
+        name: Scan staged files for leaked secrets
+        entry: python3 scripts/scan_secrets.py
+        language: python
+        stages: [pre-commit]
+        pass_filenames: false
+        always_run: true
+
+  # Catch accidental .env commits
+  - repo: local
+    hooks:
+      - id: no-dotenv-commit
+        name: Block .env file commits
+        entry: bash -c 'echo "ERROR: Attempting to commit a .env file. Add it to .gitignore." && exit 1'
+        language: system
+        files: '(^|/)\.env$'
+        stages: [pre-commit]
+
+  # Prevent committing auth.json (should stay in ~/.hermes/)
+  - repo: local
+    hooks:
+      - id: no-auth-json
+        name: Block auth.json commits
+        entry: bash -c 'echo "ERROR: Attempting to commit auth.json. This file contains OAuth tokens." && exit 1'
+        language: system
+        files: 'auth\.json$'
+        stages: [pre-commit]

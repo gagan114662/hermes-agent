@@ -16,10 +16,19 @@ Import chain (circular-import safe):
 
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Set
 
 logger = logging.getLogger(__name__)
+
+# Lazy import to avoid circular imports at module load time
+def _get_metrics():
+    try:
+        from tools.metrics import METRICS  # noqa: PLC0415
+        return METRICS
+    except Exception:
+        return None
 
 
 @dataclass
@@ -166,21 +175,68 @@ class ToolRegistry:
     def dispatch(self, name: str, args: dict, **kwargs) -> str:
         """Execute a tool handler by name.
 
+        * Args are validated against the tool's JSON schema before dispatch.
+        * Sandbox policy is checked for path/network args.
         * Async handlers are bridged automatically via ``_run_async()``.
         * All exceptions are caught and returned as ``{"error": "..."}``
           for consistent error format.
+        * Execution time and success/failure are recorded in METRICS.
+        * Every call is written to the structured audit log.
         """
         entry = self._tools.get(name)
         if not entry:
             return json.dumps({"error": f"Unknown tool: {name}"})
+
+        # ── 1. Schema validation ───────────────────────────────────────────
+        validation_error = _validate_args(name, args, entry.schema)
+        if validation_error:
+            _record_audit(name, args, "error", 0.0, error=validation_error)
+            return json.dumps({"error": validation_error})
+
+        # ── 2. Sandbox policy check ────────────────────────────────────────
+        try:
+            from tools.sandbox import check_args, SandboxViolation
+            check_args(name, args)
+        except Exception as sandbox_exc:
+            # SandboxViolation (strict mode) blocks the call; other errors are ignored
+            from tools.sandbox import SandboxViolation as _SBV
+            if isinstance(sandbox_exc, _SBV):
+                msg = f"Sandbox policy violation: {sandbox_exc}"
+                _record_audit(name, args, "error", 0.0, error=msg)
+                return json.dumps({"error": msg})
+
+        t0 = time.perf_counter()
+        success = True
+        error_msg: Optional[str] = None
         try:
             if entry.is_async:
                 from model_tools import _run_async
-                return _run_async(entry.handler(args, **kwargs))
-            return entry.handler(args, **kwargs)
+                result = _run_async(entry.handler(args, **kwargs))
+            else:
+                result = entry.handler(args, **kwargs)
+            # Treat returned error dicts as failures for metrics purposes
+            if isinstance(result, str):
+                try:
+                    parsed = json.loads(result)
+                    if isinstance(parsed, dict) and "error" in parsed:
+                        success = False
+                        error_msg = parsed.get("error")
+                except (json.JSONDecodeError, ValueError):
+                    pass
+            return result
         except Exception as e:
+            success = False
+            error_msg = f"{type(e).__name__}: {e}"
             logger.exception("Tool %s dispatch error: %s", name, e)
-            return json.dumps({"error": f"Tool execution failed: {type(e).__name__}: {e}"})
+            return json.dumps({"error": f"Tool execution failed: {error_msg}"})
+        finally:
+            duration_ms = (time.perf_counter() - t0) * 1000
+            metrics = _get_metrics()
+            if metrics is not None:
+                metrics.record(name, duration_ms, success=success)
+            # ── 3. Audit log ───────────────────────────────────────────────
+            outcome = "ok" if success else "error"
+            _record_audit(name, args, outcome, duration_ms, error=error_msg)
 
     # ------------------------------------------------------------------
     # Query helpers  (replace redundant dicts in model_tools.py)
@@ -303,6 +359,60 @@ class ToolRegistry:
                     "tools": [e.name for e in self._tools.values() if e.toolset == ts],
                 })
         return available, unavailable
+
+
+# ── Dispatch helpers (schema validation + audit) ──────────────────────────────
+
+def _validate_args(tool_name: str, args: dict, schema: dict) -> Optional[str]:
+    """
+    Validate *args* against the tool's JSON Schema.
+
+    Returns an error string on failure, None on success.
+    jsonschema is a core dependency (already installed) — if it somehow isn't
+    available, validation is skipped (fail-open) with a debug log.
+    """
+    parameters = schema.get("parameters") if schema else None
+    if not parameters or not isinstance(parameters, dict):
+        return None  # no schema to validate against
+    try:
+        import jsonschema  # noqa: PLC0415
+    except ImportError:
+        logger.debug("jsonschema not available; skipping validation for tool %s", tool_name)
+        return None
+    try:
+        jsonschema.validate(instance=args, schema=parameters)
+        return None
+    except jsonschema.ValidationError as exc:
+        path = " → ".join(str(p) for p in exc.absolute_path) if exc.absolute_path else "root"
+        return f"Invalid arguments for '{tool_name}' (at {path}): {exc.message}"
+    except jsonschema.SchemaError as exc:
+        logger.debug("Tool %s has an invalid schema: %s", tool_name, exc.message)
+        return None  # broken schema is an authoring error, not a user error
+    except Exception:
+        logger.debug("Schema validation unavailable for tool %s; skipping", tool_name)
+        return None
+
+
+def _record_audit(
+    tool_name: str,
+    args: dict,
+    outcome: str,
+    duration_ms: float,
+    *,
+    error: Optional[str] = None,
+) -> None:
+    """Write one audit record; never raises."""
+    try:
+        from tools.audit import record_tool_call  # noqa: PLC0415
+        record_tool_call(
+            tool=tool_name,
+            args=args,
+            outcome=outcome,
+            duration_ms=duration_ms,
+            error=error,
+        )
+    except Exception:
+        pass  # audit failures must never break tool execution
 
 
 # Module-level singleton

@@ -197,6 +197,24 @@ class MemoryStore:
         if scan_error:
             return {"success": False, "error": scan_error}
 
+        # ── Learning guardrails: schema + quality validation ──────────────────
+        try:
+            from agent.learning_validator import check_memory, check_memory_limit
+            from agent.learning_journal import record_memory_event
+            _lv_available = True
+        except ImportError:
+            _lv_available = False
+
+        if _lv_available:
+            quality, quality_err = check_memory(content, target)
+            if quality_err:
+                record_memory_event(
+                    action="add", target=target,
+                    previous_entries=[], current_entries=[],
+                    quality=quality, outcome="rejected", error=quality_err,
+                )
+                return {"success": False, "error": quality_err, "quality_score": quality}
+
         with self._file_lock(self._path_for(target)):
             # Re-read from disk under lock to pick up writes from other sessions
             self._reload_target(target)
@@ -207,6 +225,17 @@ class MemoryStore:
             # Reject exact duplicates
             if content in entries:
                 return self._success_response(target, "Entry already exists (no duplicate added).")
+
+            # ── Per-profile entry count limit ─────────────────────────────────
+            if _lv_available:
+                limit_err = check_memory_limit(len(entries))
+                if limit_err:
+                    record_memory_event(
+                        action="add", target=target,
+                        previous_entries=entries, current_entries=entries,
+                        quality=quality, outcome="rejected", error=limit_err,
+                    )
+                    return {"success": False, "error": limit_err}
 
             # Calculate what the new total would be
             new_entries = entries + [content]
@@ -225,11 +254,23 @@ class MemoryStore:
                     "usage": f"{current:,}/{limit:,}",
                 }
 
+            previous_entries = list(entries)
             entries.append(content)
             self._set_entries(target, entries)
             self.save_to_disk(target)
 
-        return self._success_response(target, "Entry added.")
+            # ── Journal accepted write ────────────────────────────────────────
+            if _lv_available:
+                record_memory_event(
+                    action="add", target=target,
+                    previous_entries=previous_entries, current_entries=list(entries),
+                    quality=quality, outcome="accepted",
+                )
+
+        result = self._success_response(target, "Entry added.")
+        if _lv_available:
+            result["quality_score"] = quality
+        return result
 
     def replace(self, target: str, old_text: str, new_content: str) -> Dict[str, Any]:
         """Find entry containing old_text substring, replace it with new_content."""
@@ -283,9 +324,20 @@ class MemoryStore:
                     ),
                 }
 
+            previous_entries = list(entries)
             entries[idx] = new_content
             self._set_entries(target, entries)
             self.save_to_disk(target)
+
+            try:
+                from agent.learning_journal import record_memory_event
+                record_memory_event(
+                    action="replace", target=target,
+                    previous_entries=previous_entries, current_entries=list(entries),
+                    quality=1.0, outcome="accepted",
+                )
+            except Exception:
+                pass
 
         return self._success_response(target, "Entry replaced.")
 
@@ -317,9 +369,20 @@ class MemoryStore:
                 # All identical -- safe to remove just the first
 
             idx = matches[0][0]
+            previous_entries = list(entries)
             entries.pop(idx)
             self._set_entries(target, entries)
             self.save_to_disk(target)
+
+            try:
+                from agent.learning_journal import record_memory_event
+                record_memory_event(
+                    action="remove", target=target,
+                    previous_entries=previous_entries, current_entries=list(entries),
+                    quality=1.0, outcome="accepted",
+                )
+            except Exception:
+                pass
 
         return self._success_response(target, "Entry removed.")
 

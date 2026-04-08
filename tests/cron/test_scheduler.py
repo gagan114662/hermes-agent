@@ -235,6 +235,92 @@ class TestDeliverResultWrapping:
         assert "Cronjob Response" not in sent_content
         assert "The agent cannot see" not in sent_content
 
+
+class TestRuntimeProviderPrecedence:
+    def test_run_job_does_not_force_stale_env_provider_without_job_override(self, tmp_path, monkeypatch):
+        job = {
+            "id": "provider-precedence-job",
+            "name": "provider precedence",
+            "prompt": "hello",
+        }
+        fake_db = MagicMock()
+        captured = {}
+
+        def fake_resolve_runtime_provider(requested=None, **kwargs):
+            captured["requested"] = requested
+            return {
+                "api_key": "codex-token",
+                "base_url": "https://chatgpt.com/backend-api/codex",
+                "provider": "openai-codex",
+                "api_mode": "codex_responses",
+            }
+
+        monkeypatch.setenv("HERMES_INFERENCE_PROVIDER", "openrouter")
+
+        with patch("cron.scheduler._hermes_home", tmp_path), \
+             patch("cron.scheduler._resolve_origin", return_value=None), \
+             patch("dotenv.load_dotenv"), \
+             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch(
+                 "hermes_cli.runtime_provider.resolve_runtime_provider",
+                 side_effect=fake_resolve_runtime_provider,
+             ), \
+             patch("run_agent.AIAgent") as mock_agent_cls:
+            mock_agent = MagicMock()
+            mock_agent.run_conversation.return_value = {"final_response": "ok"}
+            mock_agent_cls.return_value = mock_agent
+
+            success, output, final_response, error = run_job(job)
+
+        assert success is True
+        assert error is None
+        assert final_response == "ok"
+        assert "ok" in output
+        assert captured["requested"] is None
+
+    def test_run_job_honors_explicit_job_provider_override(self, tmp_path):
+        job = {
+            "id": "provider-override-job",
+            "name": "provider override",
+            "prompt": "hello",
+            "provider": "custom",
+            "base_url": "http://localhost:11434/v1",
+        }
+        fake_db = MagicMock()
+        captured = {}
+
+        def fake_resolve_runtime_provider(requested=None, **kwargs):
+            captured["requested"] = requested
+            captured["explicit_base_url"] = kwargs.get("explicit_base_url")
+            return {
+                "api_key": "ollama",
+                "base_url": "http://localhost:11434/v1",
+                "provider": "custom",
+                "api_mode": "chat_completions",
+            }
+
+        with patch("cron.scheduler._hermes_home", tmp_path), \
+             patch("cron.scheduler._resolve_origin", return_value=None), \
+             patch("dotenv.load_dotenv"), \
+             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch(
+                 "hermes_cli.runtime_provider.resolve_runtime_provider",
+                 side_effect=fake_resolve_runtime_provider,
+             ), \
+             patch("run_agent.AIAgent") as mock_agent_cls:
+            mock_agent = MagicMock()
+            mock_agent.run_conversation.return_value = {"final_response": "ok"}
+            mock_agent_cls.return_value = mock_agent
+
+            success, output, final_response, error = run_job(job)
+
+        assert success is True
+        assert error is None
+        assert final_response == "ok"
+        assert "ok" in output
+        assert captured["requested"] == "custom"
+        assert captured["explicit_base_url"] == "http://localhost:11434/v1"
+
     def test_no_mirror_to_session_call(self):
         """Cron deliveries should NOT mirror into the gateway session."""
         from gateway.config import Platform

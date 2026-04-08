@@ -396,7 +396,9 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         )
         try:
             runtime_kwargs = {
-                "requested": job.get("provider") or os.getenv("HERMES_INFERENCE_PROVIDER"),
+                # Honor an explicit per-job provider override, otherwise let
+                # resolve_runtime_provider() use config.yaml before env.
+                "requested": job.get("provider") or None,
             }
             if job.get("base_url"):
                 runtime_kwargs["explicit_base_url"] = job.get("base_url")
