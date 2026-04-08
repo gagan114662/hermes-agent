@@ -41,7 +41,9 @@ def _make_runner(session_db=None):
     mock_store = MagicMock()
     mock_store.get_or_create_session.return_value = mock_session_entry
     runner.session_store = mock_store
-
+    from gateway.rate_limiter import RateResult
+    runner.rate_limiter = MagicMock()
+    runner.rate_limiter.check.return_value = RateResult(limited=False, remaining=100, retry_after=0, user_key="")
     return runner
 
 
