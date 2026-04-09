@@ -340,6 +340,49 @@ def tool_error(message, **extra) -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
+def _validate_args(tool_name: str, args: dict, schema: dict) -> Optional[str]:
+    """Validate tool call arguments against the tool's JSON Schema.
+
+    Returns None if valid, or an error string describing the problem.
+    Only validates required fields and basic type checking — does not
+    use jsonschema to keep the dependency footprint small.
+    """
+    parameters = schema.get("parameters")
+    if not parameters:
+        return None
+
+    props = parameters.get("properties", {})
+    required = parameters.get("required", [])
+
+    # Check required fields are present
+    for field in required:
+        if field not in args:
+            return f"Tool '{tool_name}': missing required argument '{field}'"
+
+    # Check types of provided fields
+    for key, value in args.items():
+        prop = props.get(key)
+        if not prop:
+            continue  # extra properties allowed
+        expected_type = prop.get("type")
+        if not expected_type:
+            continue
+        if expected_type == "string" and not isinstance(value, str):
+            return f"Tool '{tool_name}': argument '{key}' must be a string, got {type(value).__name__}"
+        if expected_type == "integer" and not isinstance(value, int):
+            return f"Tool '{tool_name}': argument '{key}' must be an integer, got {type(value).__name__}"
+        if expected_type == "number" and not isinstance(value, (int, float)):
+            return f"Tool '{tool_name}': argument '{key}' must be a number, got {type(value).__name__}"
+        if expected_type == "boolean" and not isinstance(value, bool):
+            return f"Tool '{tool_name}': argument '{key}' must be a boolean, got {type(value).__name__}"
+        if expected_type == "array" and not isinstance(value, list):
+            return f"Tool '{tool_name}': argument '{key}' must be an array, got {type(value).__name__}"
+        if expected_type == "object" and not isinstance(value, dict):
+            return f"Tool '{tool_name}': argument '{key}' must be an object, got {type(value).__name__}"
+
+    return None
+
+
 def tool_result(data=None, **kwargs) -> str:
     """Return a JSON result string for tool handlers.
 
