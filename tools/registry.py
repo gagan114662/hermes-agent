@@ -68,6 +68,7 @@ class ToolRegistry:
         description: str = "",
         emoji: str = "",
         max_result_size_chars: int | float | None = None,
+        is_concurrency_safe: bool = False,
     ):
         """Register a tool.  Called at module-import time by each tool file."""
         existing = self._tools.get(name)
