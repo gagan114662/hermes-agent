@@ -67,8 +67,8 @@ async def test_aggregator_model_passes_max_tokens_to_api_when_set(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_aggregator_model_omits_max_tokens_when_none(monkeypatch):
-    """When max_tokens is None (default), it must not be sent to the API."""
+async def test_aggregator_model_defaults_max_tokens_to_32000_when_none(monkeypatch):
+    """When max_tokens is None (default), it must fall back to 32000 to avoid 402s."""
     captured = {}
 
     async def fake_create(**kwargs):
@@ -84,7 +84,8 @@ async def test_aggregator_model_omits_max_tokens_when_none(monkeypatch):
 
     await moa._run_aggregator_model("sys", "user")  # max_tokens defaults to None
 
-    assert "max_tokens" not in captured, "max_tokens should be omitted when None"
+    assert "max_tokens" in captured, "max_tokens must always be sent to prevent 402 rejections"
+    assert captured["max_tokens"] == 32000, "default max_tokens must be 32000"
 
 
 @pytest.mark.asyncio
