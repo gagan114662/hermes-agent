@@ -4844,7 +4844,27 @@ class GatewayRunner:
         source = event.source
         session_key = self._session_key_for_source(source)
 
-        if session_key not in self._pending_approvals:
+        # Check the blocking approval queue first (new mechanism for parallel subagents)
+        try:
+            from tools.approval import resolve_gateway_approval, has_blocking_approval, count_pending_approvals
+            args_text = event.get_command_args().strip().lower()
+            resolve_all = "all" in args_text
+            if has_blocking_approval(session_key):
+                if resolve_all and "session" in args_text:
+                    n = count_pending_approvals(session_key)
+                    resolve_gateway_approval(session_key, "approved", resolve_all=True)
+                    from tools.approval import approve_session
+                    approve_session(session_key)
+                    return f"✅ Approved {n} command(s) for this session. Resuming..."
+                n = resolve_gateway_approval(session_key, "approved", resolve_all=resolve_all)
+                if n > 0:
+                    if n == 1:
+                        return "✅ Approved. Resuming..."
+                    return f"✅ Approved {n} commands. Resuming..."
+        except ImportError:
+            pass
+
+        if session_key not in getattr(self, "_pending_approvals", {}):
             return "No pending command to approve."
 
         import time as _time

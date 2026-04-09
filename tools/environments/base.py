@@ -534,6 +534,27 @@ class BaseEnvironment(ABC):
     # Shared helpers
     # ------------------------------------------------------------------
 
+    def _build_run_kwargs(self, timeout: int | None, stdin_data: str | None = None) -> dict:
+        """Build subprocess.run() / Popen() keyword arguments.
+
+        Centralises the common kwargs so subclasses and tests can inspect
+        them without duplicating the logic.
+        """
+        effective_timeout = timeout if timeout is not None else self.timeout
+        kw: dict = {
+            "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
+            "timeout": effective_timeout,
+            "stdout": __import__("subprocess").PIPE,
+            "stderr": __import__("subprocess").STDOUT,
+        }
+        if stdin_data is not None:
+            kw["input"] = stdin_data
+        else:
+            kw["stdin"] = __import__("subprocess").DEVNULL
+        return kw
+
     def stop(self):
         """Alias for cleanup (compat with older callers)."""
         self.cleanup()
