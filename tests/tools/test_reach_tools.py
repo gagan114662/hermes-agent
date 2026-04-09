@@ -11,10 +11,10 @@ import pytest
 # ── Import guard ──────────────────────────────────────────────────────────────
 try:
     from tools.reach_tools import (
-        jina_read_fn,
-        rss_fetch_fn,
-        youtube_get_fn,
-        youtube_search_fn,
+        jina_read_tool as jina_read_fn,
+        rss_fetch_tool as rss_fetch_fn,
+        youtube_get_tool as youtube_get_fn,
+        youtube_search_tool as youtube_search_fn,
     )
     _REACH_AVAILABLE = True
 except ImportError:
@@ -28,26 +28,26 @@ pytestmark = pytest.mark.skipif(not _REACH_AVAILABLE, reason="reach_tools not im
 class TestJinaRead:
     def test_returns_string(self):
         """jina_read should always return a string."""
-        with patch("requests.get") as mock_get:
+        with patch("httpx.get") as mock_get:
             mock_resp = MagicMock()
-            mock_resp.status_code = 200
             mock_resp.text = "# Article Title\n\nContent here."
+            mock_resp.raise_for_status = MagicMock()
             mock_get.return_value = mock_resp
             result = jina_read_fn("https://example.com/article")
         assert isinstance(result, str)
 
     def test_handles_request_error(self):
-        import requests
-        with patch("requests.get", side_effect=requests.RequestException("connection failed")):
+        import httpx
+        with patch("httpx.get", side_effect=httpx.RequestError("connection failed")):
             result = jina_read_fn("https://example.com")
         assert isinstance(result, str)
         assert "Error" in result or "error" in result.lower() or len(result) > 0
 
     def test_url_sent_to_jina(self):
-        with patch("requests.get") as mock_get:
+        with patch("httpx.get") as mock_get:
             mock_resp = MagicMock()
-            mock_resp.status_code = 200
             mock_resp.text = "content"
+            mock_resp.raise_for_status = MagicMock()
             mock_get.return_value = mock_resp
             jina_read_fn("https://example.com/page")
         call_url = str(mock_get.call_args)
@@ -63,15 +63,15 @@ class TestJinaRead:
 class TestRssFetch:
     def _mock_feed(self, entries=None):
         mock_feed = MagicMock()
-        mock_feed.feed.get.return_value = "Test Feed"
+        mock_feed.feed = {"title": "Test Feed"}
         mock_feed.bozo = False
-        mock_feed.entries = entries or [
-            MagicMock(
-                title="Entry 1",
-                link="https://example.com/1",
-                summary="Summary 1",
-                published="Mon, 01 Jan 2024 00:00:00 GMT",
-            )
+        mock_feed.entries = entries if entries is not None else [
+            {
+                "title": "Entry 1",
+                "link": "https://example.com/1",
+                "summary": "Summary 1",
+                "published": "Mon, 01 Jan 2024 00:00:00 GMT",
+            }
         ]
         return mock_feed
 
@@ -107,27 +107,19 @@ class TestYoutubeSearch:
         result = youtube_search_fn("python tutorial")
         assert isinstance(result, str)
 
-    def test_with_mocked_api(self, monkeypatch):
-        monkeypatch.setenv("YOUTUBE_API_KEY", "fake_key")
-        mock_data = {
-            "items": [
-                {
-                    "id": {"videoId": "abc123"},
-                    "snippet": {
-                        "title": "Python Tutorial",
-                        "channelTitle": "TestChannel",
-                        "description": "Learn Python",
-                    }
-                }
-            ]
-        }
-        with patch("requests.get") as mock_get:
-            mock_resp = MagicMock()
-            mock_resp.status_code = 200
-            mock_resp.json.return_value = mock_data
-            mock_get.return_value = mock_resp
-            result = youtube_search_fn("python tutorial")
+    def test_with_mocked_yt_dlp(self):
+        # youtube_search_tool uses yt-dlp subprocess; mock _run to return fake JSON
+        mock_json = json.dumps({
+            "title": "Python Tutorial",
+            "url": "https://youtube.com/watch?v=abc123",
+            "uploader": "TestChannel",
+            "duration_string": "10:00",
+        })
+        with patch("tools.reach_tools._run", return_value=(mock_json, "")):
+            with patch("tools.reach_tools._ytdlp_available", return_value=True):
+                result = youtube_search_fn("python tutorial")
         assert isinstance(result, str)
+        assert "Python Tutorial" in result
 
 
 # ── youtube_get ───────────────────────────────────────────────────────────────
@@ -143,10 +135,16 @@ class TestYoutubeGet:
         assert len(result) > 0
 
     def test_youtube_url_attempts_fetch(self):
-        with patch("requests.get") as mock_get:
-            mock_resp = MagicMock()
-            mock_resp.status_code = 200
-            mock_resp.text = "<html><title>Video</title></html>"
-            mock_get.return_value = mock_resp
-            result = youtube_get_fn("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+        mock_info = json.dumps({
+            "title": "Never Gonna Give You Up",
+            "uploader": "Rick Astley",
+            "duration_string": "3:33",
+            "view_count": 1000000,
+            "upload_date": "20090525",
+            "description": "Official music video",
+        })
+        with patch("tools.reach_tools._run", return_value=(mock_info, "")):
+            with patch("tools.reach_tools._ytdlp_available", return_value=True):
+                result = youtube_get_fn("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
         assert isinstance(result, str)
+        assert "Never Gonna Give You Up" in result
