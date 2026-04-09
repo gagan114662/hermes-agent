@@ -104,6 +104,10 @@ def make_runner(session_entry: SessionEntry) -> "GatewayRunner":
     runner.pairing_store._is_rate_limited = MagicMock(return_value=False)
     runner.pairing_store.generate_code = MagicMock(return_value="ABC123")
 
+    # Per-user rate limiter (fork-added; default to not rate-limited)
+    runner.rate_limiter = MagicMock()
+    runner.rate_limiter.check.return_value = SimpleNamespace(limited=False, retry_after=0)
+
     return runner
 
 

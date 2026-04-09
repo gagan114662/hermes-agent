@@ -5784,12 +5784,11 @@ class GatewayRunner:
             _cache = getattr(self, "_agent_cache", None)
             if _cache_lock and _cache is not None:
                 import time as _time
-                async with _cache_lock:
-                    cached = _cache.get(session_key)
-                    if cached and cached[1] == _sig:
-                        agent = cached[0]
-                        self._agent_cache_last_access[session_key] = _time.time()
-                        logger.debug("Reusing cached agent for session %s", session_key)
+                cached = _cache.get(session_key)
+                if cached and cached[1] == _sig:
+                    agent = cached[0]
+                    self._agent_cache_last_access[session_key] = _time.time()
+                    logger.debug("Reusing cached agent for session %s", session_key)
 
             if agent is None:
                 # Config changed or first message — create fresh agent
@@ -5818,17 +5817,16 @@ class GatewayRunner:
                     fallback_model=self._fallback_model,
                 )
                 if _cache_lock and _cache is not None:
-                    async with _cache_lock:
-                        _cache[session_key] = (agent, _sig)
-                        self._agent_cache_last_access[session_key] = _time.time()
-                        # LRU eviction: cap at 50 entries
-                        if len(_cache) > 50:
-                            oldest_key = min(
-                                self._agent_cache_last_access,
-                                key=self._agent_cache_last_access.get,
-                            )
-                            _cache.pop(oldest_key, None)
-                            self._agent_cache_last_access.pop(oldest_key, None)
+                    _cache[session_key] = (agent, _sig)
+                    self._agent_cache_last_access[session_key] = _time.time()
+                    # LRU eviction: cap at 50 entries
+                    if len(_cache) > 50:
+                        oldest_key = min(
+                            self._agent_cache_last_access,
+                            key=self._agent_cache_last_access.get,
+                        )
+                        _cache.pop(oldest_key, None)
+                        self._agent_cache_last_access.pop(oldest_key, None)
                 logger.debug("Created new agent for session %s (sig=%s)", session_key, _sig)
 
             # Per-message state — callbacks and reasoning config change every
