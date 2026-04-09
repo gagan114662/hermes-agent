@@ -193,7 +193,9 @@ def _handle_send(args):
 
         return json.dumps(result)
     except Exception as e:
-        return json.dumps({"error": f"Send failed: {e}"})
+        import re as _re
+        _err_str = _re.sub(r'access_token=[^&\s"\']+', 'access_token=***', str(e))
+        return json.dumps({"error": f"Send failed: {_err_str}"})
 
 
 def _parse_target_ref(platform_name: str, target_ref: str):
@@ -785,7 +787,9 @@ async def _send_dingtalk(extra, chat_id, message):
                 return {"error": f"DingTalk API error: {data.get('errmsg', 'unknown')}"}
         return {"success": True, "platform": "dingtalk", "chat_id": chat_id}
     except Exception as e:
-        return {"error": f"DingTalk send failed: {e}"}
+        import re as _re
+        _err_str = _re.sub(r'access_token=[^&\s"\']+', 'access_token=***', str(e))
+        return {"error": f"DingTalk send failed: {_err_str}"}
 
 
 async def _send_wecom(extra, chat_id, message):

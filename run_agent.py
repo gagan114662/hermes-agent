@@ -4925,6 +4925,11 @@ class AIAgent:
             # falling through to OpenRouter defaults.
             fb_base_url_hint = (fb.get("base_url") or "").strip() or None
             fb_api_key_hint = (fb.get("api_key") or "").strip() or None
+            # Read api key from api_key_env if no direct api_key is set
+            if not fb_api_key_hint:
+                _api_key_env = fb.get("api_key_env", "")
+                if _api_key_env:
+                    fb_api_key_hint = os.getenv(_api_key_env) or None
             # For Ollama Cloud endpoints, pull OLLAMA_API_KEY from env
             # when no explicit key is in the fallback config.
             if fb_base_url_hint and "ollama.com" in fb_base_url_hint.lower() and not fb_api_key_hint:

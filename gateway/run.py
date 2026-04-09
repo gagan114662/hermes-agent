@@ -1460,6 +1460,13 @@ class GatewayRunner:
                 logger.debug("Interrupted running agent for session %s during shutdown", session_key[:20])
             except Exception as e:
                 logger.debug("Failed interrupting agent during shutdown: %s", e)
+            try:
+                from hermes_cli.plugins import invoke_hook
+                _sid = getattr(agent, 'session_id', None)
+                if _sid:
+                    invoke_hook("on_session_finalize", session_id=_sid)
+            except Exception:
+                pass
 
         for platform, adapter in list(self.adapters.items()):
             try:
@@ -1741,6 +1748,18 @@ class GatewayRunner:
         """
         source = event.source
 
+        # Check if this message is a response to an update prompt
+        _upd_session_key = self._session_key_for_source(source)
+        _upd_pending = getattr(self, '_update_prompt_pending', {})
+        if _upd_session_key in _upd_pending:
+            _upd_pending.pop(_upd_session_key, None)
+            _response_path = _hermes_home / ".update_response"
+            try:
+                _response_path.write_text(event.text or "")
+            except Exception:
+                pass
+            return f"Sent your response to the update prompt."
+
         # Sweep _pending_approvals — evict entries older than 5 minutes
         import time as _time
         _now = _time.time()
@@ -1788,8 +1807,9 @@ class GatewayRunner:
         
         # ── Rate limiting ──────────────────────────────────────────────────────
         platform_name_rl = source.platform.value if source.platform else "unknown"
-        rl_result = self.rate_limiter.check(platform_name_rl, source.user_id or "")
-        if rl_result.limited:
+        _rate_limiter = getattr(self, 'rate_limiter', None)
+        rl_result = _rate_limiter.check(platform_name_rl, source.user_id or "") if _rate_limiter else None
+        if rl_result and rl_result.limited:
             adapter = self.adapters.get(source.platform)
             if adapter and source.chat_id:
                 try:
@@ -2144,6 +2164,24 @@ class GatewayRunner:
             except Exception as e:
                 logger.debug("Skill command check failed (non-fatal): %s", e)
         
+        # Guard against unknown slash commands leaking to the agent.
+        # If we reach here with a non-None `command` that wasn't handled by
+        # a built-in, user-defined, plugin, or skill handler, the command is
+        # unknown — return guidance instead of forwarding to the LLM.
+        if command and not _cmd_def:
+            # Check if it became a skill invocation (event.text was replaced)
+            _is_skill_invocation = False
+            try:
+                from agent.skill_commands import get_skill_commands
+                _is_skill_invocation = f"/{command}" in get_skill_commands()
+            except Exception:
+                pass
+            if not _is_skill_invocation:
+                return (
+                    f"Unknown command: /{command}\n\n"
+                    "Use /commands to see all available commands."
+                )
+
         # Pending exec approvals are handled by /approve and /deny commands above.
         # No bare text matching — "yes" in normal conversation must not trigger
         # execution of a dangerous command.
@@ -3104,19 +3142,39 @@ class GatewayRunner:
         self._shutdown_gateway_honcho(session_key)
         self._evict_cached_agent(session_key)
 
+        # Get old session ID before resetting (for finalize hook)
+        _old_entry = self.session_store._entries.get(session_key) if hasattr(self.session_store, '_entries') else None
+        _old_session_id = _old_entry.session_id if _old_entry else None
+        _platform_str = source.platform.value if source.platform else ""
+
+        # Clear any session-scoped model override for this session
+        if hasattr(self, '_session_model_overrides'):
+            self._session_model_overrides.pop(session_key, None)
+
         # Reset the session
         new_entry = self.session_store.reset_session(session_key)
+        _new_session_id = new_entry.session_id if new_entry else None
+
+        # Fire plugin lifecycle hooks
+        try:
+            from hermes_cli.plugins import invoke_hook
+            if _old_session_id:
+                invoke_hook("on_session_finalize", session_id=_old_session_id, platform=_platform_str)
+            if _new_session_id:
+                invoke_hook("on_session_reset", session_id=_new_session_id, platform=_platform_str)
+        except Exception:
+            pass
 
         # Emit session:end hook (session is ending)
         await self.hooks.emit("session:end", {
-            "platform": source.platform.value if source.platform else "",
+            "platform": _platform_str,
             "user_id": source.user_id,
             "session_key": session_key,
         })
 
         # Emit session:reset hook
         await self.hooks.emit("session:reset", {
-            "platform": source.platform.value if source.platform else "",
+            "platform": _platform_str,
             "user_id": source.user_id,
             "session_key": session_key,
         })
@@ -5017,7 +5075,7 @@ class GatewayRunner:
         # where systemd-run --user fails due to missing D-Bus session).
         hermes_cmd_str = " ".join(shlex.quote(part) for part in hermes_cmd)
         update_cmd = (
-            f"{hermes_cmd_str} update > {shlex.quote(str(output_path))} 2>&1; "
+            f"PYTHONUNBUFFERED=1 {hermes_cmd_str} update --gateway > {shlex.quote(str(output_path))} 2>&1; "
             f"status=$?; printf '%s' \"$status\" > {shlex.quote(str(exit_code_path))}"
         )
         try:
@@ -5043,8 +5101,17 @@ class GatewayRunner:
             exit_code_path.unlink(missing_ok=True)
             return f"✗ Failed to start update: {e}"
 
-        self._schedule_update_notification_watch()
-        return "⚕ Starting Hermes update… I'll notify you when it's done."
+        self._schedule_update_progress_watch(event)
+        return "⚕ Starting Hermes update… I'll stream progress here as it runs."
+
+    def _schedule_update_progress_watch(self, event: MessageEvent) -> None:
+        """Start a background task to stream update progress to the user."""
+        try:
+            self._update_progress_task = asyncio.create_task(
+                self._watch_update_progress()
+            )
+        except RuntimeError:
+            logger.debug("Skipping update progress watcher: no running event loop")
 
     def _schedule_update_notification_watch(self) -> None:
         """Ensure a background task is watching for update completion."""
@@ -5058,6 +5125,112 @@ class GatewayRunner:
             )
         except RuntimeError:
             logger.debug("Skipping update notification watcher: no running event loop")
+
+    async def _watch_update_progress(
+        self,
+        poll_interval: float = 2.0,
+        stream_interval: float = 5.0,
+        timeout: float = 1800.0,
+    ) -> None:
+        """Stream update output to the user and handle prompts."""
+        pending_path = _hermes_home / ".update_pending.json"
+        output_path = _hermes_home / ".update_output.txt"
+        exit_code_path = _hermes_home / ".update_exit_code"
+        prompt_path = _hermes_home / ".update_prompt.json"
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        last_sent_bytes = 0
+        last_stream_time = loop.time()
+
+        # Read pending info
+        try:
+            pending = json.loads(pending_path.read_text()) if pending_path.exists() else {}
+        except Exception:
+            pending = {}
+
+        platform_str = pending.get("platform", "")
+        chat_id = pending.get("chat_id", "")
+        session_key = pending.get("session_key", "")
+
+        try:
+            platform_enum = Platform(platform_str)
+        except Exception:
+            platform_enum = None
+
+        adapter = self.adapters.get(platform_enum) if platform_enum else None
+
+        async def _send(msg: str) -> None:
+            if adapter and chat_id:
+                try:
+                    await adapter.send(chat_id, msg)
+                except Exception as _e:
+                    logger.debug("_watch_update_progress send error: %s", _e)
+
+        while loop.time() < deadline:
+            # Handle prompt interception
+            if prompt_path.exists():
+                try:
+                    prompt_data = json.loads(prompt_path.read_text())
+                    prompt_text = prompt_data.get("prompt", "Update requires input:")
+                    if session_key:
+                        if not hasattr(self, '_update_prompt_pending'):
+                            self._update_prompt_pending = {}
+                        self._update_prompt_pending[session_key] = True
+                    await _send(f"🔔 {prompt_text}")
+                    # Wait for response
+                    response_path = _hermes_home / ".update_response"
+                    for _ in range(100):
+                        if response_path.exists():
+                            break
+                        await asyncio.sleep(0.5)
+                except Exception as _pe:
+                    logger.debug("Prompt handling error: %s", _pe)
+
+            # Stream new output periodically
+            now = loop.time()
+            if output_path.exists() and (now - last_stream_time) >= stream_interval:
+                try:
+                    content = output_path.read_bytes()
+                    new_content = content[last_sent_bytes:]
+                    if new_content:
+                        await _send(new_content.decode("utf-8", errors="replace").strip())
+                        last_sent_bytes = len(content)
+                        last_stream_time = now
+                except Exception:
+                    pass
+
+            # Check for completion
+            if exit_code_path.exists():
+                try:
+                    exit_code = int(exit_code_path.read_text().strip())
+                except Exception:
+                    exit_code = 0
+
+                # Send final output if any
+                if output_path.exists():
+                    try:
+                        content = output_path.read_bytes()
+                        new_content = content[last_sent_bytes:]
+                        if new_content:
+                            await _send(new_content.decode("utf-8", errors="replace").strip())
+                    except Exception:
+                        pass
+
+                if exit_code == 0:
+                    await _send("✅ Update finished successfully!")
+                else:
+                    await _send(f"❌ Update failed (exit code {exit_code}).")
+
+                # Cleanup
+                for path in (pending_path, output_path, exit_code_path):
+                    try:
+                        path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                return
+
+            await asyncio.sleep(poll_interval)
 
     async def _watch_for_update_completion(
         self,
@@ -5731,6 +5904,14 @@ class GatewayRunner:
                 logger.debug("status_callback error (%s): %s", event_type, _e)
 
         def run_sync():
+            # Bind session key to this thread's context for approval routing
+            try:
+                from tools.approval import set_current_session_key, reset_current_session_key
+            except Exception:
+                def set_current_session_key(k): return None
+                def reset_current_session_key(t): pass
+            _session_token = set_current_session_key(session_key or "")
+
             # Pass session_key to process registry via env var so background
             # processes can be mapped back to this gateway session
             os.environ["HERMES_SESSION_KEY"] = session_key or ""
@@ -6072,7 +6253,7 @@ class GatewayRunner:
                 except Exception:
                     pass
 
-            return {
+            _run_sync_result = {
                 "final_response": final_response,
                 "last_reasoning": result.get("last_reasoning"),
                 "messages": result_holder[0].get("messages", []) if result_holder[0] else [],
@@ -6085,7 +6266,9 @@ class GatewayRunner:
                 "model": _resolved_model,
                 "session_id": effective_session_id,
             }
-        
+            reset_current_session_key(_session_token)
+            return _run_sync_result
+
         # Start progress message sender if enabled
         progress_task = None
         if tool_progress_enabled:

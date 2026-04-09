@@ -252,6 +252,15 @@ def _build_child_agent(
         tool_progress_callback=child_progress_cb,
         iteration_budget=None,  # fresh budget per subagent
     )
+    # Inherit print function from parent
+    if hasattr(parent_agent, '_print_fn'):
+        child._print_fn = parent_agent._print_fn
+
+    # Assign credential pool from parent (shared pool for leasing)
+    parent_pool = _resolve_child_credential_pool(effective_provider, parent_agent)
+    if parent_pool is not None:
+        child._credential_pool = parent_pool
+
     # Set delegation depth so children can't spawn grandchildren
     child._delegate_depth = getattr(parent_agent, '_delegate_depth', 0) + 1
 
@@ -287,6 +296,18 @@ def _run_single_child(
     import model_tools
     _saved_tool_names = getattr(child, "_delegate_saved_tool_names",
                                 list(model_tools._last_resolved_tool_names))
+
+    # Acquire credential lease if pool is configured
+    _pool = getattr(child, '_credential_pool', None)
+    _leased_id = None
+    if _pool is not None:
+        try:
+            _leased_id = _pool.acquire_lease()
+            leased_entry = _pool.current()
+            if leased_entry is not None and hasattr(child, '_swap_credential'):
+                child._swap_credential(leased_entry)
+        except Exception as _le:
+            logger.debug("Credential lease acquisition failed: %s", _le)
 
     try:
         result = child.run_conversation(user_message=goal)
@@ -405,6 +426,13 @@ def _run_single_child(
         saved_tool_names = getattr(child, "_delegate_saved_tool_names", None)
         if isinstance(saved_tool_names, list):
             model_tools._last_resolved_tool_names = list(saved_tool_names)
+
+        # Release credential lease if one was acquired
+        if _pool is not None and _leased_id is not None:
+            try:
+                _pool.release_lease(_leased_id)
+            except Exception as _lr:
+                logger.debug("Credential lease release failed: %s", _lr)
 
         # Unregister child from interrupt propagation
         if hasattr(parent_agent, '_active_children'):

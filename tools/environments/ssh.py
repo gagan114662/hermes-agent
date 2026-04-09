@@ -40,11 +40,12 @@ class SSHEnvironment(BaseEnvironment):
         self.control_dir = Path(tempfile.gettempdir()) / "hermes-ssh"
         self.control_dir.mkdir(parents=True, exist_ok=True)
         self.control_socket = self.control_dir / f"{user}@{host}:{port}.sock"
+        self.persistent = False
         _ensure_ssh_available()
         self._establish_connection()
         self._remote_home = self._detect_remote_home()
         self._last_sync_time: float = 0  # guarantees first _before_execute syncs
-        self._sync_files()
+        self._sync_skills_and_credentials()
 
         self.init_session()
 
@@ -92,7 +93,7 @@ class SSHEnvironment(BaseEnvironment):
             return "/root"
         return f"/home/{self.user}"
 
-    def _sync_files(self) -> None:
+    def _sync_skills_and_credentials(self) -> None:
         """Rsync skills directory and credential files to the remote host."""
         try:
             container_base = f"{self._remote_home}/.hermes"

@@ -176,6 +176,10 @@ class ToolRegistry:
         entry = self._tools.get(name)
         if not entry:
             return json.dumps({"error": f"Unknown tool: {name}"})
+        if entry.schema:
+            err = _validate_args(name, args, entry.schema)
+            if err:
+                return json.dumps({"error": f"Invalid arguments: {err}"})
         try:
             if entry.is_async:
                 from model_tools import _run_async

@@ -239,6 +239,7 @@ class LocalEnvironment(BaseEnvironment):
 
     def __init__(self, cwd: str = "", timeout: int = 60, env: dict = None):
         super().__init__(cwd=cwd or os.getcwd(), timeout=timeout, env=env)
+        self.persistent = False
         self.init_session()
 
     def _run_bash(self, cmd_string: str, *, login: bool = False,
