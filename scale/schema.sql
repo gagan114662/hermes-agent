@@ -24,7 +24,11 @@ CREATE TABLE tenants (
 
     -- Per-tenant AI config
     system_prompt_template TEXT,
-    enabled_toolsets TEXT[] DEFAULT ARRAY['web', 'search', 'image_gen', 'booking']
+    enabled_toolsets TEXT[] DEFAULT ARRAY['web', 'search', 'image_gen', 'booking'],
+
+    -- AI worker identity (generated at onboard time)
+    tenant_config JSONB DEFAULT '{}',  -- manager_chat_id, worker_name, worker_role, standing_instructions
+    worker_email TEXT                  -- e.g. marco-marios-pizza@hermes-worker.com
 );
 
 -- Platform connections per tenant
@@ -93,7 +97,17 @@ CREATE TABLE message_log (
     created_at TIMESTAMPTZ DEFAULT now()
 );
 
+-- Worker action log (every autonomous action the worker takes)
+CREATE TABLE worker_actions (
+    id BIGSERIAL PRIMARY KEY,
+    tenant_id UUID REFERENCES tenants(id) ON DELETE CASCADE,
+    summary TEXT NOT NULL,
+    full_output TEXT,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+
 -- Indexes
+CREATE INDEX idx_worker_actions_tenant ON worker_actions(tenant_id, created_at DESC);
 CREATE INDEX idx_sessions_tenant ON sessions(tenant_id);
 CREATE INDEX idx_sessions_updated ON sessions(updated_at);
 CREATE INDEX idx_message_log_tenant ON message_log(tenant_id, created_at);

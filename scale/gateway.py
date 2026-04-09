@@ -30,7 +30,7 @@ from typing import Dict, Optional
 
 import asyncpg
 import redis.asyncio as aioredis
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 logging.basicConfig(
@@ -378,6 +378,49 @@ async def list_tenants():
         }
         for r in rows
     ]
+
+
+@app.post("/mailbox/inbound")
+async def mailbox_inbound(request: Request):
+    """
+    Mailgun webhook for inbound emails to worker addresses.
+    Routes the email into the worker's Redis queue as a regular message.
+    """
+    form = await request.form()
+    recipient = form.get("recipient", "")  # e.g. marco-marios-pizza@hermes-worker.com
+    sender = form.get("sender", "")
+    subject = form.get("subject", "")
+    body = form.get("body-plain", "") or form.get("body-html", "")
+
+    if not recipient:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "missing recipient"})
+
+    # Look up tenant by worker_email
+    tenant = await db_pool.fetchrow(
+        "SELECT id, name FROM tenants WHERE worker_email = $1 AND active = true",
+        recipient,
+    )
+    if not tenant:
+        logger.warning("Inbound email to unknown address: %s", recipient)
+        return JSONResponse(status_code=200, content={"ok": False, "error": "unknown recipient"})
+
+    tenant_id = str(tenant["id"])
+    message_text = f"Email from {sender}\nSubject: {subject}\n\n{body}"
+
+    await redis_client.lpush(f"hermes:queue:{tenant_id}", json.dumps({
+        "tenant_id": tenant_id,
+        "platform": "email",
+        "chat_id": sender,   # reply-to address acts as the "chat"
+        "user_id": sender,
+        "user_name": sender.split("@")[0],
+        "chat_type": "dm",
+        "text": message_text,
+        "message_id": None,
+        "timestamp": __import__("time").time(),
+    }))
+
+    logger.info("Inbound email queued: tenant=%s from=%s subject=%s", tenant["name"], sender, subject[:50])
+    return {"ok": True}
 
 
 @app.get("/stats/{tenant_slug}")

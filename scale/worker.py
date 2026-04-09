@@ -101,7 +101,7 @@ class HermesWorker:
         self._errors = 0
 
     async def start(self):
-        """Connect to Postgres and Redis, then enter the main loop."""
+        """Connect to Postgres and Redis, then run message + autonomous loops."""
         database_url = os.getenv("DATABASE_URL", "postgresql://hermes:hermes@localhost:5432/hermes")
         redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
 
@@ -115,7 +115,12 @@ class HermesWorker:
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, self._shutdown)
 
-        await self._main_loop()
+        logger.info("Worker %d: _message_loop started", self.worker_id)
+        logger.info("Worker %d: _autonomous_loop started", self.worker_id)
+        await asyncio.gather(
+            self._main_loop(),
+            self._autonomous_loop(),
+        )
 
     def _shutdown(self):
         logger.info("Worker %d shutting down (processed %d msgs, %d errors)",
@@ -336,6 +341,232 @@ class HermesWorker:
 
         finally:
             await self.redis.delete(lock_key)
+
+
+# ---------------------------------------------------------------------------
+# Autonomous loop — the worker's own decision engine
+# ---------------------------------------------------------------------------
+
+_DECISION_PROMPT = """You are {worker_name}, an AI {worker_role} working for {business_name}.
+
+## Your Memory & Context
+{memory}
+
+## What You've Done Recently (last 24h)
+{recent_actions}
+
+## Current Time
+{current_datetime}
+
+## Standing Instructions from Manager
+{standing_instructions}
+
+---
+
+What is the single most valuable action you should take RIGHT NOW?
+
+Think like a high-performing employee who owns their results:
+- Is there a lead or contact you haven't followed up on?
+- Something you started that needs to continue or complete?
+- Research that would meaningfully help you do your job better?
+- A report or summary the manager would find valuable right now?
+- Outreach or work that could directly generate results?
+
+Respond in pure JSON only (no markdown, no explanation):
+{{
+  "reasoning": "why this is the highest-value action right now",
+  "action": "do_work",
+  "task": "precise, specific description of exactly what to do — enough detail to execute without clarification",
+  "expected_outcome": "what you will deliver when done"
+}}
+
+If it is very late at night (after midnight, before 5am) and nothing is time-sensitive, respond:
+{{"action": "rest", "reasoning": "off hours, nothing urgent"}}
+
+If you completed very similar work within the last 60 minutes, pick something meaningfully different.
+"""
+
+
+async def _autonomous_loop(self):
+    """
+    The worker's own decision engine. Runs every 5 minutes.
+    Asks the LLM what's most valuable to do right now — no cron, no templates.
+    """
+    while self.running:
+        try:
+            await asyncio.sleep(300)  # check every 5 minutes
+
+            tenants = await self.db.fetch(
+                "SELECT * FROM tenants WHERE active = true AND tenant_config IS NOT NULL"
+            )
+            for tenant in tenants:
+                config = json.loads(tenant["tenant_config"] or "{}")
+                if not config.get("manager_chat_id"):
+                    continue  # not an autonomous worker tenant
+
+                # Skip if there are human messages pending for this tenant
+                pending = await self.redis.llen(f"hermes:queue:{tenant['id']}")
+                if pending > 0:
+                    continue  # let message loop handle humans first
+
+                await self._run_autonomous_decision(tenant, config)
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error("Autonomous loop error: %s", e, exc_info=True)
+            await asyncio.sleep(5)
+
+
+async def _run_autonomous_decision(self, tenant, config: dict):
+    """Ask the LLM what to do right now, execute it, save the learning."""
+    from run_agent import AIAgent
+
+    tenant_id = tenant["id"]
+    manager_chat_id = config["manager_chat_id"]
+
+    # Load memory
+    memories = await self.db.fetch(
+        "SELECT memory_type, content FROM tenant_memory WHERE tenant_id = $1 ORDER BY updated_at DESC",
+        tenant_id,
+    )
+    recent_actions = await self.db.fetch(
+        "SELECT summary, created_at FROM worker_actions WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 15",
+        tenant_id,
+    )
+
+    memory_text = "\n\n".join(f"[{m['memory_type']}]\n{m['content']}" for m in memories) or "No memory yet."
+    recent_text = "\n".join(f"- {r['summary']}" for r in recent_actions) or "No recent actions."
+
+    or_key = os.getenv("OPENROUTER_API_KEY", "")
+    model = tenant["model"] or "openrouter/google/gemini-2.5-flash-preview"
+    or_model = model[len("openrouter/"):] if model.startswith("openrouter/") else model
+
+    # Step 1: Ask LLM what to do (no tools — pure reasoning)
+    decision_agent = AIAgent(
+        model=or_model,
+        api_key=or_key,
+        base_url="https://openrouter.ai/api/v1",
+        provider="openrouter",
+        max_iterations=2,
+        quiet_mode=True,
+        skip_memory=True,
+        skip_context_files=True,
+        enabled_toolsets=[],
+    )
+    decision_result = decision_agent.run_conversation(
+        user_message=_DECISION_PROMPT.format(
+            worker_name=config.get("worker_name", "Worker"),
+            worker_role=config.get("worker_role", "AI Assistant"),
+            business_name=tenant["name"],
+            memory=memory_text,
+            recent_actions=recent_text,
+            current_datetime=datetime.now().strftime("%A %B %d %Y, %I:%M %p"),
+            standing_instructions=config.get("standing_instructions", "Do your best work."),
+        )
+    )
+
+    raw = decision_result.get("final_response", "").strip()
+    # Strip markdown fences if present
+    if raw.startswith("```"):
+        import re as _re
+        raw = _re.sub(r"^```[a-z]*\n?", "", raw)
+        raw = _re.sub(r"\n?```$", "", raw.rstrip())
+
+    try:
+        decision = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        logger.debug("Autonomous decision parse failed for tenant %s", str(tenant_id)[:8])
+        return
+
+    if decision.get("action") != "do_work":
+        logger.debug("Worker %s chose to rest: %s", str(tenant_id)[:8], decision.get("reasoning", ""))
+        return
+
+    task = decision.get("task", "").strip()
+    if not task:
+        return
+
+    logger.info("Worker autonomous task [%s]: %s", str(tenant_id)[:8], task[:100])
+
+    # Step 2: Build system prompt from tenant config + memory (same as message loop)
+    template = tenant["system_prompt_template"] or f"You are an AI worker for {tenant['name']}."
+    system_prompt = template
+    if memory_text and memory_text != "No memory yet.":
+        system_prompt += f"\n\n{memory_text}"
+
+    # Step 3: Execute the task with full toolset
+    work_agent = AIAgent(
+        model=or_model,
+        api_key=or_key,
+        base_url="https://openrouter.ai/api/v1",
+        provider="openrouter",
+        max_iterations=30,
+        quiet_mode=True,
+        ephemeral_system_prompt=system_prompt,
+        session_id=generate_session_id(),
+        platform="autonomous",
+        enabled_toolsets=list(tenant["enabled_toolsets"] or ["web", "file", "memory"]),
+        skip_memory=False,
+        skip_context_files=True,
+    )
+    work_result = work_agent.run_conversation(user_message=task)
+    output = work_result.get("final_response", "")
+
+    # Step 4: Log the action
+    summary = f"{datetime.now().strftime('%Y-%m-%d %H:%M')} — {task[:120]}"
+    await self.db.execute(
+        "INSERT INTO worker_actions (tenant_id, summary, full_output, created_at) VALUES ($1, $2, $3, NOW())",
+        tenant_id, summary, output,
+    )
+
+    # Step 5: Extract one-sentence learning (brief call, no tools)
+    if output and len(output) > 100:
+        try:
+            learn_agent = AIAgent(
+                model=or_model,
+                api_key=or_key,
+                base_url="https://openrouter.ai/api/v1",
+                provider="openrouter",
+                max_iterations=1,
+                quiet_mode=True,
+                skip_memory=True,
+                skip_context_files=True,
+                enabled_toolsets=[],
+            )
+            learning = learn_agent.run_conversation(
+                user_message=(
+                    f"You just completed: {task}\n\n"
+                    f"Result: {output[:600]}\n\n"
+                    f"In exactly one sentence: what specific thing will you do differently or better next time?"
+                )
+            )
+            learning_text = learning.get("final_response", "").strip()
+            if learning_text:
+                # Use a unique memory_type per learning to avoid unique constraint conflicts
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                await self.db.execute(
+                    "INSERT INTO tenant_memory (tenant_id, memory_type, content) VALUES ($1, $2, $3)"
+                    " ON CONFLICT (tenant_id, memory_type) DO UPDATE SET content = EXCLUDED.content, updated_at = NOW()",
+                    tenant_id, f"learning_{ts}", learning_text,
+                )
+        except Exception as e:
+            logger.debug("Learning extraction failed: %s", e)
+
+    # Step 6: Report meaningful output to manager
+    if output and len(output) > 50:
+        await self.redis.lpush("hermes:responses", json.dumps({
+            "tenant_id": str(tenant_id),
+            "platform": "telegram",
+            "chat_id": manager_chat_id,
+            "response": output,
+        }))
+        logger.info("Autonomous task complete [%s], reported to manager", str(tenant_id)[:8])
+
+
+# Inject autonomous methods onto the actual HermesWorker class
+HermesWorker._autonomous_loop = _autonomous_loop
+HermesWorker._run_autonomous_decision = _run_autonomous_decision
 
 
 # ---------------------------------------------------------------------------
