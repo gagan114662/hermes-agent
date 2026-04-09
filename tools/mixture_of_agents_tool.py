@@ -71,6 +71,12 @@ REFERENCE_MODELS = [
 # Prefer the strongest synthesis model in the current OpenRouter lineup.
 AGGREGATOR_MODEL = "anthropic/claude-opus-4.6"
 
+# Default max_tokens sent to OpenRouter to prevent 402 pre-flight budget rejections.
+# OpenRouter checks whether the user's balance covers the model's full advertised
+# maximum if no explicit limit is provided — this constant caps that check at a
+# reasonable value that works for most use-cases.
+DEFAULT_MAX_TOKENS = 32000
+
 # Temperature settings optimized for MoA performance
 REFERENCE_TEMPERATURE = 0.6  # Balanced creativity for diverse perspectives
 AGGREGATOR_TEMPERATURE = 0.4  # Focused synthesis for consistency
@@ -105,7 +111,7 @@ async def _run_reference_model_safe(
     model: str,
     user_prompt: str,
     temperature: float = REFERENCE_TEMPERATURE,
-    max_tokens: int = 32000,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
     max_retries: int = 6
 ) -> tuple[str, str, bool]:
     """
@@ -214,7 +220,7 @@ async def _run_aggregator_model(
 
     # Always send max_tokens so OpenRouter budgets against the requested ceiling,
     # not the model's full advertised maximum (avoids 402 on small balances).
-    api_params["max_tokens"] = max_tokens if max_tokens is not None else 32000
+    api_params["max_tokens"] = max_tokens if max_tokens is not None else DEFAULT_MAX_TOKENS
 
     # GPT models (especially gpt-4o-mini) don't support custom temperature values
     # Only include temperature for non-GPT models
