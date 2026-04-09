@@ -212,8 +212,9 @@ async def _run_aggregator_model(
         }
     }
 
-    if max_tokens is not None:
-        api_params["max_tokens"] = max_tokens
+    # Always send max_tokens so OpenRouter budgets against the requested ceiling,
+    # not the model's full advertised maximum (avoids 402 on small balances).
+    api_params["max_tokens"] = max_tokens if max_tokens is not None else 32000
 
     # GPT models (especially gpt-4o-mini) don't support custom temperature values
     # Only include temperature for non-GPT models
