@@ -37,7 +37,7 @@ services:
     <<: *hermes-common
     container_name: hermes-gateway
     restart: unless-stopped
-    command: ["gateway", "start"]
+    command: ["gateway", "run"]
     ports:
       # Expose for Telegram webhook mode or other inbound webhooks.
       # Remove if using polling mode only.

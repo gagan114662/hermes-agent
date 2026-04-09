@@ -455,9 +455,9 @@ class GatewayRunner:
         # system prompt (including memory) every turn — breaking prefix cache
         # and costing ~10x more on providers with prompt caching (Anthropic).
         # Key: session_key, Value: (AIAgent, config_signature_str)
-        import threading as _threading
         self._agent_cache: Dict[str, tuple] = {}
-        self._agent_cache_lock = _threading.Lock()
+        self._agent_cache_last_access: Dict[str, float] = {}
+        self._agent_cache_lock = asyncio.Lock()
 
         # Track active fallback model/provider when primary is rate-limited.
         # Set after an agent run where fallback was activated; cleared when
@@ -478,6 +478,7 @@ class GatewayRunner:
         # per-message AIAgent instances.
         self._honcho_managers: Dict[str, Any] = {}
         self._honcho_configs: Dict[str, Any] = {}
+        self._honcho_last_access: Dict[str, float] = {}
 
 
 
@@ -520,8 +521,12 @@ class GatewayRunner:
             self._honcho_managers = {}
         if not hasattr(self, "_honcho_configs"):
             self._honcho_configs = {}
+        if not hasattr(self, "_honcho_last_access"):
+            self._honcho_last_access = {}
 
+        import time as _time
         if session_key in self._honcho_managers:
+            self._honcho_last_access[session_key] = _time.time()
             return self._honcho_managers[session_key], self._honcho_configs.get(session_key)
 
         try:
@@ -540,6 +545,18 @@ class GatewayRunner:
             )
             self._honcho_managers[session_key] = manager
             self._honcho_configs[session_key] = hcfg
+            self._honcho_last_access[session_key] = _time.time()
+            # LRU eviction: cap at 100 entries, evict oldest by last-access time
+            if len(self._honcho_managers) > 100:
+                oldest_key = min(self._honcho_last_access, key=self._honcho_last_access.get)
+                evicted_manager = self._honcho_managers.pop(oldest_key, None)
+                self._honcho_configs.pop(oldest_key, None)
+                self._honcho_last_access.pop(oldest_key, None)
+                if evicted_manager:
+                    try:
+                        evicted_manager.shutdown()
+                    except Exception:
+                        pass
             return manager, hcfg
         except Exception as e:
             logger.debug("Gateway Honcho init failed for %s: %s", session_key, e)
@@ -554,6 +571,7 @@ class GatewayRunner:
 
         manager = managers.pop(session_key, None)
         configs.pop(session_key, None)
+        getattr(self, "_honcho_last_access", {}).pop(session_key, None)
         if not manager:
             return
         try:
@@ -1710,6 +1728,14 @@ class GatewayRunner:
         7. Return response
         """
         source = event.source
+
+        # Sweep _pending_approvals — evict entries older than 5 minutes
+        import time as _time
+        _now = _time.time()
+        stale = [k for k, v in self._pending_approvals.items()
+                 if _now - v.get("timestamp", _now) > 300]
+        for k in stale:
+            self._pending_approvals.pop(k, None)
 
         # Check if user is authorized
         if not self._is_user_authorized(source):
@@ -3063,8 +3089,8 @@ class GatewayRunner:
             logger.debug("Gateway memory flush on reset failed: %s", e)
 
         self._shutdown_gateway_honcho(session_key)
-        self._evict_cached_agent(session_key)
-        
+        await self._evict_cached_agent(session_key)
+
         # Reset the session
         new_entry = self.session_store.reset_session(session_key)
 
@@ -5411,12 +5437,13 @@ class GatewayRunner:
         )
         return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
-    def _evict_cached_agent(self, session_key: str) -> None:
+    async def _evict_cached_agent(self, session_key: str) -> None:
         """Remove a cached agent for a session (called on /new, /model, etc)."""
         _lock = getattr(self, "_agent_cache_lock", None)
         if _lock:
-            with _lock:
+            async with _lock:
                 self._agent_cache.pop(session_key, None)
+                self._agent_cache_last_access.pop(session_key, None)
 
     async def _run_agent(
         self,
@@ -5756,10 +5783,12 @@ class GatewayRunner:
             _cache_lock = getattr(self, "_agent_cache_lock", None)
             _cache = getattr(self, "_agent_cache", None)
             if _cache_lock and _cache is not None:
-                with _cache_lock:
+                import time as _time
+                async with _cache_lock:
                     cached = _cache.get(session_key)
                     if cached and cached[1] == _sig:
                         agent = cached[0]
+                        self._agent_cache_last_access[session_key] = _time.time()
                         logger.debug("Reusing cached agent for session %s", session_key)
 
             if agent is None:
@@ -5789,8 +5818,17 @@ class GatewayRunner:
                     fallback_model=self._fallback_model,
                 )
                 if _cache_lock and _cache is not None:
-                    with _cache_lock:
+                    async with _cache_lock:
                         _cache[session_key] = (agent, _sig)
+                        self._agent_cache_last_access[session_key] = _time.time()
+                        # LRU eviction: cap at 50 entries
+                        if len(_cache) > 50:
+                            oldest_key = min(
+                                self._agent_cache_last_access,
+                                key=self._agent_cache_last_access.get,
+                            )
+                            _cache.pop(oldest_key, None)
+                            self._agent_cache_last_access.pop(oldest_key, None)
                 logger.debug("Created new agent for session %s (sig=%s)", session_key, _sig)
 
             # Per-message state — callbacks and reasoning config change every
@@ -6084,7 +6122,7 @@ class GatewayRunner:
                     self._effective_provider = getattr(_agent, 'provider', None)
                     # Fallback activated — evict cached agent so the next
                     # message starts fresh and retries the primary model.
-                    self._evict_cached_agent(session_key)
+                    await self._evict_cached_agent(session_key)
                 else:
                     # Primary model worked — clear any stale fallback state
                     self._effective_model = None

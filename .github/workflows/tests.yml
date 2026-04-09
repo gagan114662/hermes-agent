@@ -19,10 +19,8 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Iron Proxy (egress control)
-        uses: ironsh/iron-proxy-action@v1
-        with:
-          egress-rules: egress-rules.yaml
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -35,43 +33,41 @@ jobs:
           uv venv .venv --python 3.11
           source .venv/bin/activate
           uv pip install -e ".[all,dev]"
-          uv pip install pytest-cov
 
       - name: Run tests
         run: |
           source .venv/bin/activate
-          python -m pytest tests/ -q --ignore=tests/integration --tb=short -n auto
+          python -m pytest tests/ -q --ignore=tests/integration --ignore=tests/e2e --tb=short -n auto
         env:
           # Ensure tests don't accidentally call real APIs
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""
           NOUS_API_KEY: ""
 
-      - name: Coverage
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python 3.11
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: |
+          uv venv .venv --python 3.11
+          source .venv/bin/activate
+          uv pip install -e ".[all,dev]"
+
+      - name: Run e2e tests
         run: |
           source .venv/bin/activate
-          python -m pytest tests/ \
-            --ignore=tests/integration \
-            --ignore=tests/acp \
-            -m 'not integration' \
-            --tb=no -q \
-            --cov --cov-report=term --cov-report=html:htmlcov \
-            -n auto
+          python -m pytest tests/e2e/ -v --tb=short
         env:
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""
           NOUS_API_KEY: ""
-
-      - name: Upload coverage report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-html
-          path: htmlcov/
-          retention-days: 14
-
-      - name: Iron Proxy summary
-        if: always()
-        uses: ironsh/iron-proxy-action@v1
-        with:
-          show-summary: true

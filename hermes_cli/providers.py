@@ -58,6 +58,12 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
         auth_type="oauth_external",
         base_url_override="https://chatgpt.com/backend-api/codex",
     ),
+    "qwen-oauth": HermesOverlay(
+        transport="openai_chat",
+        auth_type="oauth_external",
+        base_url_override="https://portal.qwen.ai/v1",
+        base_url_env_var="HERMES_QWEN_BASE_URL",
+    ),
     "copilot-acp": HermesOverlay(
         transport="codex_responses",
         auth_type="external_process",
@@ -343,18 +349,6 @@ def get_label(provider_id: str) -> str:
 
     return canonical
 
-
-# Build LABELS dict for backward compat
-def _build_labels() -> Dict[str, str]:
-    """Build labels dict from overlays + overrides. Lazy, cached."""
-    labels: Dict[str, str] = {}
-    for pid in HERMES_OVERLAYS:
-        labels[pid] = get_label(pid)
-    labels.update(_LABEL_OVERRIDES)
-    return labels
-
-# Lazy-built on first access
-_labels_cache: Optional[Dict[str, str]] = None
 
 # For direct import compat, expose as module-level dict
 # Built on demand by get_label() calls
