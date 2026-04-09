@@ -98,11 +98,29 @@ def _build_child_progress_callback(task_index: int, parent_agent, task_count: in
     _BATCH_SIZE = 5
     _batch: List[str] = []
 
-    def _callback(tool_name: str, preview: str = None):
+    def _callback(event_type: str, tool_name: str = None, preview: str = None, extra=None):
+        # Normalise the calling convention.
+        #
+        # run_agent.py calls: callback("tool.started", name, preview, args)
+        #                 or: callback("_thinking", text)
+        # Legacy / batch callers may still call: callback(tool_name, preview)
+        #   e.g. callback("web_search", "some preview")
+        #        callback("web_search")
+        #
+        # We detect the event-style convention by checking known event prefixes.
+        _EVENT_TYPES = ("tool.started", "tool.done", "_thinking", "subagent_progress")
+        if event_type not in _EVENT_TYPES:
+            # Backwards-compat: first arg is actually the tool name
+            tool_name = event_type
+            event_type = "tool.started"
+            # preview is already in the right position
+
         # Special "_thinking" event: model produced text content (reasoning)
-        if tool_name == "_thinking":
+        if event_type == "_thinking":
+            # thinking text is in tool_name (second positional arg)
+            thinking_text = tool_name
             if spinner:
-                short = (preview[:55] + "...") if preview and len(preview) > 55 else (preview or "")
+                short = (thinking_text[:55] + "...") if thinking_text and len(thinking_text) > 55 else (thinking_text or "")
                 try:
                     spinner.print_above(f" {prefix}├─ 💭 \"{short}\"")
                 except Exception as e:
@@ -114,7 +132,7 @@ def _build_child_progress_callback(task_index: int, parent_agent, task_count: in
         if spinner:
             short = (preview[:35] + "...") if preview and len(preview) > 35 else (preview or "")
             from agent.display import get_tool_emoji
-            emoji = get_tool_emoji(tool_name)
+            emoji = get_tool_emoji(tool_name or "")
             line = f" {prefix}├─ {emoji} {tool_name}"
             if short:
                 line += f"  \"{short}\""
@@ -124,7 +142,7 @@ def _build_child_progress_callback(task_index: int, parent_agent, task_count: in
                 logger.debug("Spinner print_above failed: %s", e)
 
         if parent_cb:
-            _batch.append(tool_name)
+            _batch.append(tool_name or event_type)
             if len(_batch) >= _BATCH_SIZE:
                 summary = ", ".join(_batch)
                 try:

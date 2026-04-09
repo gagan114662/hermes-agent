@@ -4703,7 +4703,7 @@ class HermesCLI:
             elif base_cmd in _skill_commands:
                 user_instruction = cmd_original[len(base_cmd):].strip()
                 msg = build_skill_invocation_message(
-                    base_cmd, user_instruction, task_id=self.session_id
+                    base_cmd, user_instruction, task_id=getattr(self, "session_id", None)
                 )
                 if msg:
                     skill_name = _skill_commands[base_cmd]["name"]
@@ -5422,8 +5422,8 @@ class HermesCLI:
             return
 
         # ── Rate limits (shown first when available) ────────────────
-        rl_state = agent.get_rate_limit_state()
-        if rl_state and rl_state.has_data:
+        rl_state = getattr(agent, "get_rate_limit_state", lambda: None)()
+        if rl_state and getattr(rl_state, "has_data", False):
             from agent.rate_limit_tracker import format_rate_limit_display
             print()
             print(format_rate_limit_display(rl_state))

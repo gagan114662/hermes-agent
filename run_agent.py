@@ -513,6 +513,9 @@ class AIAgent:
         checkpoint_max_snapshots: int = 50,
         pass_session_id: bool = False,
         persist_session: bool = True,
+        honcho_session_key: str = None,
+        honcho_manager=None,
+        honcho_config=None,
     ):
         """
         Initialize the AI Agent.
@@ -6988,6 +6991,49 @@ class AIAgent:
 
         return final_response
 
+    # ── Pipeline interface methods ───────────────────────────────────────────
+    # These methods provide a structured interface for the conversation pipeline.
+    # Extracted from run_conversation for modularity and testability.
+
+    def _prepare_turn(self, user_message: str, conversation_history=None, task_id=None):
+        """Prepare the state and messages for a new conversation turn.
+
+        Returns a dict with turn context (messages list, task_id, system prompt, etc.).
+        Called at the start of run_conversation before entering the tool loop.
+        """
+        messages = list(conversation_history) if conversation_history else []
+        effective_task_id = task_id or str(uuid.uuid4())
+        return {
+            "messages": messages,
+            "task_id": effective_task_id,
+            "user_message": user_message,
+        }
+
+    def _build_api_messages(self, messages, system_prompt=None):
+        """Build the message list to send to the API.
+
+        Applies prefill messages, cache control, and other per-call transformations
+        to the conversation history before it is passed to the model.
+        """
+        result = list(messages)
+        if system_prompt is not None:
+            result = [{"role": "system", "content": system_prompt}] + result
+        return result
+
+    def _build_result(self, messages, final_response, api_calls, completed=True):
+        """Build the result dict returned by run_conversation.
+
+        Returns a standardised dict that callers (CLI, gateway, cron) inspect.
+        """
+        return {
+            "final_response": final_response,
+            "messages": messages,
+            "api_calls": api_calls,
+            "completed": completed,
+        }
+
+    # ── Main conversation loop ───────────────────────────────────────────────
+
     def run_conversation(
         self,
         user_message: str,
@@ -6996,6 +7042,7 @@ class AIAgent:
         task_id: str = None,
         stream_callback: Optional[callable] = None,
         persist_user_message: Optional[str] = None,
+        **kwargs,
     ) -> Dict[str, Any]:
         """
         Run a complete conversation with tool calling until completion.

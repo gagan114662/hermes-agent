@@ -457,7 +457,7 @@ class GatewayRunner:
         # Key: session_key, Value: (AIAgent, config_signature_str)
         self._agent_cache: Dict[str, tuple] = {}
         self._agent_cache_last_access: Dict[str, float] = {}
-        self._agent_cache_lock = asyncio.Lock()
+        self._agent_cache_lock = threading.Lock()
 
         # Track active fallback model/provider when primary is rate-limited.
         # Set after an agent run where fallback was activated; cleared when
@@ -704,16 +704,28 @@ class GatewayRunner:
             # what's already saved and avoid overwriting newer entries.
             _current_memory = ""
             try:
-                from tools.memory_tool import MEMORY_DIR
-                for fname, label in [
-                    ("MEMORY.md", "MEMORY (your personal notes)"),
-                    ("USER.md", "USER PROFILE (who the user is)"),
-                ]:
-                    fpath = MEMORY_DIR / fname
-                    if fpath.exists():
-                        content = fpath.read_text(encoding="utf-8").strip()
-                        if content:
-                            _current_memory += f"\n\n## Current {label}:\n{content}"
+                # Use sys.modules lookup so test monkeypatching of
+                # tools.memory_tool takes effect even if it was already
+                # imported before the test patched sys.modules.
+                import sys as _sys
+                _mem_mod = _sys.modules.get("tools.memory_tool")
+                if _mem_mod is None:
+                    import tools.memory_tool as _mem_mod
+                _get_memory_dir = getattr(_mem_mod, "get_memory_dir", None)
+                if _get_memory_dir is not None:
+                    _memory_dir = _get_memory_dir()
+                else:
+                    _memory_dir = getattr(_mem_mod, "MEMORY_DIR", None)
+                if _memory_dir is not None:
+                    for fname, label in [
+                        ("MEMORY.md", "MEMORY (your personal notes)"),
+                        ("USER.md", "USER PROFILE (who the user is)"),
+                    ]:
+                        fpath = Path(_memory_dir) / fname
+                        if fpath.exists():
+                            content = fpath.read_text(encoding="utf-8").strip()
+                            if content:
+                                _current_memory += f"\n\n## Current {label}:\n{content}"
             except Exception:
                 pass  # Non-fatal — flush still works, just without the guard
 
@@ -1732,10 +1744,11 @@ class GatewayRunner:
         # Sweep _pending_approvals — evict entries older than 5 minutes
         import time as _time
         _now = _time.time()
-        stale = [k for k, v in self._pending_approvals.items()
+        _pending_approvals = getattr(self, "_pending_approvals", {})
+        stale = [k for k, v in _pending_approvals.items()
                  if _now - v.get("timestamp", _now) > 300]
         for k in stale:
-            self._pending_approvals.pop(k, None)
+            _pending_approvals.pop(k, None)
 
         # Check if user is authorized
         if not self._is_user_authorized(source):
@@ -3089,7 +3102,7 @@ class GatewayRunner:
             logger.debug("Gateway memory flush on reset failed: %s", e)
 
         self._shutdown_gateway_honcho(session_key)
-        await self._evict_cached_agent(session_key)
+        self._evict_cached_agent(session_key)
 
         # Reset the session
         new_entry = self.session_store.reset_session(session_key)
@@ -5437,13 +5450,13 @@ class GatewayRunner:
         )
         return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
-    async def _evict_cached_agent(self, session_key: str) -> None:
+    def _evict_cached_agent(self, session_key: str) -> None:
         """Remove a cached agent for a session (called on /new, /model, etc)."""
         _lock = getattr(self, "_agent_cache_lock", None)
         if _lock:
-            async with _lock:
-                self._agent_cache.pop(session_key, None)
-                self._agent_cache_last_access.pop(session_key, None)
+            with _lock:
+                getattr(self, "_agent_cache", {}).pop(session_key, None)
+                getattr(self, "_agent_cache_last_access", {}).pop(session_key, None)
 
     async def _run_agent(
         self,
@@ -5784,7 +5797,7 @@ class GatewayRunner:
             _cache = getattr(self, "_agent_cache", None)
             if _cache_lock and _cache is not None:
                 import time as _time
-                async with _cache_lock:
+                with _cache_lock:
                     cached = _cache.get(session_key)
                     if cached and cached[1] == _sig:
                         agent = cached[0]
@@ -5818,7 +5831,7 @@ class GatewayRunner:
                     fallback_model=self._fallback_model,
                 )
                 if _cache_lock and _cache is not None:
-                    async with _cache_lock:
+                    with _cache_lock:
                         _cache[session_key] = (agent, _sig)
                         self._agent_cache_last_access[session_key] = _time.time()
                         # LRU eviction: cap at 50 entries
@@ -6122,7 +6135,7 @@ class GatewayRunner:
                     self._effective_provider = getattr(_agent, 'provider', None)
                     # Fallback activated — evict cached agent so the next
                     # message starts fresh and retries the primary model.
-                    await self._evict_cached_agent(session_key)
+                    self._evict_cached_agent(session_key)
                 else:
                     # Primary model worked — clear any stale fallback state
                     self._effective_model = None
