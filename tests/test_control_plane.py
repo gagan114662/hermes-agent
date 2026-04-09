@@ -7,6 +7,8 @@ from unittest.mock import AsyncMock, patch, MagicMock
 
 import pytest
 
+pytest.importorskip("fastapi", reason="fastapi not installed; install with: pip install 'hermes-agent[scale]'")
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # Avoid importing telegram at module level

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import importlib
 from pathlib import Path
 from unittest.mock import patch
 
@@ -14,12 +13,12 @@ import pytest
 # ---------------------------------------------------------------------------
 
 def _setup_crm(tmp_path, monkeypatch):
-    """Point crm_path to a temp dir and reload the module."""
+    """Point crm_path to a temp dir. _crm_path() calls Path.home() at call time,
+    so setting HOME is sufficient — no module reload needed."""
     crm_dir = tmp_path / ".hermes"
     crm_dir.mkdir(parents=True)
     monkeypatch.setenv("HOME", str(tmp_path))
     import tools.crm_tool as crm_mod
-    importlib.reload(crm_mod)
     return crm_mod
 
 
