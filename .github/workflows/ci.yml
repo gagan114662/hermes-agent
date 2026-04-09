@@ -1,8 +1,6 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
 
@@ -29,7 +27,7 @@ jobs:
         run: uv pip install --system -e ".[dev,acp,messaging,scale]"
 
       - name: Run tests
-        run: pytest -q --tb=short -m "not integration" --ignore=tests/acp --ignore=tests/e2e --ignore=tests/integration -p no:randomly --continue-on-collection-errors 2>&1 | tail -30
+        run: pytest -q --tb=short -m "not integration" --ignore=tests/acp --ignore=tests/e2e --ignore=tests/integration --continue-on-collection-errors
 
   lint:
     name: Lint
