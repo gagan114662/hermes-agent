@@ -149,10 +149,12 @@ async def test_handle_message_persists_agent_token_counts(monkeypatch):
     result = await runner._handle_message(_make_event("hello"))
 
     assert result == "ok"
-    runner.session_store.update_session.assert_called_once_with(
-        session_entry.session_key,
-        last_prompt_tokens=80,
-    )
+    runner.session_store.update_session.assert_called_once()
+    call_args = runner.session_store.update_session.call_args
+    assert call_args.args[0] == session_entry.session_key
+    assert call_args.kwargs.get("last_prompt_tokens") == 80
+    assert call_args.kwargs.get("input_tokens") == 120
+    assert call_args.kwargs.get("output_tokens") == 45
 
 
 

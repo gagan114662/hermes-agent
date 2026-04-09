@@ -3241,18 +3241,28 @@ class GatewayRunner:
         session_key = session_entry.session_key
         is_running = session_key in self._running_agents
         
+        session_id = session_entry.session_id
+        session_id_display = f"`{session_id[:12]}...`" if len(session_id) > 12 else f"`{session_id}`"
+
         lines = [
             "📊 **Hermes Gateway Status**",
             "",
-            f"**Session ID:** `{session_entry.session_id[:12]}...`",
+            f"**Session ID:** {session_id_display}",
             f"**Created:** {session_entry.created_at.strftime('%Y-%m-%d %H:%M')}",
             f"**Last Activity:** {session_entry.updated_at.strftime('%Y-%m-%d %H:%M')}",
             f"**Tokens:** {session_entry.total_tokens:,}",
             f"**Agent Running:** {'Yes ⚡' if is_running else 'No'}",
+        ]
+
+        session_title = self._session_db.get_session_title(session_entry.session_id)
+        if session_title:
+            lines.append(f"**Title:** {session_title}")
+
+        lines += [
             "",
             f"**Connected Platforms:** {', '.join(connected_platforms)}",
         ]
-        
+
         return "\n".join(lines)
     
     async def _handle_stop_command(self, event: MessageEvent) -> str:
@@ -4908,15 +4918,13 @@ class GatewayRunner:
 
         # Check the blocking approval queue first (new mechanism for parallel subagents)
         try:
-            from tools.approval import resolve_gateway_approval, has_blocking_approval, count_pending_approvals
+            from tools.approval import resolve_gateway_approval, has_blocking_approval, pending_approval_count
             args_text = event.get_command_args().strip().lower()
             resolve_all = "all" in args_text
             if has_blocking_approval(session_key):
                 if resolve_all and "session" in args_text:
-                    n = count_pending_approvals(session_key)
-                    resolve_gateway_approval(session_key, "approved", resolve_all=True)
-                    from tools.approval import approve_session
-                    approve_session(session_key)
+                    n = pending_approval_count(session_key)
+                    resolve_gateway_approval(session_key, "session", resolve_all=True)
                     return f"✅ Approved {n} command(s) for this session. Resuming..."
                 n = resolve_gateway_approval(session_key, "approved", resolve_all=resolve_all)
                 if n > 0:
@@ -5022,6 +5030,20 @@ class GatewayRunner:
         """Handle /deny command — reject a pending dangerous command."""
         source = event.source
         session_key = self._session_key_for_source(source)
+
+        # Check the blocking approval queue first (new mechanism for parallel subagents)
+        try:
+            from tools.approval import resolve_gateway_approval, has_blocking_approval
+            args_text = event.get_command_args().strip().lower()
+            resolve_all = "all" in args_text
+            if has_blocking_approval(session_key):
+                n = resolve_gateway_approval(session_key, "deny", resolve_all=resolve_all)
+                if n > 0:
+                    if n == 1:
+                        return "❌ Denied. Resuming..."
+                    return f"❌ Denied {n} commands. Resuming..."
+        except ImportError:
+            pass
 
         if session_key not in self._pending_approvals:
             return "No pending command to deny."
