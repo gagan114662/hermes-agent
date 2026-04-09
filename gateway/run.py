@@ -3254,9 +3254,11 @@ class GatewayRunner:
             f"**Agent Running:** {'Yes ⚡' if is_running else 'No'}",
         ]
 
-        session_title = self._session_db.get_session_title(session_entry.session_id)
-        if session_title:
-            lines.append(f"**Title:** {session_title}")
+        session_db = getattr(self, "_session_db", None)
+        if session_db is not None:
+            session_title = session_db.get_session_title(session_entry.session_id)
+            if session_title:
+                lines.append(f"**Title:** {session_title}")
 
         lines += [
             "",
