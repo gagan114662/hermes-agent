@@ -420,7 +420,7 @@ class TestSentry:
         monkeypatch.delenv("SENTRY_DSN", raising=False)
         import hermes_cli.sentry as sentry_mod
         with patch.object(sentry_mod, "_sdk_available", False):
-            with caplog.at_level(logging.WARNING):
+            with caplog.at_level(logging.WARNING, logger="hermes_cli.sentry"):
                 result = sentry_mod.init_sentry(dsn="https://fake@sentry.io/1")
         assert result is False
         assert "sentry-sdk" in caplog.text or "not installed" in caplog.text
