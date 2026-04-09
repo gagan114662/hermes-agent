@@ -16,10 +16,20 @@ Import chain (circular-import safe):
 
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Set
 
 logger = logging.getLogger(__name__)
+
+
+def _get_metrics():
+    """Return the global MetricsCollector instance (lazy import to avoid circular deps)."""
+    try:
+        from tools.metrics import METRICS
+        return METRICS
+    except Exception:
+        return None
 
 
 @dataclass
@@ -180,14 +190,34 @@ class ToolRegistry:
             err = _validate_args(name, args, entry.schema)
             if err:
                 return json.dumps({"error": f"Invalid arguments: {err}"})
+        _t0 = time.monotonic()
+        _success = True
         try:
             if entry.is_async:
                 from model_tools import _run_async
-                return _run_async(entry.handler(args, **kwargs))
-            return entry.handler(args, **kwargs)
+                result = _run_async(entry.handler(args, **kwargs))
+            else:
+                result = entry.handler(args, **kwargs)
+            # Check if result is an error response
+            try:
+                _parsed = json.loads(result) if isinstance(result, str) else None
+                if isinstance(_parsed, dict) and "error" in _parsed:
+                    _success = False
+            except Exception:
+                pass
+            return result
         except Exception as e:
+            _success = False
             logger.exception("Tool %s dispatch error: %s", name, e)
             return json.dumps({"error": f"Tool execution failed: {type(e).__name__}: {e}"})
+        finally:
+            _duration_ms = (time.monotonic() - _t0) * 1000
+            try:
+                _mc = _get_metrics()
+                if _mc is not None:
+                    _mc.record(name, duration_ms=_duration_ms, success=_success)
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Query helpers  (replace redundant dicts in model_tools.py)

@@ -247,6 +247,7 @@ class PluginManager:
         self._cli_commands: Dict[str, dict] = {}
         self._discovered: bool = False
         self._cli_ref = None  # Set by CLI after plugin discovery
+        self._plugin_mtimes: Dict[str, float] = {}
 
     # -----------------------------------------------------------------------
     # Public
@@ -462,6 +463,30 @@ class PluginManager:
         )
 
     # -----------------------------------------------------------------------
+    # Hot reload
+    # -----------------------------------------------------------------------
+
+    def _check_reload(self) -> None:
+        """Reload plugin modules whose source file mtime has changed."""
+        for name, loaded in list(self._plugins.items()):
+            if not loaded.enabled or loaded.module is None:
+                continue
+            module_file = getattr(loaded.module, "__file__", None)
+            if not module_file:
+                continue
+            try:
+                current_mtime = os.path.getmtime(module_file)
+            except OSError:
+                continue
+            known_mtime = self._plugin_mtimes.get(name)
+            if known_mtime is not None and current_mtime != known_mtime:
+                try:
+                    importlib.reload(loaded.module)
+                    self._plugin_mtimes[name] = current_mtime
+                except Exception as exc:
+                    logger.warning("Hot reload of plugin '%s' failed: %s", name, exc)
+
+    # -----------------------------------------------------------------------
     # Hook invocation
     # -----------------------------------------------------------------------
 
@@ -485,6 +510,7 @@ class PluginManager:
         are reused.  All injected context is ephemeral — never
         persisted to session DB.
         """
+        self._check_reload()
         callbacks = self._hooks.get(hook_name, [])
         results: List[Any] = []
         for cb in callbacks:
