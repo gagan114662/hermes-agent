@@ -197,6 +197,38 @@ def _make_run_env(env: dict) -> dict:
     return run_env
 
 
+_OUTPUT_FENCE = "<<<HERMES_OUTPUT_FENCE>>>"
+
+_SHELL_NOISE_PATTERNS = (
+    "bash: cannot set terminal process group",
+    "bash: no job control in this shell",
+    "Last login:",
+)
+
+
+def _clean_shell_noise(output: str) -> str:
+    """Strip common TTY/login noise lines from shell output."""
+    if not output:
+        return output
+    lines = output.splitlines(keepends=True)
+    filtered = [
+        line for line in lines
+        if not any(pattern in line for pattern in _SHELL_NOISE_PATTERNS)
+    ]
+    return "".join(filtered)
+
+
+def _extract_fenced_output(raw: str) -> str:
+    """Extract content between _OUTPUT_FENCE markers, or clean noise if not fenced."""
+    if _OUTPUT_FENCE in raw:
+        parts = raw.split(_OUTPUT_FENCE)
+        if len(parts) >= 2:
+            return parts[1]
+        # Only start fence found — return what follows it
+        return _clean_shell_noise(parts[-1])
+    return _clean_shell_noise(raw)
+
+
 class LocalEnvironment(BaseEnvironment):
     """Run commands directly on the host machine.
 

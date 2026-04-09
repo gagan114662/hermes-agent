@@ -552,6 +552,19 @@ def invoke_hook(hook_name: str, **kwargs: Any) -> List[Any]:
     return get_plugin_manager().invoke_hook(hook_name, **kwargs)
 
 
+def emit_hook(event: str, **kwargs: Any) -> None:
+    """Fire a hook event and ignore all return values. Never raises.
+
+    Use this for fire-and-forget lifecycle events (e.g. ``on_tool_error``,
+    ``on_memory_write``) where the caller does not need plugin return values
+    and must not be disrupted by plugin failures.
+    """
+    try:
+        invoke_hook(event, **kwargs)
+    except Exception:
+        pass
+
+
 def get_plugin_tool_names() -> Set[str]:
     """Return the set of tool names registered by plugins."""
     return get_plugin_manager()._plugin_tool_names

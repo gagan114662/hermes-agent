@@ -634,6 +634,38 @@ def delegate_task(
     }, ensure_ascii=False)
 
 
+def _resolve_child_credential_pool(effective_provider: Optional[str], parent_agent):
+    """Resolve a credential pool for the child agent.
+
+    Rules:
+    1. Same provider as the parent -> share the parent's pool so cooldown state
+       and rotation stay synchronized.
+    2. Different provider -> try to load that provider's own pool.
+    3. No pool available -> return None and let the child keep the inherited
+       fixed credential behavior.
+    """
+    if not effective_provider:
+        return getattr(parent_agent, "_credential_pool", None)
+
+    parent_provider = getattr(parent_agent, "provider", None) or ""
+    parent_pool = getattr(parent_agent, "_credential_pool", None)
+    if parent_pool is not None and effective_provider == parent_provider:
+        return parent_pool
+
+    try:
+        from agent.credential_pool import load_pool
+        pool = load_pool(effective_provider)
+        if pool is not None and pool.has_credentials():
+            return pool
+    except Exception as exc:
+        logger.debug(
+            "Could not load credential pool for child provider '%s': %s",
+            effective_provider,
+            exc,
+        )
+    return None
+
+
 def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
     """Resolve credentials for subagent delegation.
 
