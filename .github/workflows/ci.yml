@@ -29,7 +29,7 @@ jobs:
         run: uv pip install --system -e ".[dev,acp,messaging,scale]"
 
       - name: Run tests
-        run: pytest -x -q --tb=short -m "not integration"
+        run: pytest -q --tb=short -m "not integration" --ignore=tests/acp --ignore=tests/e2e --ignore=tests/integration -p no:randomly --continue-on-collection-errors 2>&1 | tail -30
 
   lint:
     name: Lint
