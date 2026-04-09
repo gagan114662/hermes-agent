@@ -120,6 +120,7 @@ class HermesWorker:
         await asyncio.gather(
             self._main_loop(),
             self._autonomous_loop(),
+            self._digest_loop(),
         )
 
     def _shutdown(self):
@@ -220,7 +221,10 @@ class HermesWorker:
             # 5. Build system prompt from tenant config + memory
             if system_prompt is None:
                 memories = await self.db.fetch(
-                    "SELECT memory_type, content FROM tenant_memory WHERE tenant_id = $1",
+                    """SELECT memory_type, content FROM tenant_memory
+                       WHERE tenant_id = $1
+                       ORDER BY updated_at DESC
+                       LIMIT 20""",
                     uuid.UUID(tenant_id),
                 )
                 memory_text = "\n\n".join(
@@ -375,15 +379,15 @@ Think like a high-performing employee who owns their results:
 Respond in pure JSON only (no markdown, no explanation):
 {{
   "reasoning": "why this is the highest-value action right now",
-  "action": "do_work",
+  "action": "do_work" or "rest",
+  "confidence": 1-10,
   "task": "precise, specific description of exactly what to do — enough detail to execute without clarification",
   "expected_outcome": "what you will deliver when done"
 }}
 
-If it is very late at night (after midnight, before 5am) and nothing is time-sensitive, respond:
-{{"action": "rest", "reasoning": "off hours, nothing urgent"}}
-
-If you completed very similar work within the last 60 minutes, pick something meaningfully different.
+If confidence is below 7, set action to "rest" — it's better to do nothing than waste time on low-value work.
+If it is very late at night (after midnight, before 5am), set action to "rest".
+If you completed very similar work within the last 60 minutes, set action to "rest".
 """
 
 
@@ -425,9 +429,12 @@ async def _run_autonomous_decision(self, tenant, config: dict):
     tenant_id = tenant["id"]
     manager_chat_id = config["manager_chat_id"]
 
-    # Load memory
+    # Load memory (paginated — LIMIT 40 to prevent context blowup)
     memories = await self.db.fetch(
-        "SELECT memory_type, content FROM tenant_memory WHERE tenant_id = $1 ORDER BY updated_at DESC",
+        """SELECT memory_type, content FROM tenant_memory
+           WHERE tenant_id = $1
+           ORDER BY updated_at DESC
+           LIMIT 40""",
         tenant_id,
     )
     recent_actions = await self.db.fetch(
@@ -483,9 +490,23 @@ async def _run_autonomous_decision(self, tenant, config: dict):
         logger.debug("Worker %s chose to rest: %s", str(tenant_id)[:8], decision.get("reasoning", ""))
         return
 
+    # Minimum confidence check (Fix 4)
+    if decision.get("confidence", 10) < 7:
+        logger.debug("Worker %s low confidence (%s), skipping", str(tenant_id)[:8], decision.get("confidence"))
+        return
+
     task = decision.get("task", "").strip()
     if not task:
         return
+
+    # Draft-first: never publish/send autonomously — always save to drafts (Fix 2)
+    autonomous_task = (
+        task + "\n\n"
+        "IMPORTANT: You are running autonomously without manager supervision. "
+        "Do NOT publish posts, send emails, or take any irreversible action. "
+        "Instead: write drafts and save them to your drafts/ folder. "
+        "Summarise what you drafted and what action the manager needs to take to publish/send it."
+    )
 
     logger.info("Worker autonomous task [%s]: %s", str(tenant_id)[:8], task[:100])
 
@@ -510,7 +531,7 @@ async def _run_autonomous_decision(self, tenant, config: dict):
         skip_memory=False,
         skip_context_files=True,
     )
-    work_result = work_agent.run_conversation(user_message=task)
+    work_result = work_agent.run_conversation(user_message=autonomous_task)
     output = work_result.get("final_response", "")
 
     # Step 4: Log the action
@@ -553,20 +574,59 @@ async def _run_autonomous_decision(self, tenant, config: dict):
         except Exception as e:
             logger.debug("Learning extraction failed: %s", e)
 
-    # Step 6: Report meaningful output to manager
-    if output and len(output) > 50:
-        await self.redis.lpush("hermes:responses", json.dumps({
-            "tenant_id": str(tenant_id),
-            "platform": "telegram",
-            "chat_id": manager_chat_id,
-            "response": output,
-        }))
-        logger.info("Autonomous task complete [%s], reported to manager", str(tenant_id)[:8])
+    logger.info("Autonomous task complete [%s]: %s", str(tenant_id)[:8], task[:80])
+
+
+async def _digest_loop(self):
+    """Send a digest of autonomous actions to the manager every 2 hours."""
+    while self.running:
+        try:
+            await asyncio.sleep(7200)  # every 2 hours
+
+            tenants = await self.db.fetch(
+                "SELECT * FROM tenants WHERE active = true AND tenant_config IS NOT NULL"
+            )
+            for tenant in tenants:
+                config = json.loads(tenant["tenant_config"] or "{}")
+                manager_chat_id = config.get("manager_chat_id")
+                if not manager_chat_id:
+                    continue
+
+                actions = await self.db.fetch(
+                    "SELECT summary, full_output FROM worker_actions WHERE tenant_id = $1 "
+                    "AND created_at > NOW() - INTERVAL '2 hours' ORDER BY created_at DESC",
+                    tenant["id"],
+                )
+                if not actions:
+                    continue
+
+                worker_name = config.get("worker_name", "Hermes")
+                lines = [f"**{worker_name} update — last 2 hours:**\n"]
+                for a in actions:
+                    lines.append(f"• {a['summary']}")
+                    if a["full_output"] and len(a["full_output"]) > 30:
+                        lines.append(f"  → {a['full_output'][:200].strip()}...")
+                digest = "\n".join(lines)
+
+                await self.redis.lpush("hermes:responses", json.dumps({
+                    "tenant_id": str(tenant["id"]),
+                    "platform": "telegram",
+                    "chat_id": manager_chat_id,
+                    "response": digest,
+                }))
+                logger.info("Digest sent to manager for tenant %s (%d actions)", str(tenant["id"])[:8], len(actions))
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error("Digest loop error: %s", e, exc_info=True)
+            await asyncio.sleep(10)
 
 
 # Inject autonomous methods onto the actual HermesWorker class
 HermesWorker._autonomous_loop = _autonomous_loop
 HermesWorker._run_autonomous_decision = _run_autonomous_decision
+HermesWorker._digest_loop = _digest_loop
 
 
 # ---------------------------------------------------------------------------
