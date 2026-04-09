@@ -469,6 +469,10 @@ class GatewayRunner:
         # Key: session_key, Value: {"command": str, "pattern_key": str, ...}
         self._pending_approvals: Dict[str, Dict[str, Any]] = {}
 
+        # Track sessions awaiting a user response to an update prompt
+        # Key: session_key, Value: True (sentinel)
+        self._update_prompt_pending: Dict[str, bool] = {}
+
         # Track platforms that failed to connect for background reconnection.
         # Key: Platform enum, Value: {"config": platform_config, "attempts": int, "next_retry": float}
         self._failed_platforms: Dict[Platform, Dict[str, Any]] = {}
@@ -1732,13 +1736,18 @@ class GatewayRunner:
         # Sweep _pending_approvals — evict entries older than 5 minutes
         import time as _time
         _now = _time.time()
-        stale = [k for k, v in self._pending_approvals.items()
+        _pending_approvals = getattr(self, '_pending_approvals', {})
+        stale = [k for k, v in _pending_approvals.items()
                  if _now - v.get("timestamp", _now) > 300]
         for k in stale:
-            self._pending_approvals.pop(k, None)
+            _pending_approvals.pop(k, None)
 
+        # Internal synthetic events (e.g. background process completion) bypass authorization
+        # to avoid triggering pairing flows for system-generated messages.
+        if getattr(event, 'internal', False):
+            pass  # Skip auth + rate-limit checks for internal events
         # Check if user is authorized
-        if not self._is_user_authorized(source):
+        elif not self._is_user_authorized(source):
             logger.warning("Unauthorized user: %s (%s) on %s", source.user_id, source.user_name, source.platform.value)
             # In DMs: offer pairing code. In groups: silently ignore.
             if source.chat_type == "dm" and self._get_unauthorized_dm_behavior(source.platform) == "pair":
@@ -1775,8 +1784,9 @@ class GatewayRunner:
         
         # ── Rate limiting ──────────────────────────────────────────────────────
         platform_name_rl = source.platform.value if source.platform else "unknown"
-        rl_result = self.rate_limiter.check(platform_name_rl, source.user_id or "")
-        if rl_result.limited:
+        _rate_limiter = getattr(self, 'rate_limiter', None)
+        rl_result = _rate_limiter.check(platform_name_rl, source.user_id or "") if _rate_limiter else None
+        if rl_result and rl_result.limited:
             adapter = self.adapters.get(source.platform)
             if adapter and source.chat_id:
                 try:
@@ -1929,9 +1939,23 @@ class GatewayRunner:
                 self._pending_messages[_quick_key] = event.text
             return None
 
+        # ── Update prompt interception ─────────────────────────────────────────
+        # When an update process is waiting for user input, intercept the next
+        # message and write it as the update response instead of forwarding to agent.
+        _update_prompt_pending = getattr(self, '_update_prompt_pending', {})
+        if _quick_key in _update_prompt_pending:
+            del _update_prompt_pending[_quick_key]
+            response_text = (event.text or "").strip() or "y"
+            try:
+                response_path = _hermes_home / ".update_response"
+                response_path.write_text(response_text)
+            except Exception as e:
+                logger.debug("Failed to write update response: %s", e)
+            return f"Sent response to update prompt: {response_text!r}"
+
         # Check for commands
         command = event.get_command()
-        
+
         # Emit command:* hook for any recognized slash command.
         # GATEWAY_KNOWN_COMMANDS is derived from the central COMMAND_REGISTRY
         # in hermes_cli/commands.py — no hardcoded set to maintain here.
@@ -1999,6 +2023,7 @@ class GatewayRunner:
                 if not event.text:
                     return "Failed to load the bundled /plan skill."
                 canonical = None
+                command = None  # Mark as handled — don't hit unknown-command guard
             except Exception as e:
                 logger.exception("Failed to prepare /plan command")
                 return f"Failed to enter plan mode: {e}"
@@ -2121,6 +2146,7 @@ class GatewayRunner:
                     )
                     if msg:
                         event.text = msg
+                        command = None  # Mark as handled — don't hit unknown-command guard
                         # Fall through to normal message processing with skill content
                 else:
                     # Not an active skill — check if it's a known-but-disabled or
@@ -2134,6 +2160,18 @@ class GatewayRunner:
         # Pending exec approvals are handled by /approve and /deny commands above.
         # No bare text matching — "yes" in normal conversation must not trigger
         # execution of a dangerous command.
+
+        # Unknown slash command guard — prevent unrecognized /commands from
+        # leaking to the LLM and confusing it.  This runs after all skill,
+        # plugin, and quick-command checks so only truly unknown commands hit it.
+        if command:
+            # If we reach here with a command set, it wasn't resolved by any handler.
+            # Return guidance rather than forwarding to the agent.
+            slash_cmd = f"/{command}"
+            return (
+                f"Unknown command: {slash_cmd}\n\n"
+                f"Use /commands to see the list of available commands."
+            )
 
         # ── Claim this session before any await ───────────────────────
         # Between here and _run_agent registering the real AIAgent, there
@@ -4984,7 +5022,7 @@ class GatewayRunner:
         # where systemd-run --user fails due to missing D-Bus session).
         hermes_cmd_str = " ".join(shlex.quote(part) for part in hermes_cmd)
         update_cmd = (
-            f"{hermes_cmd_str} update > {shlex.quote(str(output_path))} 2>&1; "
+            f"PYTHONUNBUFFERED=1 {hermes_cmd_str} update --gateway > {shlex.quote(str(output_path))} 2>&1; "
             f"status=$?; printf '%s' \"$status\" > {shlex.quote(str(exit_code_path))}"
         )
         try:
@@ -5011,7 +5049,7 @@ class GatewayRunner:
             return f"✗ Failed to start update: {e}"
 
         self._schedule_update_notification_watch()
-        return "⚕ Starting Hermes update… I'll notify you when it's done."
+        return "⚕ Starting Hermes update… I'll stream progress and notify you when it's done."
 
     def _schedule_update_notification_watch(self) -> None:
         """Ensure a background task is watching for update completion."""
@@ -5048,6 +5086,100 @@ class GatewayRunner:
             logger.warning("Update watcher timed out waiting for completion marker")
             exit_code_path.write_text("124")
             await self._send_update_notification()
+
+    async def _watch_update_progress(self, poll_interval=0.5, stream_interval=2.0, timeout=300.0):
+        """Watch for update progress output and stream it to the user."""
+        import asyncio as _asyncio
+        import json as _json
+        from gateway.config import Platform as _Platform
+
+        hermes_home = _hermes_home  # module-level variable
+        pending_path = hermes_home / ".update_pending.json"
+        output_path = hermes_home / ".update_output.txt"
+        exit_code_path = hermes_home / ".update_exit_code"
+        prompt_path = hermes_home / ".update_prompt.json"
+        response_path = hermes_home / ".update_response"
+
+        # Read pending info
+        try:
+            pending = _json.loads(pending_path.read_text())
+        except Exception:
+            return
+
+        platform_name = pending.get("platform", "")
+        chat_id = pending.get("chat_id", "")
+
+        # Find adapter
+        platform_enum = None
+        for p in _Platform:
+            if p.value == platform_name or p.name.lower() == platform_name.lower():
+                platform_enum = p
+                break
+        adapter = self.adapters.get(platform_enum) if platform_enum else None
+
+        sent_offset = 0
+        last_stream = 0
+        elapsed = 0
+
+        while elapsed < timeout:
+            await _asyncio.sleep(poll_interval)
+            elapsed += poll_interval
+
+            # Check for prompt
+            if prompt_path.exists():
+                try:
+                    prompt_data = _json.loads(prompt_path.read_text())
+                    if adapter:
+                        await adapter.send(chat_id, prompt_data["prompt"])
+                except Exception:
+                    pass
+
+            # Stream output periodically
+            now = elapsed
+            if now - last_stream >= stream_interval and output_path.exists():
+                try:
+                    content = output_path.read_text()
+                    if len(content) > sent_offset:
+                        chunk = content[sent_offset:]
+                        sent_offset = len(content)
+                        if adapter and chunk.strip():
+                            await adapter.send(chat_id, chunk)
+                except Exception:
+                    pass
+                last_stream = now
+
+            # Check for completion
+            if exit_code_path.exists():
+                try:
+                    exit_code = int(exit_code_path.read_text().strip())
+                except Exception:
+                    exit_code = 1
+
+                # Send any remaining output
+                if output_path.exists():
+                    try:
+                        content = output_path.read_text()
+                        if len(content) > sent_offset and adapter:
+                            chunk = content[sent_offset:]
+                            if chunk.strip():
+                                await adapter.send(chat_id, chunk)
+                    except Exception:
+                        pass
+
+                # Send completion message
+                if adapter:
+                    if exit_code == 0:
+                        await adapter.send(chat_id, "Update finished successfully.")
+                    else:
+                        await adapter.send(chat_id, "Update failed.")
+
+                # Cleanup
+                for path in (pending_path, output_path, exit_code_path, prompt_path, response_path):
+                    try:
+                        path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                return
 
     async def _send_update_notification(self) -> bool:
         """If an update finished, notify the user.
@@ -5321,6 +5453,7 @@ class GatewayRunner:
         platform_name = watcher.get("platform", "")
         chat_id = watcher.get("chat_id", "")
         thread_id = watcher.get("thread_id", "")
+        notify_on_complete = watcher.get("notify_on_complete", False)
         notify_mode = self._load_background_notifications_mode()
 
         logger.debug("Process watcher started: %s (every %ss, notify=%s)",
@@ -5352,7 +5485,8 @@ class GatewayRunner:
             if session.exited:
                 # Decide whether to notify based on mode
                 should_notify = (
-                    notify_mode in ("all", "result")
+                    notify_on_complete
+                    or notify_mode in ("all", "result")
                     or (notify_mode == "error" and session.exit_code not in (0, None))
                 )
                 if should_notify:
@@ -5368,8 +5502,33 @@ class GatewayRunner:
                             break
                     if adapter and chat_id:
                         try:
-                            send_meta = {"thread_id": thread_id} if thread_id else None
-                            await adapter.send(chat_id, message_text, metadata=send_meta)
+                            if notify_on_complete and hasattr(adapter, 'handle_message'):
+                                # Use handle_message with an internal synthetic event so the agent
+                                # can process the completion and respond via its conversation loop
+                                from gateway.platforms.base import MessageEvent as _MessageEvent
+                                from gateway.session import SessionSource as _SessionSource
+                                from gateway.config import Platform as _Platform
+                                # Resolve platform enum
+                                _platform_enum = None
+                                for _p in _Platform:
+                                    if _p.value == platform_name:
+                                        _platform_enum = _p
+                                        break
+                                _src = _SessionSource(
+                                    platform=_platform_enum,
+                                    chat_id=chat_id,
+                                    user_id=None,
+                                    chat_type="dm",
+                                )
+                                _evt = _MessageEvent(
+                                    text=message_text,
+                                    source=_src,
+                                    internal=True,
+                                )
+                                await adapter.handle_message(_evt)
+                            else:
+                                send_meta = {"thread_id": thread_id} if thread_id else None
+                                await adapter.send(chat_id, message_text, metadata=send_meta)
                         except Exception as e:
                             logger.error("Watcher delivery error: %s", e)
                 break

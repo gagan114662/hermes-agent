@@ -30,12 +30,14 @@ class SSHEnvironment(BaseEnvironment):
     """
 
     def __init__(self, host: str, user: str, cwd: str = "~",
-                 timeout: int = 60, port: int = 22, key_path: str = ""):
+                 timeout: int = 60, port: int = 22, key_path: str = "",
+                 persistent: bool = False):
         super().__init__(cwd=cwd, timeout=timeout)
         self.host = host
         self.user = user
         self.port = port
         self.key_path = key_path
+        self.persistent = persistent
 
         self.control_dir = Path(tempfile.gettempdir()) / "hermes-ssh"
         self.control_dir.mkdir(parents=True, exist_ok=True)
@@ -148,6 +150,9 @@ class SSHEnvironment(BaseEnvironment):
             cmd.extend(["bash", "-c", shlex.quote(cmd_string)])
 
         return _popen_bash(cmd, stdin_data)
+
+    def _sync_skills_and_credentials(self) -> None:
+        """Sync skill files and credentials to the remote host (stub for forward-compat)."""
 
     def cleanup(self):
         if self.control_socket.exists():

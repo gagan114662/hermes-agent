@@ -518,3 +518,84 @@ def check_toolset_requirements() -> Dict[str, bool]:
 def check_tool_availability(quiet: bool = False) -> Tuple[List[str], List[dict]]:
     """Return (available_toolsets, unavailable_info)."""
     return registry.check_tool_availability(quiet=quiet)
+
+
+# ---------------------------------------------------------------------------
+# Tool argument type coercion
+# ---------------------------------------------------------------------------
+
+def _coerce_number(value: str, integer_only: bool = False):
+    """Coerce a string to a number (int or float). Returns original if not numeric."""
+    if not isinstance(value, str):
+        return value
+    try:
+        f = float(value)
+        if integer_only:
+            # inf/nan cannot be represented as int
+            if f != int(f) or f == float('inf') or f == float('-inf'):
+                return value
+            return int(f)
+        # Prefer int for whole numbers (but not inf/-inf)
+        if f != float('inf') and f != float('-inf') and f == int(f):
+            return int(f)
+        return f
+    except (ValueError, OverflowError):
+        return value
+
+
+def _coerce_boolean(value: str):
+    """Coerce a string to bool. Returns original if not 'true'/'false'."""
+    if not isinstance(value, str):
+        return value
+    stripped = value.strip()
+    if stripped.lower() == "true":
+        return True
+    if stripped.lower() == "false":
+        return False
+    return value
+
+
+def _coerce_value(value, type_spec):
+    """Coerce a value to match the given JSON Schema type specification."""
+    if not isinstance(value, str):
+        return value
+    if isinstance(type_spec, list):
+        for t in type_spec:
+            result = _coerce_value(value, t)
+            if not isinstance(result, str) or t == "string":
+                return result
+        return value
+    if type_spec == "integer":
+        return _coerce_number(value, integer_only=True)
+    if type_spec == "number":
+        return _coerce_number(value)
+    if type_spec == "boolean":
+        return _coerce_boolean(value)
+    return value
+
+
+def coerce_tool_args(tool_name: str, args: dict) -> dict:
+    """Coerce string-typed args to the types declared in the tool's JSON Schema.
+
+    The LLM sometimes returns numbers/booleans as strings.  This function
+    fixes those mismatches before dispatch so handlers receive correctly-typed
+    values.
+    """
+    if not args:
+        return args
+    schema = registry.get_schema(tool_name)
+    if not schema:
+        return args
+    properties = schema.get("parameters", {}).get("properties", {})
+    if not properties:
+        return args
+    result = dict(args)
+    for key, val in args.items():
+        if key not in properties:
+            continue
+        if not isinstance(val, str):
+            continue
+        type_spec = properties[key].get("type")
+        if type_spec:
+            result[key] = _coerce_value(val, type_spec)
+    return result

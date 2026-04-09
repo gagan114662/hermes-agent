@@ -334,3 +334,14 @@ def tool_result(data=None, **kwargs) -> str:
     if data is not None:
         return json.dumps(data, ensure_ascii=False)
     return json.dumps(kwargs, ensure_ascii=False)
+
+
+class ContextModifier:
+    """Carries context modifications that a tool handler wants to apply."""
+
+    def __init__(self, memory_writes=None, ephemeral_context=""):
+        self.memory_writes = memory_writes or []
+        self.ephemeral_context = ephemeral_context or ""
+
+    def is_empty(self) -> bool:
+        return not self.memory_writes and not self.ephemeral_context

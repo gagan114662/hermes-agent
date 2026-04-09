@@ -513,6 +513,9 @@ class AIAgent:
         checkpoint_max_snapshots: int = 50,
         pass_session_id: bool = False,
         persist_session: bool = True,
+        honcho_session_key: str = None,
+        honcho_manager=None,
+        honcho_config=None,
     ):
         """
         Initialize the AI Agent.
@@ -576,6 +579,9 @@ class AIAgent:
         self.skip_context_files = skip_context_files
         self.pass_session_id = pass_session_id
         self.persist_session = persist_session
+        self.honcho_session_key = honcho_session_key
+        self.honcho_manager = honcho_manager
+        self.honcho_config = honcho_config
         self._credential_pool = credential_pool
         self.log_prefix_chars = log_prefix_chars
         self.log_prefix = f"{log_prefix} " if log_prefix else ""

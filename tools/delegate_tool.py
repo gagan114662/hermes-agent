@@ -98,7 +98,25 @@ def _build_child_progress_callback(task_index: int, parent_agent, task_count: in
     _BATCH_SIZE = 5
     _batch: List[str] = []
 
-    def _callback(tool_name: str, preview: str = None):
+    def _callback(*args):
+        # Support both event-style (4-arg) and legacy (1-2 arg) calls:
+        #   cb("tool.started", tool_name, preview, extra)  → new style
+        #   cb(tool_name, preview)                         → legacy
+        #   cb(tool_name)                                  → legacy 1-arg
+        if len(args) >= 3:
+            # event-style: first arg is event type like "tool.started"
+            event = args[0]
+            if event == "_thinking":
+                tool_name = "_thinking"
+                preview = args[1] if len(args) > 1 else None
+            else:
+                tool_name = args[1] if len(args) > 1 else args[0]
+                preview = args[2] if len(args) > 2 else None
+        elif len(args) >= 1:
+            tool_name = args[0]
+            preview = args[1] if len(args) > 1 else None
+        else:
+            return
         # Special "_thinking" event: model produced text content (reasoning)
         if tool_name == "_thinking":
             if spinner:
@@ -234,6 +252,16 @@ def _build_child_agent(
         tool_progress_callback=child_progress_cb,
         iteration_budget=None,  # fresh budget per subagent
     )
+    # Inherit pluggable print function from parent (CLI uses this for ANSI routing)
+    parent_print_fn = getattr(parent_agent, '_print_fn', None)
+    if parent_print_fn is not None:
+        child._print_fn = parent_print_fn
+
+    # Inherit credential pool from parent so subagents can use the same pool
+    parent_pool = getattr(parent_agent, '_credential_pool', None)
+    if parent_pool is not None:
+        child._credential_pool = parent_pool
+
     # Set delegation depth so children can't spawn grandchildren
     child._delegate_depth = getattr(parent_agent, '_delegate_depth', 0) + 1
 
@@ -269,6 +297,19 @@ def _run_single_child(
     import model_tools
     _saved_tool_names = getattr(child, "_delegate_saved_tool_names",
                                 list(model_tools._last_resolved_tool_names))
+
+    # Acquire credential lease if the child has a pool
+    _lease_id = None
+    _child_pool = getattr(child, '_credential_pool', None)
+    if _child_pool is not None and hasattr(_child_pool, 'acquire_lease'):
+        try:
+            _lease_id = _child_pool.acquire_lease()
+            if _lease_id is not None and hasattr(_child_pool, 'current'):
+                leased_entry = _child_pool.current()
+                if leased_entry is not None and hasattr(child, '_swap_credential'):
+                    child._swap_credential(leased_entry)
+        except Exception as e:
+            logger.debug("Failed to acquire credential lease: %s", e)
 
     try:
         result = child.run_conversation(user_message=goal)
@@ -380,6 +421,13 @@ def _run_single_child(
         }
 
     finally:
+        # Release credential lease if one was acquired
+        if _lease_id is not None and _child_pool is not None and hasattr(_child_pool, 'release_lease'):
+            try:
+                _child_pool.release_lease(_lease_id)
+            except Exception as e:
+                logger.debug("Failed to release credential lease: %s", e)
+
         # Restore the parent's tool names so the process-global is correct
         # for any subsequent execute_code calls or other consumers.
         import model_tools
@@ -721,6 +769,34 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
         "command": runtime.get("command"),
         "args": list(runtime.get("args") or []),
     }
+
+
+def _resolve_child_credential_pool(provider: str | None, parent_agent):
+    """Resolve a credential pool for a child agent.
+
+    - If provider is None or matches the parent's provider, return the parent's pool.
+    - If provider is different, try to load a new pool via agent.credential_pool.load_pool.
+      Returns the new pool if it has_credentials(), otherwise None.
+    - On any error, returns None (safe fallback: no pool).
+    """
+    parent_pool = getattr(parent_agent, "_credential_pool", None)
+    parent_provider = getattr(parent_agent, "provider", None) or ""
+
+    # No override or same provider as parent → share the parent pool
+    if provider is None or provider == parent_provider:
+        return parent_pool
+
+    # Different provider → try to load its own pool
+    try:
+        from agent import credential_pool as _cp
+        new_pool = _cp.load_pool(provider)
+        if new_pool is None:
+            return None
+        if hasattr(new_pool, "has_credentials") and not new_pool.has_credentials():
+            return None
+        return new_pool
+    except Exception:
+        return None
 
 
 def _load_config() -> dict:

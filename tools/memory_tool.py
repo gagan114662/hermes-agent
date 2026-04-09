@@ -49,6 +49,8 @@ def get_memory_dir() -> Path:
 # should prefer get_memory_dir().
 MEMORY_DIR = get_memory_dir()
 
+TEAM_MEMORY_FILE = str(Path.home() / ".hermes" / "team.md")
+
 ENTRY_DELIMITER = "\n§\n"
 
 
@@ -436,6 +438,31 @@ class MemoryStore:
             raise RuntimeError(f"Failed to write memory file {path}: {e}")
 
 
+def _team_memory_read() -> List[str]:
+    """Read entries from the team memory file."""
+    path = Path(TEAM_MEMORY_FILE)
+    if not path.exists():
+        return []
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except (OSError, IOError):
+        return []
+    if not raw.strip():
+        return []
+    entries = [e.strip() for e in raw.split(ENTRY_DELIMITER)]
+    return [e for e in entries if e]
+
+
+def _team_memory_write(entries: List[str]) -> None:
+    """Write entries to the team memory file atomically."""
+    path = Path(TEAM_MEMORY_FILE)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = ENTRY_DELIMITER.join(entries)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+
+
 def memory_tool(
     action: str,
     target: str = "memory",
@@ -448,11 +475,51 @@ def memory_tool(
 
     Returns JSON string with results.
     """
+    # ── Team memory: file-based, no MemoryStore required ──────────────────────
+    if target == "team":
+        if action == "add":
+            if not content:
+                return tool_error("Content is required for 'add' action.", success=False)
+            entries = _team_memory_read()
+            entries.append(content)
+            _team_memory_write(entries)
+            return json.dumps({"success": True, "target": "team"}, ensure_ascii=False)
+
+        elif action == "read":
+            entries = _team_memory_read()
+            return json.dumps({"memories": entries, "target": "team"}, ensure_ascii=False)
+
+        elif action == "remove":
+            if not old_text:
+                return tool_error("old_text is required for 'remove' action.", success=False)
+            entries = _team_memory_read()
+            new_entries = [e for e in entries if old_text not in e]
+            if len(new_entries) == len(entries):
+                return json.dumps({"success": False, "error": "Entry not found."}, ensure_ascii=False)
+            _team_memory_write(new_entries)
+            return json.dumps({"success": True, "target": "team"}, ensure_ascii=False)
+
+        elif action == "replace":
+            if not old_text:
+                return tool_error("old_text is required for 'replace' action.", success=False)
+            if not content:
+                return tool_error("content is required for 'replace' action.", success=False)
+            entries = _team_memory_read()
+            new_entries = [content if old_text in e else e for e in entries]
+            if new_entries == entries:
+                return json.dumps({"success": False, "error": "Entry not found."}, ensure_ascii=False)
+            _team_memory_write(new_entries)
+            return json.dumps({"success": True, "target": "team"}, ensure_ascii=False)
+
+        else:
+            return tool_error(f"Unknown action '{action}'. Use: add, read, replace, remove", success=False)
+
+    # ── Standard memory/user targets ──────────────────────────────────────────
     if store is None:
         return tool_error("Memory is not available. It may be disabled in config or this environment.", success=False)
 
     if target not in ("memory", "user"):
-        return tool_error(f"Invalid target '{target}'. Use 'memory' or 'user'.", success=False)
+        return tool_error(f"Invalid target '{target}'. Use 'memory', 'user', or 'team'.", success=False)
 
     if action == "add":
         if not content:

@@ -176,6 +176,42 @@ _SANE_PATH = (
 )
 
 
+# Sentinel strings used to wrap command output so we can extract it cleanly
+_OUTPUT_FENCE = "\x02HERMES_OUTPUT_FENCE\x03"
+
+# Shell noise patterns emitted by login shells that should be stripped
+_SHELL_NOISE_PATTERNS = (
+    "bash: cannot set terminal process group",
+    "bash: no job control in this shell",
+    "Last login:",
+)
+
+
+def _clean_shell_noise(output: str) -> str:
+    """Strip TTY/login noise lines that bash -l emits to stderr."""
+    if not output:
+        return output
+    lines = output.splitlines(keepends=True)
+    cleaned = []
+    for line in lines:
+        stripped = line.strip()
+        if any(stripped.startswith(pat) for pat in _SHELL_NOISE_PATTERNS):
+            continue
+        cleaned.append(line)
+    return "".join(cleaned)
+
+
+def _extract_fenced_output(raw: str) -> str:
+    """Extract content between _OUTPUT_FENCE sentinels, or clean the raw output."""
+    if _OUTPUT_FENCE in raw:
+        parts = raw.split(_OUTPUT_FENCE)
+        if len(parts) >= 2:
+            return parts[1]
+        # Only start fence — return what's after it
+        return _clean_shell_noise(parts[-1])
+    return _clean_shell_noise(raw)
+
+
 def _make_run_env(env: dict) -> dict:
     """Build a run environment with a sane PATH and provider-var stripping."""
     try:
@@ -205,8 +241,10 @@ class LocalEnvironment(BaseEnvironment):
     CWD persists via file-based read after each command.
     """
 
-    def __init__(self, cwd: str = "", timeout: int = 60, env: dict = None):
+    def __init__(self, cwd: str = "", timeout: int = 60, env: dict = None,
+                 persistent: bool = False):
         super().__init__(cwd=cwd or os.getcwd(), timeout=timeout, env=env)
+        self.persistent = persistent
         self.init_session()
 
     def _run_bash(self, cmd_string: str, *, login: bool = False,

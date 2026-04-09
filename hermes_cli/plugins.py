@@ -247,6 +247,7 @@ class PluginManager:
         self._cli_commands: Dict[str, dict] = {}
         self._discovered: bool = False
         self._cli_ref = None  # Set by CLI after plugin discovery
+        self._plugin_mtimes: Dict[str, float] = {}
 
     # -----------------------------------------------------------------------
     # Public
@@ -465,6 +466,29 @@ class PluginManager:
     # Hook invocation
     # -----------------------------------------------------------------------
 
+    def _check_reload(self) -> None:
+        """Reload plugin modules whose source files have changed on disk."""
+        for name, loaded in list(self._plugins.items()):
+            if not loaded.enabled or loaded.module is None:
+                continue
+            module_file = getattr(loaded.module, "__file__", None)
+            if not module_file:
+                continue
+            try:
+                mtime = os.path.getmtime(module_file)
+            except OSError:
+                continue
+            if name not in self._plugin_mtimes:
+                self._plugin_mtimes[name] = mtime
+                continue
+            if mtime != self._plugin_mtimes[name]:
+                self._plugin_mtimes[name] = mtime
+                try:
+                    importlib.reload(loaded.module)
+                    logger.debug("Hot-reloaded plugin '%s'", name)
+                except Exception as exc:
+                    logger.warning("Failed to reload plugin '%s': %s", name, exc)
+
     def invoke_hook(self, hook_name: str, **kwargs: Any) -> List[Any]:
         """Call all registered callbacks for *hook_name*.
 
@@ -485,6 +509,7 @@ class PluginManager:
         are reused.  All injected context is ephemeral — never
         persisted to session DB.
         """
+        self._check_reload()
         callbacks = self._hooks.get(hook_name, [])
         results: List[Any] = []
         for cb in callbacks:
@@ -609,3 +634,15 @@ def get_plugin_toolsets() -> List[tuple]:
         result.append((ts_key, label, desc))
 
     return result
+
+
+def emit_hook(hook_name: str, **kwargs) -> None:
+    """Fire a lifecycle hook, swallowing all exceptions.
+
+    Unlike invoke_hook(), emit_hook() never raises — it is safe to call
+    from any context without wrapping in try/except.
+    """
+    try:
+        invoke_hook(hook_name, **kwargs)
+    except Exception as exc:
+        logger.debug("emit_hook('%s') suppressed exception: %s", hook_name, exc)
