@@ -34,7 +34,6 @@ dependencies = [
   "edge-tts>=7.2.7,<8",
   "feedparser>=6.0.11,<7",
   "twilio>=9.0.0,<10",
-  "faster-whisper>=1.0.0,<2",
   # Skills Hub (GitHub App JWT auth — optional, only needed for bot identity)
   "PyJWT[crypto]>=2.12.0,<3",  # CVE-2026-32597
 ]
@@ -79,6 +78,7 @@ rl = [
   "uvicorn[standard]>=0.24.0,<1",
   "wandb>=0.15.0,<1",
 ]
+stt-local = ["faster-whisper>=1.0.0,<2"]
 yc-bench = ["yc-bench @ git+https://github.com/collinear-ai/yc-bench.git ; python_version >= '3.12'"]
 all = [
   "hermes-agent[modal]",
@@ -103,6 +103,7 @@ all = [
   "hermes-agent[dingtalk]",
   "hermes-agent[feishu]",
   "hermes-agent[mistral]",
+  "hermes-agent[stt-local]",
 ]
 
 [project.scripts]

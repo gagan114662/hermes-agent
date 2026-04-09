@@ -134,6 +134,10 @@ class ContextCompressor:
         # Stores the previous compaction summary for iterative updates
         self._previous_summary: Optional[str] = None
 
+        # Cooldown: timestamp of last summary failure; None if no failure yet
+        self._last_summary_failure: Optional[float] = None
+        self._summary_cooldown_s: float = 60.0  # skip retries within 60s of failure
+
         # CC-style armed/urgent states
         self.arm_threshold: float = 0.65     # warn at 65% — context getting large
         self.urgent_threshold: float = 0.80  # force compress at 80% — don't wait
@@ -451,11 +455,16 @@ Target ~{summary_budget} tokens. Be specific — include file paths, command out
 
 Write only the summary body. Do not include any preamble or prefix."""
 
+        # Skip if still in cooldown from a recent failure
+        if self._last_summary_failure is not None:
+            import time as _time
+            if _time.monotonic() - self._last_summary_failure < self._summary_cooldown_s:
+                return None
+
         try:
             call_kwargs = {
                 "task": "compression",
                 "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.3,
                 "max_tokens": summary_budget * 2,
                 # timeout resolved from auxiliary.compression.timeout config by call_llm
             }
@@ -467,15 +476,21 @@ Write only the summary body. Do not include any preamble or prefix."""
             if not isinstance(content, str):
                 content = str(content) if content else ""
             summary = content.strip()
+            # Clear failure state on success
+            self._last_summary_failure = None
             # Store for iterative updates on next compaction
             self._previous_summary = summary
             return self._with_summary_prefix(summary)
         except RuntimeError:
             logging.warning("Context compression: no provider available for "
                             "summary. Middle turns will be dropped without summary.")
+            import time as _time
+            self._last_summary_failure = _time.monotonic()
             return None
         except Exception as e:
             logging.warning("Failed to generate context summary: %s", e)
+            import time as _time
+            self._last_summary_failure = _time.monotonic()
             return None
 
     @staticmethod

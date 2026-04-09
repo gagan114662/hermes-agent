@@ -1760,17 +1760,21 @@ class GatewayRunner:
                 pass
             return f"Sent your response to the update prompt."
 
-        # Sweep _pending_approvals — evict entries older than 5 minutes
-        import time as _time
-        _now = _time.time()
-        _pending_approvals = getattr(self, "_pending_approvals", {})
-        stale = [k for k, v in _pending_approvals.items()
-                 if _now - v.get("timestamp", _now) > 300]
-        for k in stale:
-            _pending_approvals.pop(k, None)
+        # Internal events (e.g. background process completion) bypass authorization
+        if getattr(event, 'internal', False):
+            pass
+        else:
+            # Sweep _pending_approvals — evict entries older than 5 minutes
+            import time as _time
+            _now = _time.time()
+            _pending_approvals = getattr(self, "_pending_approvals", {})
+            stale = [k for k, v in _pending_approvals.items()
+                     if _now - v.get("timestamp", _now) > 300]
+            for k in stale:
+                _pending_approvals.pop(k, None)
 
-        # Check if user is authorized
-        if not self._is_user_authorized(source):
+        # Check if user is authorized (skip for internal events)
+        if not getattr(event, 'internal', False) and not self._is_user_authorized(source):
             logger.warning("Unauthorized user: %s (%s) on %s", source.user_id, source.user_name, source.platform.value)
             # In DMs: offer pairing code. In groups: silently ignore.
             if source.chat_type == "dm" and self._get_unauthorized_dm_behavior(source.platform) == "pair":
@@ -4699,7 +4703,7 @@ class GatewayRunner:
         # Flush memories for current session before switching
         try:
             _flush_task = asyncio.create_task(
-                self._async_flush_memories(current_entry.session_id, session_key)
+                self._async_flush_memories(current_entry.session_id)
             )
             self._background_tasks.add(_flush_task)
             _flush_task.add_done_callback(self._background_tasks.discard)
@@ -5527,6 +5531,7 @@ class GatewayRunner:
         platform_name = watcher.get("platform", "")
         chat_id = watcher.get("chat_id", "")
         thread_id = watcher.get("thread_id", "")
+        notify_on_complete = watcher.get("notify_on_complete", False)
         notify_mode = self._load_background_notifications_mode()
 
         logger.debug("Process watcher started: %s (every %ss, notify=%s)",
@@ -5574,8 +5579,22 @@ class GatewayRunner:
                             break
                     if adapter and chat_id:
                         try:
-                            send_meta = {"thread_id": thread_id} if thread_id else None
-                            await adapter.send(chat_id, message_text, metadata=send_meta)
+                            if notify_on_complete:
+                                # Route through _handle_message with internal=True so it
+                                # bypasses authorization but still updates session memory.
+                                from gateway.platforms.base import MessageEvent as _ME
+                                from gateway.session import SessionSource as _SS
+                                _src = _SS(
+                                    platform=next((p for p in self.adapters if p.value == platform_name), None),
+                                    chat_id=chat_id,
+                                    thread_id=thread_id or None,
+                                    chat_type="dm",
+                                )
+                                _evt = _ME(text=message_text, source=_src, internal=True)
+                                await adapter.handle_message(_evt)
+                            else:
+                                send_meta = {"thread_id": thread_id} if thread_id else None
+                                await adapter.send(chat_id, message_text, metadata=send_meta)
                         except Exception as e:
                             logger.error("Watcher delivery error: %s", e)
                 break
@@ -5711,7 +5730,7 @@ class GatewayRunner:
         last_progress_msg = [None]  # Track last message for dedup
         repeat_count = [0]  # How many times the same message repeated
         
-        def progress_callback(tool_name: str, preview: str = None, args: dict = None):
+        def progress_callback(event_type: str, tool_name: str, preview: str = None, args: dict = None):
             """Callback invoked by agent when a tool is called."""
             if not progress_queue:
                 return
@@ -5736,11 +5755,12 @@ class GatewayRunner:
                 return
             
             if preview:
-                # Truncate preview unless config says unlimited
+                # Truncate preview: 0 means use default (40), positive means cap at that length
                 from agent.display import get_tool_preview_max_len
                 _pl = get_tool_preview_max_len()
-                if _pl > 0 and len(preview) > _pl:
-                    preview = preview[:_pl - 3] + "..."
+                _max = _pl if _pl > 0 else 40
+                if len(preview) > _max:
+                    preview = preview[:_max - 3] + "..."
                 msg = f"{emoji} {tool_name}: \"{preview}\""
             else:
                 msg = f"{emoji} {tool_name}..."

@@ -95,13 +95,29 @@ def get_skin_tool_prefix() -> str:
     return "┊"
 
 
+_BUILTIN_TOOL_EMOJIS: dict = {
+    "terminal": "💻",
+    "execute_code": "🐍",
+    "read_file": "📄",
+    "write_file": "✏️",
+    "edit_file": "✏️",
+    "web_search": "🔍",
+    "web_fetch": "🌐",
+    "browser_snapshot": "📸",
+    "delegate_task": "🤝",
+    "memory": "🧠",
+    "todo": "📋",
+}
+
+
 def get_tool_emoji(tool_name: str, default: str = "⚡") -> str:
     """Get the display emoji for a tool.
 
     Resolution order:
     1. Active skin's ``tool_emojis`` overrides (if a skin is loaded)
     2. Tool registry's per-tool ``emoji`` field
-    3. *default* fallback
+    3. Built-in tool emoji map
+    4. *default* fallback
     """
     # 1. Skin override
     skin = _get_skin()
@@ -117,7 +133,11 @@ def get_tool_emoji(tool_name: str, default: str = "⚡") -> str:
             return emoji
     except Exception:
         pass
-    # 3. Hardcoded fallback
+    # 3. Built-in map
+    builtin = _BUILTIN_TOOL_EMOJIS.get(tool_name)
+    if builtin:
+        return builtin
+    # 4. Hardcoded fallback
     return default
 
 

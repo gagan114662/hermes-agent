@@ -220,39 +220,90 @@ class MemoryStore:
         if scan_error:
             return {"success": False, "error": scan_error}
 
+        # Quality validation
+        quality_score = 0.0
+        try:
+            from agent.learning_validator import check_memory, check_memory_limit
+            quality_score, quality_error = check_memory(content, target)
+            if quality_error:
+                try:
+                    from agent.learning_journal import record_memory_event
+                    record_memory_event(
+                        action="add", target=target,
+                        previous_entries=[], current_entries=[],
+                        quality=quality_score, outcome="rejected", error=quality_error,
+                    )
+                except Exception:
+                    pass
+                return {"success": False, "error": quality_error, "quality_score": quality_score}
+        except ImportError:
+            pass
+
         with self._file_lock(self._path_for(target)):
             # Re-read from disk under lock to pick up writes from other sessions
             self._reload_target(target)
 
             entries = self._entries_for(target)
-            limit = self._char_limit(target)
+
+            # Check entry count limit
+            try:
+                from agent.learning_validator import check_memory_limit
+                limit_error = check_memory_limit(len(entries))
+                if limit_error:
+                    try:
+                        from agent.learning_journal import record_memory_event
+                        record_memory_event(
+                            action="add", target=target,
+                            previous_entries=list(entries), current_entries=list(entries),
+                            quality=quality_score, outcome="rejected", error=limit_error,
+                        )
+                    except Exception:
+                        pass
+                    return {"success": False, "error": limit_error, "quality_score": quality_score}
+            except ImportError:
+                pass
+
+            char_limit = self._char_limit(target)
 
             # Reject exact duplicates
             if content in entries:
-                return self._success_response(target, "Entry already exists (no duplicate added).")
+                return {**self._success_response(target, "Entry already exists (no duplicate added)."), "quality_score": quality_score}
 
             # Calculate what the new total would be
             new_entries = entries + [content]
             new_total = len(ENTRY_DELIMITER.join(new_entries))
 
-            if new_total > limit:
+            if new_total > char_limit:
                 current = self._char_count(target)
                 return {
                     "success": False,
                     "error": (
-                        f"Memory at {current:,}/{limit:,} chars. "
+                        f"Memory at {current:,}/{char_limit:,} chars. "
                         f"Adding this entry ({len(content)} chars) would exceed the limit. "
                         f"Replace or remove existing entries first."
                     ),
                     "current_entries": entries,
-                    "usage": f"{current:,}/{limit:,}",
+                    "usage": f"{current:,}/{char_limit:,}",
+                    "quality_score": quality_score,
                 }
 
+            previous_entries = list(entries)
             entries.append(content)
             self._set_entries(target, entries)
             self.save_to_disk(target)
 
-        return self._success_response(target, "Entry added.")
+            # Journal the accepted write
+            try:
+                from agent.learning_journal import record_memory_event
+                record_memory_event(
+                    action="add", target=target,
+                    previous_entries=previous_entries, current_entries=list(entries),
+                    quality=quality_score, outcome="accepted",
+                )
+            except Exception:
+                pass
+
+        return {**self._success_response(target, "Entry added."), "quality_score": quality_score}
 
     def replace(self, target: str, old_text: str, new_content: str) -> Dict[str, Any]:
         """Find entry containing old_text substring, replace it with new_content."""
@@ -306,9 +357,21 @@ class MemoryStore:
                     ),
                 }
 
+            previous_entries = list(entries)
             entries[idx] = new_content
             self._set_entries(target, entries)
             self.save_to_disk(target)
+
+            # Journal the replacement
+            try:
+                from agent.learning_journal import record_memory_event
+                record_memory_event(
+                    action="replace", target=target,
+                    previous_entries=previous_entries, current_entries=list(entries),
+                    quality=0.0, outcome="accepted",
+                )
+            except Exception:
+                pass
 
         return self._success_response(target, "Entry replaced.")
 
@@ -340,9 +403,21 @@ class MemoryStore:
                 # All identical -- safe to remove just the first
 
             idx = matches[0][0]
+            previous_entries = list(entries)
             entries.pop(idx)
             self._set_entries(target, entries)
             self.save_to_disk(target)
+
+            # Journal the removal
+            try:
+                from agent.learning_journal import record_memory_event
+                record_memory_event(
+                    action="remove", target=target,
+                    previous_entries=previous_entries, current_entries=list(entries),
+                    quality=0.0, outcome="accepted",
+                )
+            except Exception:
+                pass
 
         return self._success_response(target, "Entry removed.")
 
