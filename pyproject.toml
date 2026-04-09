@@ -63,6 +63,14 @@ sms = ["aiohttp>=3.9.0,<4"]
 acp = ["agent-client-protocol>=0.9.0,<1.0"]
 dingtalk = ["dingtalk-stream>=0.1.0,<1"]
 feishu = ["lark-oapi>=1.5.3,<2"]
+scale = [
+  "asyncpg>=0.29.0,<1",
+  "redis>=5.0.0,<6",
+  "uvicorn[standard]>=0.27.0,<1",
+  "python-telegram-bot>=21.0,<23",
+  "fastapi>=0.110.0,<1",
+  "yt-dlp>=2024.1.1",
+]
 rl = [
   "atroposlib @ git+https://github.com/NousResearch/atropos.git",
   "tinker @ git+https://github.com/thinking-machines-lab/tinker.git",
