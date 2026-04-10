@@ -30,8 +30,10 @@ from typing import Dict, Optional
 
 import asyncpg
 import redis.asyncio as aioredis
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 logging.basicConfig(
     level=logging.INFO,
@@ -307,6 +309,52 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Hermes Scale Gateway", lifespan=lifespan)
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+)
+
+
+class OnboardRequest(BaseModel):
+    business_name: str
+    business_info: str
+    telegram_token: str
+    manager_chat_id: str
+
+
+@app.post("/onboard")
+async def onboard(req: OnboardRequest):
+    """
+    Deploy a new AI worker. Generates worker identity from scratch via LLM,
+    provisions filesystem, inserts tenant into Postgres, sends Telegram welcome.
+    """
+    import sys as _sys
+    import os as _os
+    _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+    from scale.onboard import run_onboard
+
+    try:
+        result = await run_onboard(
+            business_name=req.business_name,
+            business_info=req.business_info,
+            telegram_token=req.telegram_token,
+            manager_chat_id=req.manager_chat_id,
+            db=db_pool,
+            redis=redis_client,
+        )
+    except (ValueError, KeyError) as e:
+        raise HTTPException(status_code=422, detail=f"Worker design failed: {e}")
+    except Exception as e:
+        logger.error("Onboard error: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+    # Hot-reload tenants so gateway starts polling the new bot immediately
+    await load_tenants()
+
+    return result
+
 
 @app.get("/health")
 async def health():
@@ -380,6 +428,49 @@ async def list_tenants():
     ]
 
 
+@app.post("/mailbox/inbound")
+async def mailbox_inbound(request: Request):
+    """
+    Mailgun webhook for inbound emails to worker addresses.
+    Routes the email into the worker's Redis queue as a regular message.
+    """
+    form = await request.form()
+    recipient = form.get("recipient", "")  # e.g. marco-marios-pizza@hermes-worker.com
+    sender = form.get("sender", "")
+    subject = form.get("subject", "")
+    body = form.get("body-plain", "") or form.get("body-html", "")
+
+    if not recipient:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "missing recipient"})
+
+    # Look up tenant by worker_email
+    tenant = await db_pool.fetchrow(
+        "SELECT id, name FROM tenants WHERE worker_email = $1 AND active = true",
+        recipient,
+    )
+    if not tenant:
+        logger.warning("Inbound email to unknown address: %s", recipient)
+        return JSONResponse(status_code=200, content={"ok": False, "error": "unknown recipient"})
+
+    tenant_id = str(tenant["id"])
+    message_text = f"Email from {sender}\nSubject: {subject}\n\n{body}"
+
+    await redis_client.lpush(f"hermes:queue:{tenant_id}", json.dumps({
+        "tenant_id": tenant_id,
+        "platform": "email",
+        "chat_id": sender,   # reply-to address acts as the "chat"
+        "user_id": sender,
+        "user_name": sender.split("@")[0],
+        "chat_type": "dm",
+        "text": message_text,
+        "message_id": None,
+        "timestamp": __import__("time").time(),
+    }))
+
+    logger.info("Inbound email queued: tenant=%s from=%s subject=%s", tenant["name"], sender, subject[:50])
+    return {"ok": True}
+
+
 @app.get("/stats/{tenant_slug}")
 async def tenant_stats(tenant_slug: str):
     """Get message stats for a specific tenant."""
@@ -405,6 +496,26 @@ async def tenant_stats(tenant_slug: str):
         "SELECT count(*) FROM sessions WHERE tenant_id = $1", tid
     )
 
+    # Quality scores by task type (hill-climbing trend data)
+    score_rows = await db_pool.fetch(
+        """SELECT task_type,
+                  ROUND(AVG(quality_score)) as avg_score,
+                  MAX(quality_score) as best_score,
+                  COUNT(*) as attempts
+           FROM worker_actions
+           WHERE tenant_id = $1 AND quality_score IS NOT NULL
+           GROUP BY task_type""",
+        tid,
+    )
+    quality_trends = {
+        r["task_type"]: {
+            "avg": int(r["avg_score"]),
+            "best": r["best_score"],
+            "attempts": r["attempts"],
+        }
+        for r in score_rows
+    }
+
     return {
         "tenant": tenant["name"],
         "sessions": session_count,
@@ -413,6 +524,7 @@ async def tenant_stats(tenant_slug: str):
         "total_tokens": (counts["total_input_tokens"] or 0) + (counts["total_output_tokens"] or 0),
         "total_cost_usd": round(float(counts["total_cost"] or 0), 4),
         "avg_response_ms": round(float(counts["avg_duration_ms"] or 0)),
+        "quality_trends": quality_trends,
     }
 
 
