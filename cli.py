@@ -5052,6 +5052,8 @@ class HermesCLI:
             self._show_lineage(cmd_original)
         elif canonical == "costmap":
             self._show_costmap()
+        elif canonical in ("marketplace", "market"):
+            self._handle_marketplace_command(cmd_original)
         else:
             # Check for user-defined quick commands (bypass agent loop, no LLM call)
             base_cmd = cmd_lower.split()[0]
@@ -6680,6 +6682,204 @@ After saving all three files, confirm:
         print(f"  {'─' * 68}")
         total_str = f"~${total_usd:.4f}" if total_usd else "  n/a  "
         print(f"  {'TOTAL':<38}  {total_str:>10}  ({total_in:>7,}in / {total_out:>7,}out)")
+
+    # ------------------------------------------------------------------
+    # /marketplace — community skill browser + installer
+    # ------------------------------------------------------------------
+
+    def _handle_marketplace_command(self, command: str = "/marketplace"):
+        """Handle /marketplace [search|install|list|info|sync] — community skills."""
+        parts = command.strip().split(None, 2)
+        sub = parts[1].strip().lower() if len(parts) > 1 else "list"
+        arg = parts[2].strip() if len(parts) > 2 else ""
+
+        if sub in ("list", "ls"):
+            self._marketplace_list()
+        elif sub == "search":
+            self._marketplace_search(arg)
+        elif sub == "install":
+            self._marketplace_install(arg)
+        elif sub == "info":
+            self._marketplace_info(arg)
+        elif sub == "sync":
+            self._marketplace_sync()
+        else:
+            print("  Usage: /marketplace <subcommand>")
+            print("  Subcommands:")
+            print("    list                  — show installed skills with provenance")
+            print("    search <query>        — search the community index")
+            print("    install <skill-id>    — install a skill from the community index")
+            print("    info <skill-id>       — show provenance for an installed skill")
+            print("    sync                  — scan skills dirs and register any untracked skills")
+
+    def _marketplace_list(self):
+        """List all installed skills with provenance metadata."""
+        try:
+            from agent.components_registry import list_installed, try_auto_register
+            from agent.skill_utils import get_all_skills_dirs
+        except Exception as exc:
+            print(f"  Marketplace error: {exc}")
+            return
+
+        # Lazy sync: register any SKILL.md files not yet in the registry
+        for skills_dir in get_all_skills_dirs():
+            if not skills_dir.is_dir():
+                continue
+            for skill_dir in skills_dir.iterdir():
+                if (skill_dir / "SKILL.md").exists():
+                    try:
+                        try_auto_register(skill_dir.name, skills_base_dir=str(skills_dir))
+                    except Exception:
+                        pass
+
+        installed = list_installed()
+        if not installed:
+            print("  No skills registered yet.")
+            print("  Create one with /skillnew, or install from the community with")
+            print("  /marketplace install <skill-id>.")
+            return
+
+        print(f"\n  📦 Installed Skills ({len(installed)})")
+        print(f"  {'─' * 64}")
+        for s in installed:
+            source_icon = {"community": "🌐", "local": "🏠", "git": "🔗", "url": "🔗"}.get(
+                s.get("source", "local"), "•"
+            )
+            sid = s.get("id", "?")
+            ver = s.get("version", "local")
+            author = s.get("author", "")
+            desc = (s.get("description") or "")[:50]
+            ts = (s.get("installed_at", "") or "")[:10]
+            author_str = f"  by {author}" if author else ""
+            print(f"  {source_icon} {sid:<28} v{ver:<10} {ts}{author_str}")
+            if desc:
+                print(f"       {desc}")
+        print(f"  {'─' * 64}")
+
+    def _marketplace_search(self, query: str):
+        """Search the community skill index."""
+        if not query:
+            print("  Usage: /marketplace search <query>")
+            return
+        print(f"  🔍 Searching community index for: {query!r} …")
+        try:
+            from hermes_cli.marketplace import fetch_index, search_index, get_index_url
+            index = fetch_index()
+            results = search_index(index, query)
+        except Exception as exc:
+            print(f"  Error fetching index: {exc}")
+            return
+
+        if not results:
+            print(f"  No community skills matched '{query}'.")
+            return
+
+        print(f"\n  Found {len(results)} skill(s)  (index: {get_index_url()[:60]})")
+        print(f"  {'─' * 64}")
+        for s in results:
+            tags = "  [" + ", ".join(s.tags[:4]) + "]" if s.tags else ""
+            print(f"  🌐 {s.id:<28} v{s.version:<8} by {s.author or '?'}")
+            print(f"       {s.description[:70]}{tags}")
+        print(f"  {'─' * 64}")
+        print("  Run /marketplace install <skill-id> to install any of the above.")
+
+    def _marketplace_install(self, skill_id: str):
+        """Install a skill from the community index."""
+        if not skill_id:
+            print("  Usage: /marketplace install <skill-id>")
+            return
+
+        print(f"  📥 Fetching community index …")
+        try:
+            from hermes_cli.marketplace import fetch_index, search_index, install_from_entry
+            index = fetch_index()
+            matches = search_index(index, skill_id)
+            # Exact id match first
+            exact = [s for s in matches if s.id == skill_id]
+            entry = exact[0] if exact else (matches[0] if matches else None)
+        except Exception as exc:
+            print(f"  Error: {exc}")
+            return
+
+        if entry is None:
+            print(f"  No community skill found with id '{skill_id}'.")
+            print("  Use /marketplace search <query> to browse available skills.")
+            return
+
+        if entry.id != skill_id:
+            print(f"  No exact match for '{skill_id}'. Did you mean '{entry.id}'?")
+            print(f"  Run /marketplace install {entry.id} to install it.")
+            return
+
+        print(f"  Installing '{entry.id}' v{entry.version} by {entry.author or '?'} …")
+        result = install_from_entry(entry)
+        if result.success:
+            print(f"  ✅ Installed to {result.path}")
+        else:
+            if "Already installed" in result.error:
+                print(f"  ⚠️  {result.error}")
+                print(f"  Run /marketplace install {skill_id} --force (not yet supported via CLI;")
+                print("  delete the skill directory manually and re-install).")
+            else:
+                print(f"  ❌ Install failed: {result.error}")
+
+    def _marketplace_info(self, skill_id: str):
+        """Show provenance info for an installed skill."""
+        if not skill_id:
+            print("  Usage: /marketplace info <skill-id>")
+            return
+        try:
+            from agent.components_registry import get_provenance
+            rec = get_provenance(skill_id)
+        except Exception as exc:
+            print(f"  Error: {exc}")
+            return
+
+        if rec is None:
+            print(f"  No provenance record for '{skill_id}'.")
+            print("  Run /marketplace sync to register skills from disk.")
+            return
+
+        source_icon = {"community": "🌐", "local": "🏠", "git": "🔗", "url": "🔗"}.get(
+            rec.get("source", "local"), "•"
+        )
+        print(f"\n  {source_icon} {skill_id}")
+        print(f"  {'─' * 50}")
+        for key in ("version", "source", "origin", "author", "description",
+                    "installed_at", "path", "checksum"):
+            val = rec.get(key, "")
+            if val:
+                print(f"  {key:<16} {val}")
+        print(f"  {'─' * 50}")
+
+    def _marketplace_sync(self):
+        """Scan skills directories and register any untracked skills."""
+        try:
+            from agent.components_registry import try_auto_register
+            from agent.skill_utils import get_all_skills_dirs
+        except Exception as exc:
+            print(f"  Sync error: {exc}")
+            return
+
+        registered = 0
+        skipped = 0
+        for skills_dir in get_all_skills_dirs():
+            if not skills_dir.is_dir():
+                continue
+            for skill_dir in skills_dir.iterdir():
+                if not skill_dir.is_dir():
+                    continue
+                if (skill_dir / "SKILL.md").exists():
+                    ok = try_auto_register(skill_dir.name,
+                                           skills_base_dir=str(skills_dir))
+                    if ok:
+                        registered += 1
+                    else:
+                        skipped += 1
+
+        print(f"  ✅ Sync complete — {registered} skill(s) registered, {skipped} skipped.")
+        if registered:
+            print("  Run /marketplace list to see the full inventory.")
 
     def _show_insights(self, command: str = "/insights"):
         """Show usage insights and analytics from session history."""

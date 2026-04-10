@@ -168,6 +168,10 @@ COMMAND_REGISTRY: list[CommandDef] = [
                cli_only=True),
     CommandDef("update", "Update Hermes Agent to the latest version", "Info",
                gateway_only=True),
+    CommandDef("marketplace", "Browse, search, and install community skills", "Skills",
+               cli_only=True, aliases=("market",),
+               args_hint="[search <query> | install <id> | list | info <id> | sync]",
+               subcommands=("search", "install", "list", "info", "sync")),
 
     # Exit
     CommandDef("quit", "Exit the CLI", "Exit",
