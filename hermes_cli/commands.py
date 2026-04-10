@@ -106,6 +106,26 @@ COMMAND_REGISTRY: list[CommandDef] = [
     CommandDef("voice", "Toggle voice mode", "Configuration",
                args_hint="[on|off|tts|status]", subcommands=("on", "off", "tts", "status")),
 
+    # Built-in specialized agent types (ported from CC's builtInAgents.ts)
+    CommandDef("agents", "List built-in agent types (explore, plan, verify, general, researcher)",
+               "Tools & Skills"),
+    CommandDef("explore", "Spawn a read-only Explore agent on a codebase or directory",
+               "Tools & Skills", args_hint="<query>"),
+    CommandDef("plan", "Spawn a Plan agent to design an implementation",
+               "Tools & Skills", args_hint="<task>"),
+    CommandDef("verify", "Spawn a Verify agent to adversarially review the last task",
+               "Tools & Skills", args_hint="[task description]"),
+    CommandDef("research", "Spawn a Researcher agent for deep web research",
+               "Tools & Skills", args_hint="<query>"),
+    CommandDef("graph", "Run full task graph: decompose → parallel → synthesize → verify → heal",
+               "Tools & Skills", args_hint="<goal>"),
+    CommandDef("selfheal", "Manually trigger verify+repair cycle on last completed task",
+               "Tools & Skills"),
+    CommandDef("memdir", "Show session knowledge base (what agents have discovered)",
+               "Tools & Skills"),
+    CommandDef("learn", "Trigger learning loop: extract skills from this session",
+               "Tools & Skills"),
+
     # Tools & Skills
     CommandDef("tools", "Manage tools: /tools [list|disable|enable] [name...]", "Tools & Skills",
                args_hint="[list|disable|enable] [name...]", cli_only=True),

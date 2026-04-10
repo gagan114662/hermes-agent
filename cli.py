@@ -4564,6 +4564,22 @@ class HermesCLI:
             self._handle_personality_command(cmd_original)
         elif canonical == "plan":
             self._handle_plan_command(cmd_original)
+        elif canonical == "agents":
+            self._handle_agents_command(cmd_original)
+        elif canonical == "explore":
+            self._handle_builtin_agent_command(cmd_original, agent_type="explore")
+        elif canonical == "verify":
+            self._handle_builtin_agent_command(cmd_original, agent_type="verify")
+        elif canonical == "research":
+            self._handle_builtin_agent_command(cmd_original, agent_type="researcher")
+        elif canonical == "graph":
+            self._handle_graph_command(cmd_original)
+        elif canonical == "selfheal":
+            self._handle_heal_command(cmd_original)
+        elif canonical == "memdir":
+            self._handle_memdir_command(cmd_original)
+        elif canonical == "learn":
+            self._handle_learn_command(cmd_original)
         elif canonical == "retry":
             retry_msg = self.retry_last()
             if retry_msg and hasattr(self, '_pending_input'):
@@ -4781,6 +4797,123 @@ class HermesCLI:
         else:
             ChatConsole().print("[bold red]Plan mode unavailable: input queue not initialized[/]")
     
+    def _handle_agents_command(self, cmd: str):
+        """Handle /agents — list all built-in agent types."""
+        try:
+            from agent.builtin_agents import format_agents_list
+            _cprint(format_agents_list())
+        except Exception as exc:
+            _cprint(f"  [agents] Error: {exc}")
+
+    def _handle_graph_command(self, cmd: str):
+        """Handle /graph <goal> — run full task graph pipeline."""
+        parts = cmd.strip().split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip():
+            _cprint("  Usage: /graph <goal>")
+            _cprint("  Runs: decompose → explore → parallelize → synthesize → verify → heal")
+            _cprint("  Example: /graph refactor the auth system to use JWT")
+            return
+        goal = parts[1].strip()
+        msg = (
+            f"Use task_graph to accomplish this goal with the full pipeline "
+            f"(decompose, parallel agents, synthesize, verify, self-heal):\n\n{goal}\n\n"
+            f"Call: from agent.task_graph import run_task_graph, format_graph_result; "
+            f"result = run_task_graph(goal=\"{goal}\", parent_agent=self, "
+            f"explore_first=True, auto_verify=True, auto_heal=True); "
+            f"print(format_graph_result(result))"
+        )
+        _cprint(f"  🕸️  Task graph queued for: \"{goal[:60]}{'...' if len(goal) > 60 else ''}\"")
+        if hasattr(self, '_pending_input'):
+            self._pending_input.put(msg)
+
+    def _handle_heal_command(self, cmd: str):
+        """Handle /selfheal — manually trigger verify+repair on last task."""
+        msg = (
+            "Trigger the self-heal loop on the last completed task in this session. "
+            "Spawn a verify agent to check the work, then spawn a repair agent if issues are found. "
+            "Report the VERDICT and what was fixed."
+        )
+        _cprint("  🔧 Self-heal cycle queued...")
+        if hasattr(self, '_pending_input'):
+            self._pending_input.put(msg)
+
+    def _handle_memdir_command(self, cmd: str):
+        """Handle /memdir — show session knowledge base."""
+        try:
+            from agent.memdir import get_session_memdir
+            session_id = getattr(self, 'session_id', None) or "default"
+            memdir = get_session_memdir(session_id)
+            entries = memdir.all_entries()
+            if not entries:
+                _cprint("  📚 Session knowledge base is empty (agents haven't written any discoveries yet)")
+            else:
+                _cprint(f"  📚 Session knowledge base — {len(entries)} entries:")
+                for e in sorted(entries, key=lambda x: -x.confidence):
+                    _cprint(f"    [{e.source}] {e.key}: {e.value[:80]}{'...' if len(e.value) > 80 else ''}")
+        except Exception as exc:
+            _cprint(f"  [memdir] Error: {exc}")
+
+    def _handle_learn_command(self, cmd: str):
+        """Handle /learn — manually trigger learning loop."""
+        _cprint("  🎓 Learning loop triggered — extracting skills from this session...")
+        msg = (
+            "Review everything that happened in this conversation and extract reusable skills. "
+            "For each non-trivial workflow or pattern discovered, save it as a skill using skill_manage. "
+            "Also save any failure patterns to memory. "
+            "Report: how many skills created/updated, what they are."
+        )
+        if hasattr(self, '_pending_input'):
+            self._pending_input.put(msg)
+
+    def _handle_builtin_agent_command(self, cmd: str, agent_type: str):
+        """
+        Handle /explore, /verify, /research — spawn a built-in typed agent.
+
+        Translates the slash command into a delegate_task() call with the
+        appropriate agent_type so the model spawns a typed specialist.
+
+        /explore <query>  → explore agent (read-only)
+        /verify [task]    → verify agent (adversarial review of last task)
+        /research <query> → researcher agent (web research + citations)
+        """
+        parts = cmd.strip().split(maxsplit=1)
+        user_arg = parts[1].strip() if len(parts) > 1 else ""
+
+        agent_labels = {
+            "explore": ("🔍 Explore", "exploring"),
+            "verify": ("✅ Verify", "verifying"),
+            "researcher": ("🔬 Research", "researching"),
+        }
+        label, verb = agent_labels.get(agent_type, ("🤖 Agent", "running"))
+
+        if not user_arg and agent_type != "verify":
+            _cprint(f"  Usage: /{agent_type.replace('researcher', 'research')} <{verb} what?>")
+            return
+
+        if agent_type == "verify" and not user_arg:
+            # Default verify: review the last thing the agent did
+            goal = (
+                "Adversarially verify the last task completed in this session. "
+                "Read all files that were created or modified and check for correctness, "
+                "edge cases, error handling, and security issues. "
+                "End your response with VERDICT: PASS, FAIL, or PARTIAL."
+            )
+        else:
+            goal = user_arg
+
+        # Inject the delegate_task call as a user message so the agent executes it
+        task_msg = (
+            f"Use delegate_task to {verb} the following using the {agent_type} agent:\n\n"
+            f"{goal}\n\n"
+            f"Call: delegate_task(goal=\"{goal}\", agent_type=\"{agent_type}\")"
+        )
+
+        _cprint(f"  {label} agent queued for: \"{goal[:60]}{'...' if len(goal) > 60 else ''}\"")
+        if hasattr(self, '_pending_input'):
+            self._pending_input.put(task_msg)
+        else:
+            _cprint(f"  [bold red]{label} agent unavailable: input queue not initialized[/]")
+
     def _handle_background_command(self, cmd: str):
         """Handle /background <prompt> — run a prompt in a separate background session.
 

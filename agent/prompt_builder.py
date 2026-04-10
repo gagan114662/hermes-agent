@@ -400,6 +400,37 @@ CONTEXT_FILE_MAX_CHARS = 20_000
 CONTEXT_TRUNCATE_HEAD_RATIO = 0.7
 CONTEXT_TRUNCATE_TAIL_RATIO = 0.2
 
+# ---------------------------------------------------------------------------
+# Static / dynamic prompt boundary — ported from CC's prompts.ts
+#
+# The system prompt is split into two parts:
+#   STATIC PREFIX  — identity, tools, skills, context files, platform hints.
+#                    Stable across turns → cached by Anthropic prefix cache.
+#   DYNAMIC SUFFIX — memory, timestamp, token budget, MCP state, ephemeral.
+#                    Changes each turn → NOT cached (or cached separately).
+#
+# prompt_caching.py respects this marker: when present, only the text BEFORE
+# the boundary gets a cache_control block, so cache is not invalidated when
+# memory or timestamps change mid-session.
+#
+# Usage: build_static_prefix() + DYNAMIC_BOUNDARY + build_dynamic_suffix()
+# ---------------------------------------------------------------------------
+DYNAMIC_BOUNDARY = "\n\n<!-- HERMES_DYNAMIC_START -->\n\n"
+
+
+def split_static_dynamic(system_prompt: str) -> tuple[str, str]:
+    """Split a system prompt string into (static_prefix, dynamic_suffix).
+
+    Returns (full_prompt, "") when no DYNAMIC_BOUNDARY is found — this means
+    the whole prompt is treated as static (safe fallback for subagents).
+    """
+    if DYNAMIC_BOUNDARY in system_prompt:
+        idx = system_prompt.index(DYNAMIC_BOUNDARY)
+        static = system_prompt[:idx]
+        dynamic = system_prompt[idx + len(DYNAMIC_BOUNDARY):]
+        return static, dynamic
+    return system_prompt, ""
+
 
 # =========================================================================
 # Skills prompt cache
