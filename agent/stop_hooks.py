@@ -63,6 +63,21 @@ def run_stop_hooks(
     except Exception:
         pass
 
+    # Hook 7: Finish Sentry session transaction (no-op if Sentry not configured)
+    try:
+        from agent.sentry_tracing import finish_session
+        session_id = getattr(agent, "session_id", "unknown") or "unknown"
+        tool_call_count = getattr(agent, "_tool_call_count", 0) or 0
+        # Approximate token count from messages
+        token_count = sum(
+            len(str(m.get("content", ""))) // 4
+            for m in (messages or [])
+            if isinstance(m, dict)
+        )
+        finish_session(session_id, token_count=token_count, tool_call_count=tool_call_count)
+    except Exception:
+        pass
+
 
 def _maybe_detect_deal_transition(messages: list, final_response: str, agent: "AIAgent") -> None:
     """Detect if a deal stage changed and emit hook."""
