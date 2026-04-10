@@ -648,8 +648,8 @@ tasks:
 5. File paths in `files` must be real, relative paths (e.g. `tools/my_tool.py`).
 6. tech_stack must be concrete: `[python, sqlite]` not `[backend]`.
 7. Do NOT include commentary outside the spec format. Output the spec and nothing else.""",
-    allowed_tools=["read_file", "web_search"],
-    blocked_tools=["terminal", "bash", "shell", "write_file"],
+    allowed_tools=["read_file", "write_file", "web_search"],
+    blocked_tools=["terminal", "bash", "shell"],
     max_turns=8,
 )
 
