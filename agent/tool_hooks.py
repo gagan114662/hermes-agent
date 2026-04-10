@@ -232,8 +232,12 @@ def _skill_tool_restriction_pre_hook(ctx: ToolHookContext) -> ToolHookResult:
     if agent is None:
         return ToolHookResult()
 
-    allowed = getattr(agent, "_active_skill_allowed_tools", None) or []
-    blocked = getattr(agent, "_active_skill_blocked_tools", None) or []
+    allowed = getattr(agent, "_active_skill_allowed_tools", None)
+    if not isinstance(allowed, (list, tuple, set)):
+        allowed = []
+    blocked = getattr(agent, "_active_skill_blocked_tools", None)
+    if not isinstance(blocked, (list, tuple, set)):
+        blocked = []
 
     if blocked and ctx.tool_name in blocked:
         return ToolHookResult(

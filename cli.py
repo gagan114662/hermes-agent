@@ -4574,7 +4574,7 @@ class HermesCLI:
             self._handle_builtin_agent_command(cmd_original, agent_type="researcher")
         elif canonical == "graph":
             self._handle_graph_command(cmd_original)
-        elif canonical == "heal":
+        elif canonical == "selfheal":
             self._handle_heal_command(cmd_original)
         elif canonical == "memdir":
             self._handle_memdir_command(cmd_original)
@@ -4827,7 +4827,7 @@ class HermesCLI:
             self._pending_input.put(msg)
 
     def _handle_heal_command(self, cmd: str):
-        """Handle /heal — manually trigger verify+repair on last task."""
+        """Handle /selfheal — manually trigger verify+repair on last task."""
         msg = (
             "Trigger the self-heal loop on the last completed task in this session. "
             "Spawn a verify agent to check the work, then spawn a repair agent if issues are found. "
