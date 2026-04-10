@@ -2645,7 +2645,10 @@ class HermesCLI:
     def _resolve_turn_agent_config(self, user_message: str) -> dict:
         """Resolve model/runtime overrides for a single user turn."""
         from agent.smart_model_routing import resolve_turn_route
-        from hermes_cli.models import resolve_fast_mode_overrides
+        try:
+            from hermes_cli.models import resolve_fast_mode_overrides
+        except ImportError:
+            resolve_fast_mode_overrides = lambda model: None  # noqa: E731
 
         route = resolve_turn_route(
             user_message,
@@ -6397,7 +6400,7 @@ Execute all pending tasks from the HermesSpec '{spec.name}'.
             return
 
         # ── Rate limits (shown first when available) ────────────────
-        rl_state = agent.get_rate_limit_state()
+        rl_state = getattr(agent, "get_rate_limit_state", lambda: None)()
         if rl_state and rl_state.has_data:
             from agent.rate_limit_tracker import format_rate_limit_display
             print()
