@@ -21,6 +21,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import signal
 import sys
 import time
@@ -51,6 +52,12 @@ def generate_session_id() -> str:
     now = datetime.now()
     short_uuid = uuid.uuid4().hex[:8]
     return f"{now.strftime('%Y%m%d_%H%M%S')}_{short_uuid}"
+
+
+def slugify_slug(text: str) -> str:
+    """Convert free text into a brain_pages slug fragment (lowercase, hyphens)."""
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:60]
+
 
 
 def build_session_key(
@@ -99,14 +106,19 @@ class HermesWorker:
         self.running = True
         self._messages_processed = 0
         self._errors = 0
+        self.brain = None   # initialised after db pool is ready
 
     async def start(self):
         """Connect to Postgres and Redis, then run message + autonomous loops."""
+        from scale.memory import BrainMemory
+
+
         database_url = os.getenv("DATABASE_URL", "postgresql://hermes:hermes@localhost:5432/hermes")
         redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
 
         self.db = await asyncpg.create_pool(database_url, min_size=2, max_size=5)
         self.redis = aioredis.from_url(redis_url, decode_responses=True)
+        self.brain = BrainMemory(db_pool=self.db)
 
         logger.info("Worker %d started — Postgres ✓  Redis ✓", self.worker_id)
 
@@ -220,15 +232,13 @@ class HermesWorker:
 
             # 5. Build system prompt from tenant config + memory
             if system_prompt is None:
-                memories = await self.db.fetch(
-                    """SELECT memory_type, content FROM tenant_memory
-                       WHERE tenant_id = $1
-                       ORDER BY updated_at DESC
-                       LIMIT 20""",
-                    uuid.UUID(tenant_id),
+                brain_results = await self.brain.search(
+                    uuid.UUID(tenant_id), user_message, limit=8
                 )
                 memory_text = "\n\n".join(
-                    f"## {m['memory_type']}\n{m['content']}" for m in memories
+                    f"## {r['slug']}\n{r['compiled_truth']}"
+                    for r in brain_results
+                    if r.get("compiled_truth")
                 )
                 template = tenant["system_prompt_template"]
                 if template:
@@ -578,21 +588,23 @@ async def _run_autonomous_decision(self, tenant, config: dict):
     tenant_id = tenant["id"]
     manager_chat_id = config["manager_chat_id"]
 
-    # Load memory (paginated — LIMIT 40 to prevent context blowup)
-    memories = await self.db.fetch(
-        """SELECT memory_type, content FROM tenant_memory
-           WHERE tenant_id = $1
-           ORDER BY updated_at DESC
-           LIMIT 40""",
-        tenant_id,
-    )
+    # Hybrid-search memory: retrieve most relevant pages for current context
+    # Use recent action summaries as the query context so results are task-relevant
     recent_actions = await self.db.fetch(
         "SELECT summary, created_at FROM worker_actions WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 15",
         tenant_id,
     )
-
-    memory_text = "\n\n".join(f"[{m['memory_type']}]\n{m['content']}" for m in memories) or "No memory yet."
     recent_text = "\n".join(f"- {r['summary']}" for r in recent_actions) or "No recent actions."
+    task_context = (
+        config.get("standing_instructions", "") + " " + recent_text
+    ).strip()[:500]
+
+    brain_results = await self.brain.search(tenant_id, task_context, limit=12)
+    memory_text = "\n\n".join(
+        f"[{r['slug']}]\n{r['compiled_truth']}"
+        for r in brain_results
+        if r.get("compiled_truth")
+    ) or "No memory yet."
 
     or_key = os.getenv("OPENROUTER_API_KEY", "")
     model = tenant["model"] or "openrouter/google/gemini-2.5-flash-preview"
@@ -808,6 +820,18 @@ async def _run_autonomous_decision(self, tenant, config: dict):
             tenant_id, f"learning_{ts}",
             f"[{task_type}] Score: {quality_score}/100. Next time: {beat_this}",
         )
+
+    # Step 9: Upsert into brain_pages for future hybrid search retrieval
+    if output and task_type != "other":
+        try:
+            slug = f"{task_type}/{slugify_slug(task[:60])}"
+            fact = f"Score {quality_score}/100. " if quality_score is not None else ""
+            fact += output[:300].replace("\n", " ").strip()
+            asyncio.create_task(
+                self.brain.upsert(tenant_id, slug, fact, page_type="memory")
+            )
+        except Exception as e:
+            logger.debug("Brain upsert task creation failed: %s", e)
 
     logger.info(
         "Autonomous task complete [%s] type=%s score=%s",
