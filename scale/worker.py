@@ -26,6 +26,7 @@ import sys
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import asyncpg
@@ -598,6 +599,63 @@ async def _run_autonomous_decision(self, tenant, config: dict):
     model = tenant["model"] or "openrouter/google/gemini-2.5-flash-preview"
     or_model = model[len("openrouter/"):] if model.startswith("openrouter/") else model
 
+    # ── Improvement 1: Load permanent lessons (never expire, injected as hard rules) ──
+    lesson_rows = await self.db.fetch(
+        """SELECT memory_type, content FROM tenant_memory
+           WHERE tenant_id = $1 AND memory_type LIKE 'lesson_%'
+           ORDER BY updated_at DESC""",
+        tenant_id,
+    )
+    lessons_block = ""
+    if lesson_rows:
+        lessons_block = "\n\n## HARD RULES — never violate these (learned from past failures)\n"
+        for row in lesson_rows:
+            try:
+                lesson = json.loads(row["content"])
+                lessons_block += f"- [{lesson.get('task_type','any')}] {lesson.get('rule', row['content'])}\n"
+            except (json.JSONDecodeError, ValueError):
+                lessons_block += f"- {row['content']}\n"
+
+    # ── Improvement 2: Load performance brief (avg/best/last per task type) ──
+    perf_rows = await self.db.fetch(
+        """SELECT task_type,
+                  ROUND(AVG(quality_score)) as avg_score,
+                  MAX(quality_score) as best_score,
+                  COUNT(*) as attempts,
+                  (SELECT quality_score FROM worker_actions
+                   WHERE tenant_id = $1 AND task_type = wa.task_type
+                   ORDER BY created_at DESC LIMIT 1) as last_score
+           FROM worker_actions wa
+           WHERE tenant_id = $1 AND quality_score IS NOT NULL
+           GROUP BY task_type""",
+        tenant_id, tenant_id,
+    )
+    perf_block = ""
+    if perf_rows:
+        perf_block = "\n\n## PERFORMANCE BRIEF\nYour performance so far:\n"
+        for row in perf_rows:
+            avg = int(row["avg_score"] or 0)
+            best = row["best_score"] or 0
+            last = row["last_score"] or 0
+            attempts = row["attempts"]
+            trend = "↑ improving" if last >= avg else "↓ slipping"
+            perf_block += (
+                f"- {row['task_type']}: avg {avg}, best {best}, "
+                f"last {last} ({trend}), {attempts} attempts\n"
+            )
+
+    # ── Improvement 3: Read worker_brief.md if it exists ──
+    brief_block = ""
+    worker_home = Path.home() / ".hermes" / "workers" / str(tenant_id)
+    brief_path = worker_home / "worker_brief.md"
+    if brief_path.exists():
+        try:
+            brief_content = brief_path.read_text(encoding="utf-8").strip()
+            if brief_content:
+                brief_block = f"\n\n## YOUR OPERATING MANUAL — read before every decision\n{brief_content}"
+        except Exception:
+            pass
+
     # Load recent scores per task type so the decision LLM knows what to beat
     score_rows = await self.db.fetch(
         """SELECT task_type, quality_score FROM worker_actions
@@ -633,7 +691,7 @@ async def _run_autonomous_decision(self, tenant, config: dict):
             worker_name=config.get("worker_name", "Worker"),
             worker_role=config.get("worker_role", "AI Assistant"),
             business_name=tenant["name"],
-            memory=memory_text + scores_text,
+            memory=brief_block + lessons_block + perf_block + memory_text + scores_text,
             recent_actions=recent_text,
             current_datetime=datetime.now().strftime("%A %B %d %Y, %I:%M %p"),
             standing_instructions=config.get("standing_instructions", "Do your best work."),
@@ -796,6 +854,28 @@ async def _run_autonomous_decision(self, tenant, config: dict):
                    DO UPDATE SET content = EXCLUDED.content, updated_at = NOW()""",
                 tenant_id, f"hill_climb_{task_type}_{ts}", hill_note,
             )
+
+    # Step 7b: Write permanent lesson if score < 60 (low-quality lint)
+    if quality_score is not None and quality_score < 60 and grade.get("biggest_gap"):
+        biggest_gap = grade["biggest_gap"]
+        # Convert gap description into an imperative rule
+        rule = biggest_gap if biggest_gap.endswith(".") else biggest_gap + "."
+        if not rule[0].isupper():
+            rule = rule[0].upper() + rule[1:]
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        lesson = json.dumps({
+            "rule": rule,
+            "task_type": task_type,
+            "score_when_added": quality_score,
+        })
+        await self.db.execute(
+            """INSERT INTO tenant_memory (tenant_id, memory_type, content)
+               VALUES ($1, $2, $3)
+               ON CONFLICT (tenant_id, memory_type)
+               DO UPDATE SET content = EXCLUDED.content, updated_at = NOW()""",
+            tenant_id, f"lesson_{task_type}_{ts}", lesson,
+        )
+        logger.info("Lesson written for tenant %s [%s score=%d]: %s", str(tenant_id)[:8], task_type, quality_score, rule[:80])
 
     # Step 8: Save beat_this as a standing learning for next time
     if beat_this:

@@ -85,6 +85,42 @@ The system_prompt must end with this exact block verbatim:
 Never say "I don't have access" or "I can't do that." Find another way.
 """
 
+GENERATE_BRIEF_PROMPT = """You are writing an operating manual for an AI worker.
+
+Worker name: {worker_name}
+Worker role: {worker_role}
+Business name: {business_name}
+Business description:
+{business_info}
+
+First week priorities:
+{priorities}
+
+Write a worker_brief.md file in this exact format (no extra commentary):
+
+# {worker_name} — Worker Brief
+
+## Core Beliefs
+{bullet_placeholder}
+(3-5 bullet points distilled from the business description about what good work looks like for this specific business and role. Make them specific and opinionated, not generic.)
+
+## Quality Rubric
+- lead_research: quantity + LinkedIn URL present + email verified + pain point identified
+- outreach: personalized opener + specific value prop + clear single CTA + no generic phrases
+- content: matches brand voice + actionable + specific to audience + shareable hook
+- research: primary sources cited + counterarguments acknowledged + actionable summary
+- ops: task completed fully + no assumptions + edge cases handled
+
+## Recurring Mistakes (updated by worker)
+(none yet — will be populated as you work)
+
+## This Week's Focus
+{focus_placeholder}
+(The first week priorities as bullet points, specific and actionable)
+
+Replace the placeholder sections with real content. Output only the markdown, no explanation.
+"""
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -222,6 +258,45 @@ When you start a task, check if you have relevant drafts or research already sav
             VALUES ($1, 'gaps_identified', $2)
             ON CONFLICT (tenant_id, memory_type) DO UPDATE SET content = EXCLUDED.content
         """, tenant_id, "\n".join(f"- {g}" for g in gaps))
+
+    # ── Step 5b: Generate worker_brief.md ─────────────────────────────────
+    try:
+        brief_agent = AIAgent(
+            model="google/gemini-2.5-flash-preview",
+            api_key=openrouter_key,
+            base_url="https://openrouter.ai/api/v1",
+            provider="openrouter",
+            max_iterations=2,
+            quiet_mode=True,
+            skip_memory=True,
+            skip_context_files=True,
+            enabled_toolsets=[],
+        )
+        priorities_text = "\n".join(f"- {p}" for p in priorities) if priorities else "- Do excellent work from day one"
+        brief_result = brief_agent.run_conversation(
+            user_message=GENERATE_BRIEF_PROMPT.format(
+                worker_name=worker_name,
+                worker_role=worker_role,
+                business_name=business_name,
+                business_info=business_info,
+                priorities=priorities_text,
+                bullet_placeholder="",
+                focus_placeholder="",
+            )
+        )
+        brief_text = brief_result.get("final_response", "").strip()
+        if brief_text:
+            # Strip markdown fences if model wrapped it
+            if brief_text.startswith("```"):
+                import re as _re
+                brief_text = _re.sub(r"^```[a-z]*\n?", "", brief_text)
+                brief_text = _re.sub(r"\n?```$", "", brief_text.rstrip())
+            brief_path = worker_home / "worker_brief.md"
+            brief_path.write_text(brief_text, encoding="utf-8")
+    except Exception as e:
+        # Non-fatal — worker still functions without the brief
+        import logging as _logging
+        _logging.getLogger("hermes.onboard").warning("worker_brief.md generation failed: %s", e)
 
     # ── Step 6: Add Telegram platform ─────────────────────────────────────
     await db.execute("""
