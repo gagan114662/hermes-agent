@@ -583,6 +583,12 @@ def write_file_tool(path: str, content: str, task_id: str = "default") -> str:
         # Refresh the stored timestamp so consecutive writes by this
         # task don't trigger false staleness warnings.
         _update_read_timestamp(path, task_id)
+        # Record lineage (fire-and-forget; never raises)
+        try:
+            from agent.lineage import record_write as _record_write
+            _record_write(path, task_id=task_id)
+        except Exception:
+            pass
         return json.dumps(result_dict, ensure_ascii=False)
     except Exception as e:
         if _is_expected_write_exception(e):
