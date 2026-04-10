@@ -5048,6 +5048,10 @@ class HermesCLI:
             self._handle_skin_command(cmd_original)
         elif canonical == "voice":
             self._handle_voice_command(cmd_original)
+        elif canonical == "lineage":
+            self._show_lineage(cmd_original)
+        elif canonical == "costmap":
+            self._show_costmap()
         else:
             # Check for user-defined quick commands (bypass agent loop, no LLM call)
             base_cmd = cmd_lower.split()[0]
@@ -6592,6 +6596,90 @@ After saving all three files, confirm:
             logging.getLogger().setLevel(logging.INFO)
             for quiet_logger in ('tools', 'run_agent', 'trajectory_compressor', 'cron', 'hermes_cli'):
                 logging.getLogger(quiet_logger).setLevel(logging.ERROR)
+
+    # ------------------------------------------------------------------
+    # /lineage <file>  — show why a file was written
+    # ------------------------------------------------------------------
+
+    def _show_lineage(self, command: str = "/lineage"):
+        """Show the write lineage (goal chain) for a file."""
+        parts = command.strip().split(None, 1)
+        if len(parts) < 2 or not parts[1].strip():
+            print("  Usage: /lineage <file-path>")
+            print("  Shows which agent goals caused the file to be written.")
+            return
+
+        path_arg = parts[1].strip()
+        try:
+            from agent.lineage import get_lineage
+            records = get_lineage(path_arg, days=90)
+        except Exception as exc:
+            print(f"  Lineage error: {exc}")
+            return
+
+        if not records:
+            print(f"  No lineage records found for: {path_arg}")
+            print("  (Records are created when hermes writes files via write_file.)")
+            return
+
+        print(f"\n  📄 Lineage for: {path_arg}")
+        print(f"  {'─' * 50}")
+        for i, rec in enumerate(records):
+            ts = rec.get("ts", "")[:19].replace("T", " ")
+            goal = rec.get("goal") or "(no goal recorded)"
+            session = rec.get("session_id", "")[:12]
+            model = rec.get("model", "")
+            meta = "  ".join(x for x in [session, model] if x)
+            print(f"  [{i+1}] {ts}")
+            print(f"       Goal:    {goal[:120]}")
+            if meta:
+                print(f"       Context: {meta}")
+        print(f"  {'─' * 50}")
+        print(f"  {len(records)} write(s) recorded")
+
+    # ------------------------------------------------------------------
+    # /costmap  — per-task cost breakdown for this session
+    # ------------------------------------------------------------------
+
+    def _show_costmap(self):
+        """Show per-task token cost breakdown for delegate_task calls this session."""
+        try:
+            from agent.lineage import get_session_costs
+            costs = get_session_costs()
+        except Exception as exc:
+            print(f"  Costmap error: {exc}")
+            return
+
+        if not costs:
+            print("  No delegate_task cost data yet.")
+            print("  Costs appear here after /task or delegate_task calls complete.")
+            return
+
+        print(f"\n  💰 Task Cost Map — {len(costs)} delegated task(s) this session")
+        print(f"  {'─' * 68}")
+        total_usd = 0.0
+        total_in = 0
+        total_out = 0
+        for rec in costs:
+            ts = rec.get("ts", "")[:19].replace("T", " ")
+            label = (rec.get("label") or "?")[:38]
+            model = (rec.get("model") or "?")[:24]
+            in_tok = rec.get("input_tokens", 0)
+            out_tok = rec.get("output_tokens", 0)
+            dur = rec.get("duration_seconds", 0)
+            status = rec.get("status", "?")
+            icon = "✓" if status == "completed" else "✗"
+            cost_usd = rec.get("cost_usd")
+            cost_str = f"~${cost_usd:.4f}" if cost_usd is not None else "  n/a  "
+            total_in += in_tok
+            total_out += out_tok
+            if cost_usd is not None:
+                total_usd += cost_usd
+            print(f"  {icon} {label:<38}  {cost_str:>10}  ({in_tok:>7,}in / {out_tok:>7,}out)  {dur:.1f}s")
+
+        print(f"  {'─' * 68}")
+        total_str = f"~${total_usd:.4f}" if total_usd else "  n/a  "
+        print(f"  {'TOTAL':<38}  {total_str:>10}  ({total_in:>7,}in / {total_out:>7,}out)")
 
     def _show_insights(self, command: str = "/insights"):
         """Show usage insights and analytics from session history."""

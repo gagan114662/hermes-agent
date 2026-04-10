@@ -632,6 +632,17 @@ def delegate_task(
             )
             # Override with correct parent tool names (before child construction mutated global)
             child._delegate_saved_tool_names = _parent_tool_names
+            # Register goal context so write_file lineage can attribute file writes
+            try:
+                from agent.lineage import set_task_context as _set_task_ctx
+                _set_task_ctx(
+                    getattr(child, "session_id", f"child-{i}"),
+                    t["goal"],
+                    session_id=getattr(child, "session_id", ""),
+                    model=creds.get("model", ""),
+                )
+            except Exception:
+                pass
             children.append((i, t, child))
     finally:
         # Authoritative restore: reset global to parent's tool names after all children built
@@ -642,6 +653,21 @@ def delegate_task(
         _i, _t, child = children[0]
         result = _run_single_child(0, _t["goal"], child, parent_agent)
         results.append(result)
+        # Record cost for single-task delegations too
+        try:
+            from agent.lineage import record_task_cost as _rec_cost1
+            _stok = result.get("tokens", {})
+            _rec_cost1(
+                label=task_labels[0] if task_labels else _t["goal"][:40],
+                model=result.get("model") or creds.get("model", ""),
+                input_tokens=int(_stok.get("input", 0)),
+                output_tokens=int(_stok.get("output", 0)),
+                status=result.get("status", "completed"),
+                duration_seconds=float(result.get("duration_seconds", 0)),
+                session_id=getattr(parent_agent, "session_id", ""),
+            )
+        except Exception:
+            pass
     else:
         # Batch -- run in parallel with per-task progress lines
         completed_count = 0
@@ -682,7 +708,36 @@ def delegate_task(
                 status = entry.get("status", "?")
                 icon = "✓" if status == "completed" else "✗"
                 remaining = n_tasks - completed_count
-                completion_line = f"{icon} [{idx+1}/{n_tasks}] {label}  ({dur}s)"
+
+                # Record cost and build cost suffix
+                _tok = entry.get("tokens", {})
+                _in_tok = int(_tok.get("input", 0))
+                _out_tok = int(_tok.get("output", 0))
+                _entry_model = entry.get("model") or creds.get("model", "")
+                _cost_suffix = ""
+                try:
+                    from agent.lineage import record_task_cost as _rec_cost
+                    _rec_cost(
+                        label=label,
+                        model=_entry_model,
+                        input_tokens=_in_tok,
+                        output_tokens=_out_tok,
+                        status=status,
+                        duration_seconds=float(dur),
+                        session_id=getattr(parent_agent, "session_id", ""),
+                    )
+                    from agent.usage_pricing import CanonicalUsage, estimate_usage_cost as _esc
+                    _cr = _esc(_entry_model, CanonicalUsage(input_tokens=_in_tok, output_tokens=_out_tok))
+                    if _cr.amount_usd is not None:
+                        _cost_suffix = f"  ~${float(_cr.amount_usd):.4f}"
+                    elif _cr.status == "included":
+                        _cost_suffix = "  included"
+                    if _in_tok or _out_tok:
+                        _cost_suffix += f"  ({_in_tok:,}in / {_out_tok:,}out)"
+                except Exception:
+                    pass
+
+                completion_line = f"{icon} [{idx+1}/{n_tasks}] {label}  ({dur}s){_cost_suffix}"
                 if spinner_ref:
                     try:
                         spinner_ref.print_above(completion_line)
