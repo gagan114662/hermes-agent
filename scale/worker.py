@@ -21,6 +21,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import signal
 import sys
 import time
@@ -52,6 +53,12 @@ def generate_session_id() -> str:
     now = datetime.now()
     short_uuid = uuid.uuid4().hex[:8]
     return f"{now.strftime('%Y%m%d_%H%M%S')}_{short_uuid}"
+
+
+def slugify_slug(text: str) -> str:
+    """Convert free text into a brain_pages slug fragment (lowercase, hyphens)."""
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:60]
+
 
 
 def build_session_key(
@@ -100,14 +107,19 @@ class HermesWorker:
         self.running = True
         self._messages_processed = 0
         self._errors = 0
+        self.brain = None   # initialised after db pool is ready
 
     async def start(self):
         """Connect to Postgres and Redis, then run message + autonomous loops."""
+        from scale.memory import BrainMemory
+
+
         database_url = os.getenv("DATABASE_URL", "postgresql://hermes:hermes@localhost:5432/hermes")
         redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
 
         self.db = await asyncpg.create_pool(database_url, min_size=2, max_size=5)
         self.redis = aioredis.from_url(redis_url, decode_responses=True)
+        self.brain = BrainMemory(db_pool=self.db)
 
         logger.info("Worker %d started — Postgres ✓  Redis ✓", self.worker_id)
 
@@ -118,10 +130,12 @@ class HermesWorker:
 
         logger.info("Worker %d: _message_loop started", self.worker_id)
         logger.info("Worker %d: _autonomous_loop started", self.worker_id)
+        logger.info("Worker %d: _dream_loop started", self.worker_id)
         await asyncio.gather(
             self._main_loop(),
             self._autonomous_loop(),
             self._digest_loop(),
+            self._dream_loop(),
         )
 
     def _shutdown(self):
@@ -221,15 +235,13 @@ class HermesWorker:
 
             # 5. Build system prompt from tenant config + memory
             if system_prompt is None:
-                memories = await self.db.fetch(
-                    """SELECT memory_type, content FROM tenant_memory
-                       WHERE tenant_id = $1
-                       ORDER BY updated_at DESC
-                       LIMIT 20""",
-                    uuid.UUID(tenant_id),
+                brain_results = await self.brain.search(
+                    uuid.UUID(tenant_id), user_message, limit=8
                 )
                 memory_text = "\n\n".join(
-                    f"## {m['memory_type']}\n{m['content']}" for m in memories
+                    f"## {r['slug']}\n{r['compiled_truth']}"
+                    for r in brain_results
+                    if r.get("compiled_truth")
                 )
                 template = tenant["system_prompt_template"]
                 if template:
@@ -324,6 +336,14 @@ class HermesWorker:
                 "message_id": msg.get("message_id"),
                 "response": final_response,
             }))
+
+            # 11. Fire-and-forget: detect entities from conversation and ingest into brain
+            combined_text = f"{user_message}\n{final_response}"
+            asyncio.create_task(
+                self.brain.detect_and_ingest(
+                    uuid.UUID(tenant_id), combined_text, f"conversation:{session_key}"
+                )
+            )
 
             self._messages_processed += 1
             logger.info(
@@ -579,21 +599,23 @@ async def _run_autonomous_decision(self, tenant, config: dict):
     tenant_id = tenant["id"]
     manager_chat_id = config["manager_chat_id"]
 
-    # Load memory (paginated — LIMIT 40 to prevent context blowup)
-    memories = await self.db.fetch(
-        """SELECT memory_type, content FROM tenant_memory
-           WHERE tenant_id = $1
-           ORDER BY updated_at DESC
-           LIMIT 40""",
-        tenant_id,
-    )
+    # Hybrid-search memory: retrieve most relevant pages for current context
+    # Use recent action summaries as the query context so results are task-relevant
     recent_actions = await self.db.fetch(
         "SELECT summary, created_at FROM worker_actions WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 15",
         tenant_id,
     )
-
-    memory_text = "\n\n".join(f"[{m['memory_type']}]\n{m['content']}" for m in memories) or "No memory yet."
     recent_text = "\n".join(f"- {r['summary']}" for r in recent_actions) or "No recent actions."
+    task_context = (
+        config.get("standing_instructions", "") + " " + recent_text
+    ).strip()[:500]
+
+    brain_results = await self.brain.search(tenant_id, task_context, limit=12)
+    memory_text = "\n\n".join(
+        f"[{r['slug']}]\n{r['compiled_truth']}"
+        for r in brain_results
+        if r.get("compiled_truth")
+    ) or "No memory yet."
 
     or_key = os.getenv("OPENROUTER_API_KEY", "")
     model = tenant["model"] or "openrouter/google/gemini-2.5-flash-preview"
@@ -889,6 +911,18 @@ async def _run_autonomous_decision(self, tenant, config: dict):
             f"[{task_type}] Score: {quality_score}/100. Next time: {beat_this}",
         )
 
+    # Step 9: Upsert into brain_pages for future hybrid search retrieval
+    if output and task_type != "other":
+        try:
+            slug = f"{task_type}/{slugify_slug(task[:60])}"
+            fact = f"Score {quality_score}/100. " if quality_score is not None else ""
+            fact += output[:300].replace("\n", " ").strip()
+            asyncio.create_task(
+                self.brain.upsert(tenant_id, slug, fact, page_type="memory")
+            )
+        except Exception as e:
+            logger.debug("Brain upsert task creation failed: %s", e)
+
     logger.info(
         "Autonomous task complete [%s] type=%s score=%s",
         str(tenant_id)[:8], task_type,
@@ -942,10 +976,79 @@ async def _digest_loop(self):
             await asyncio.sleep(10)
 
 
+def _seconds_until_3am() -> float:
+    """Return seconds until next 3:00 UTC."""
+    now = datetime.now(timezone.utc)
+    next_3am = now.replace(hour=3, minute=0, second=0, microsecond=0)
+    if now.hour >= 3:
+        next_3am += timedelta(days=1)
+    return (next_3am - now).total_seconds()
+
+
+async def _dream_loop(self):
+    """Nightly memory consolidation at 3am UTC — resynthesize stale brain pages, extract patterns."""
+    while self.running:
+        try:
+            wait_secs = _seconds_until_3am()
+            logger.info("Dream loop: next cycle in %.0f minutes", wait_secs / 60)
+            await asyncio.sleep(wait_secs)
+
+            from run_agent import AIAgent
+            or_key = os.getenv("OPENROUTER_API_KEY", "")
+
+            def _agent_factory():
+                if not or_key:
+                    return None
+                try:
+                    return AIAgent(
+                        model="google/gemini-2.5-flash-preview",
+                        api_key=or_key,
+                        base_url="https://openrouter.ai/api/v1",
+                        provider="openrouter",
+                        max_iterations=1,
+                        quiet_mode=True,
+                        skip_memory=True,
+                        skip_context_files=True,
+                        enabled_toolsets=[],
+                    )
+                except Exception:
+                    return None
+
+            from scale.dream import run_dream_cycle
+
+            tenants = await self.db.fetch(
+                "SELECT id FROM tenants WHERE active = true"
+            )
+            for tenant in tenants:
+                try:
+                    result = await run_dream_cycle(
+                        tenant["id"], self.db, self.brain, _agent_factory
+                    )
+                    logger.info(
+                        "Dream complete [%s]: pages_updated=%d patterns=%d actions=%d",
+                        str(tenant["id"])[:8],
+                        result["pages_updated"],
+                        result["patterns_found"],
+                        result["actions_processed"],
+                    )
+                except Exception as e:
+                    logger.warning("Dream failed for tenant %s: %s", str(tenant["id"])[:8], e)
+
+            # Sleep 23h before checking again (avoids re-firing in the same 3am window)
+            await asyncio.sleep(82800)
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error("Dream loop error: %s", e, exc_info=True)
+            await asyncio.sleep(3600)  # retry in 1 hour on unexpected error
+
+
 # Inject autonomous methods onto the actual HermesWorker class
 HermesWorker._autonomous_loop = _autonomous_loop
 HermesWorker._run_autonomous_decision = _run_autonomous_decision
 HermesWorker._digest_loop = _digest_loop
+HermesWorker._dream_loop = _dream_loop
 
 
 # ---------------------------------------------------------------------------
