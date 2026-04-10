@@ -4994,6 +4994,8 @@ class HermesCLI:
             self._show_usage()
         elif canonical == "insights":
             self._show_insights(cmd_original)
+        elif canonical == "onboard":
+            self._show_onboard(cmd_original)
         elif canonical == "paste":
             self._handle_paste_command()
         elif canonical == "image":
@@ -6596,6 +6598,81 @@ After saving all three files, confirm:
             logging.getLogger().setLevel(logging.INFO)
             for quiet_logger in ('tools', 'run_agent', 'trajectory_compressor', 'cron', 'hermes_cli'):
                 logging.getLogger(quiet_logger).setLevel(logging.ERROR)
+
+    # ------------------------------------------------------------------
+    # /onboard — 3-3-3 journey stage + guidance
+    # ------------------------------------------------------------------
+
+    def _show_onboard(self, command: str = "/onboard"):
+        """Show the user's current journey stage and next recommended action."""
+        parts = command.strip().split(None, 1)
+        sub = parts[1].strip().lower() if len(parts) > 1 else "status"
+
+        try:
+            from agent.onboarding import (
+                get_journey_stage,
+                get_onboarding_state,
+                reset_onboarding,
+            )
+        except Exception as exc:
+            print(f"  Onboarding error: {exc}")
+            return
+
+        if sub == "reset":
+            print("  This will reset your onboarding counter to 0.")
+            print("  Type 'yes' to confirm, anything else to cancel.")
+            try:
+                answer = input("  > ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                answer = ""
+            if answer == "yes":
+                reset_onboarding()
+                print("  Counter reset. You're back at session 0 / day-1 stage.")
+            else:
+                print("  Cancelled.")
+            return
+
+        if sub == "debug":
+            state = get_onboarding_state()
+            print("\n  🔍 Onboarding state (raw)")
+            print(f"  {'─' * 40}")
+            for k, v in state.items():
+                print(f"  {k:<24} {v}")
+            print(f"  {'─' * 40}")
+            return
+
+        # Default: status
+        stage = get_journey_stage()
+        stage_icons = {1: "🌱", 2: "🔧", 3: "🚀"}
+        icon = stage_icons.get(stage.stage, "•")
+
+        print(f"\n  {icon} Hermes Journey — {stage.label} stage")
+        print(f"  {'─' * 50}")
+        print(f"  Sessions so far:  {stage.session_count}")
+        print(f"  Stage:            {stage.stage}/3  ({stage.headline})")
+        print(f"  Next command:     {stage.next_command}")
+        print()
+        print(f"  {stage.tip}")
+        print()
+
+        # Stage-specific secondary suggestions
+        if stage.stage == 1:
+            print("  Other commands worth knowing at this stage:")
+            print("    /specnew <description>   — generate a spec + context library")
+            print("    /help                    — list all available commands")
+        elif stage.stage == 2:
+            print("  Other commands worth knowing at this stage:")
+            print("    /skillnew <description>  — create a reusable skill")
+            print("    /skilltest <skill-name>  — run the 5-test protocol")
+            print("    /specnew                 — update or add a new spec")
+        else:
+            print("  Other commands worth knowing at this stage:")
+            print("    /costmap                 — per-task token cost breakdown")
+            print("    /lineage <file>          — trace which goal wrote a file")
+            print("    /skillnew                — keep automating new workflows")
+
+        print(f"  {'─' * 50}")
+        print(f"  Run /onboard reset to restart the counter from scratch.")
 
     # ------------------------------------------------------------------
     # /lineage <file>  — show why a file was written
@@ -8379,6 +8456,20 @@ After saving all three files, confirm:
         # Give plugin manager a CLI reference so plugins can inject messages
         from hermes_cli.plugins import get_plugin_manager
         get_plugin_manager()._cli_ref = self
+
+        # 3-3-3 onboarding: bump session counter and surface a tip on early sessions
+        try:
+            from agent.onboarding import record_session as _record_session
+            _ob_stage = _record_session()
+            if _ob_stage.session_count <= 3:
+                _tip_line = (
+                    f"[dim]💡 Session {_ob_stage.session_count} · {_ob_stage.label} stage "
+                    f"— try [bold]{_ob_stage.next_command}[/bold] to get the most out of Hermes"
+                    f"  (/onboard for details)[/dim]"
+                )
+                self.console.print(_tip_line)
+        except Exception:
+            pass
 
         # Config file watcher — detect mcp_servers changes and auto-reload
         from hermes_cli.config import get_config_path as _get_config_path

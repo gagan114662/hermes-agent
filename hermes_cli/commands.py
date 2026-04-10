@@ -168,6 +168,8 @@ COMMAND_REGISTRY: list[CommandDef] = [
                cli_only=True),
     CommandDef("update", "Update Hermes Agent to the latest version", "Info",
                gateway_only=True),
+    CommandDef("onboard", "Show your journey stage and next recommended action", "Info",
+               cli_only=True, args_hint="[status|reset|debug]"),
 
     # Exit
     CommandDef("quit", "Exit the CLI", "Exit",
