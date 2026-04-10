@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS brain_pages (
     page_type      TEXT NOT NULL DEFAULT 'memory', -- memory | lesson | brief | skill
     compiled_truth TEXT,                         -- current best understanding, rewritten on synthesis
     timeline       TEXT,                         -- append-only evidence trail, never edited
-    embedding      vector(1536),                -- OpenAI text-embedding-3-small
+    embedding      vector(384),                 -- sentence-transformers all-MiniLM-L6-v2 (local, free)
     search_vector  tsvector GENERATED ALWAYS AS (
         to_tsvector('english',
             coalesce(compiled_truth, '') || ' ' || coalesce(timeline, ''))

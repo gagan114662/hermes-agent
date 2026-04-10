@@ -19,12 +19,25 @@ from typing import Optional
 
 logger = logging.getLogger("hermes.memory")
 
-_OPENAI_AVAILABLE = False
-try:
-    import openai as _openai
-    _OPENAI_AVAILABLE = True
-except ImportError:
-    pass
+# Local embedding model — no API key, no cost, runs on CPU
+# Loaded once and cached at module level so workers share the instance
+_EMBED_MODEL = None
+_EMBED_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"  # 384-dim, ~90MB
+_EMBED_DIM = 384
+
+def _get_embed_model():
+    global _EMBED_MODEL
+    if _EMBED_MODEL is None:
+        try:
+            from sentence_transformers import SentenceTransformer
+            _EMBED_MODEL = SentenceTransformer(_EMBED_MODEL_NAME)
+            logger.info("Loaded local embedding model: %s", _EMBED_MODEL_NAME)
+        except ImportError:
+            logger.warning(
+                "sentence-transformers not installed — vector search disabled. "
+                "Run: pip install sentence-transformers"
+            )
+    return _EMBED_MODEL
 
 
 class BrainMemory:
@@ -37,9 +50,8 @@ class BrainMemory:
         await brain.upsert(tenant_id, "lead_research/b2b_saas", "Found 3 new leads at ...", "memory")
     """
 
-    def __init__(self, db_pool, openai_api_key: Optional[str] = None):
+    def __init__(self, db_pool):
         self.db = db_pool
-        self._api_key = openai_api_key or os.getenv("OPENAI_API_KEY", "")
         self._pgvector_ok: Optional[bool] = None   # None = untested yet
         self._warned = False
 
@@ -97,7 +109,7 @@ class BrainMemory:
 
             # 4. Re-embed
             embed_input = (compiled_truth or "") + " " + timeline[:500]
-            embedding = await self.embed_text(embed_input)
+            embedding = self.embed_text(embed_input)
 
             # 5. Upsert
             if embedding is not None:
@@ -128,20 +140,17 @@ class BrainMemory:
         except Exception as e:
             logger.warning("BrainMemory.upsert error [%s]: %s", slug, e)
 
-    async def embed_text(self, text: str) -> Optional[list]:
+    def embed_text(self, text: str) -> Optional[list]:
         """
-        Embed text via OpenAI text-embedding-3-small.
-        Returns None if OPENAI_API_KEY not set or call fails.
+        Embed text using local sentence-transformers model (no API key needed).
+        Returns None if sentence-transformers is not installed.
         """
-        if not self._api_key or not _OPENAI_AVAILABLE:
+        model = _get_embed_model()
+        if model is None:
             return None
         try:
-            client = _openai.AsyncOpenAI(api_key=self._api_key)
-            resp = await client.embeddings.create(
-                model="text-embedding-3-small",
-                input=text[:8000],  # model limit
-            )
-            return resp.data[0].embedding
+            vec = model.encode(text[:2048], normalize_embeddings=True)
+            return vec.tolist()
         except Exception as e:
             logger.debug("embed_text failed: %s", e)
             return None
@@ -185,7 +194,7 @@ class BrainMemory:
 
     async def _vector_search(self, tenant_id, query: str, k: int = 20) -> list:
         """Approximate nearest-neighbour search via pgvector cosine distance."""
-        embedding = await self.embed_text(query)
+        embedding = self.embed_text(query)
         if embedding is None:
             return []
         vec_literal = "[" + ",".join(str(x) for x in embedding) + "]"
