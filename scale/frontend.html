@@ -93,10 +93,13 @@
       const deploy = async () => {
         setLoading(true);
         setError("");
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 60000);
         try {
           const res = await fetch("http://localhost:8443/onboard", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
+            signal: controller.signal,
             body: JSON.stringify({
               business_name: form.name,
               business_info: form.about,
@@ -104,12 +107,17 @@
               manager_chat_id: form.chatId,
             }),
           });
+          clearTimeout(timer);
           const data = await res.json();
           if (!res.ok) throw new Error(data.detail || "Deployment failed");
           if (data.ok) { setWorker(data); setDone(true); }
           else throw new Error(data.detail || "Deployment failed");
         } catch (e) {
-          setError(e.message || "Something went wrong. Check your token and try again.");
+          clearTimeout(timer);
+          const msg = e.name === "AbortError"
+            ? "Deployment timed out after 60s — OpenRouter may be slow. Try again."
+            : (e.message || "Something went wrong. Check your token and try again.");
+          setError(msg);
         } finally {
           setLoading(false);
         }
