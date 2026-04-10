@@ -72,6 +72,17 @@ def display_hermes_home() -> str:
         return str(home)
 
 
+def is_termux() -> bool:
+    """Return True if running inside a Termux environment on Android.
+
+    Termux sets TERMUX_VERSION and uses a PREFIX path under com.termux.
+    """
+    return (
+        bool(os.environ.get("TERMUX_VERSION"))
+        or "com.termux" in os.environ.get("PREFIX", "")
+    )
+
+
 VALID_REASONING_EFFORTS = ("xhigh", "high", "medium", "low", "minimal")
 
 
