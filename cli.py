@@ -5957,20 +5957,10 @@ Execute all pending tasks from the HermesSpec '{spec.name}'.
         if not candidates:
             return False
 
-        # Dedicated profile dir so debug Chrome won't collide with normal Chrome
-        data_dir = str(_hermes_home / "chrome-debug")
-        os.makedirs(data_dir, exist_ok=True)
-
         chrome = candidates[0]
         try:
             _sp.Popen(
-                [
-                    chrome,
-                    f"--remote-debugging-port={port}",
-                    f"--user-data-dir={data_dir}",
-                    "--no-first-run",
-                    "--no-default-browser-check",
-                ],
+                [chrome, f"--remote-debugging-port={port}"],
                 stdout=_sp.DEVNULL,
                 stderr=_sp.DEVNULL,
                 start_new_session=True,  # detach from terminal
@@ -6886,7 +6876,8 @@ Execute all pending tasks from the HermesSpec '{spec.name}'.
 
             if result.get("success") and result.get("transcript", "").strip():
                 transcript = result["transcript"].strip()
-                self._attached_images.clear()
+                if hasattr(self, '_attached_images'):
+                    self._attached_images.clear()
                 if hasattr(self, '_app') and self._app:
                     self._app.invalidate()
                 self._pending_input.put(transcript)
