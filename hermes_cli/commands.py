@@ -125,6 +125,12 @@ COMMAND_REGISTRY: list[CommandDef] = [
                "Tools & Skills"),
     CommandDef("learn", "Trigger learning loop: extract skills from this session",
                "Tools & Skills"),
+    CommandDef("skillnew", "Create a new production-quality skill (guided by skill-writer agent)",
+               "Tools & Skills", args_hint="<name> [-- task description]"),
+    CommandDef("skillcheck", "Validate a skill against quality criteria (5-component check)",
+               "Tools & Skills", args_hint="[skill-name]"),
+    CommandDef("skilltest", "Run 5-test protocol on a skill (happy path, edge cases, negative)",
+               "Tools & Skills", args_hint="<skill-name>"),
 
     # Tools & Skills
     CommandDef("tools", "Manage tools: /tools [list|disable|enable] [name...]", "Tools & Skills",
