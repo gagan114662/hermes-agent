@@ -170,6 +170,10 @@ COMMAND_REGISTRY: list[CommandDef] = [
                gateway_only=True),
     CommandDef("onboard", "Show your journey stage and next recommended action", "Info",
                cli_only=True, args_hint="[status|reset|debug]"),
+    CommandDef("marketplace", "Browse, search, and install community skills", "Tools & Skills",
+               cli_only=True, aliases=("market",),
+               args_hint="[search <query> | install <id> | list | info <id> | sync]",
+               subcommands=("search", "install", "list", "info", "sync")),
 
     # Exit
     CommandDef("quit", "Exit the CLI", "Exit",
