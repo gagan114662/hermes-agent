@@ -4957,35 +4957,119 @@ class HermesCLI:
             _cprint(f"  [skillcheck] Error: {exc}")
 
     def _handle_skilltest_command(self, cmd: str):
-        """Handle /skilltest <skill-name> — run 5-test protocol via verify agent."""
+        """Handle /skilltest <skill-name> — spec-anchored 4-phase TDD protocol.
+
+        Phase 1 — Spec-test writer: reads ONLY the skill contract (trigger conditions +
+                   output format, no workflow/examples). Writes discriminating tests that
+                   would FAIL on a naive implementation.
+        Phase 2 — Adversarial agent: same contract view, different context window.
+                   Designs attacks: false positives, false negatives, spec violations,
+                   edge cases, inconsistency.
+        Phase 3 — RED check: verifies tests would actually fail before any implementation.
+                   Flags cowardly tests (ones that pass a do-nothing implementation).
+        Phase 4 — Final report: consolidates findings with VERDICT: PASS/PARTIAL/FAIL.
+        """
         parts = cmd.strip().split(maxsplit=1)
         skill_name = parts[1].strip() if len(parts) > 1 else ""
 
         if not skill_name:
             _cprint("  Usage: /skilltest <skill-name>")
-            _cprint("  Runs: happy path, minimal input, edge case, negative test, repeat consistency")
+            _cprint("  Runs 4-phase spec-anchored TDD: spec-tests → adversarial attacks → RED check → verdict")
             return
 
-        _cprint(f"  🧪 Running 5-test protocol for skill '{skill_name}'...")
+        # Try to load the skill spec right now so we can embed it in the goal.
+        # This gives the subagents the exact contract view without them needing to find the file.
+        skill_spec_block = ""
+        skill_path_hint = ""
+        try:
+            from agent.skill_quality import find_skill_path, extract_skill_spec
+            skill_path = find_skill_path(skill_name)
+            if skill_path:
+                skill_path_hint = str(skill_path)
+                raw = skill_path.read_text(encoding="utf-8")
+                spec = extract_skill_spec(raw)
+                skill_spec_block = (
+                    f"\n\n## Skill Contract (spec-only view — workflow & examples excluded)\n\n"
+                    f"```\n{spec}\n```\n"
+                )
+                _cprint(f"  🧪 Spec-anchored /skilltest for '{skill_name}' (found at {skill_path_hint})")
+            else:
+                _cprint(f"  🧪 Spec-anchored /skilltest for '{skill_name}' (skill file not found — agents will search)")
+        except Exception:
+            _cprint(f"  🧪 Spec-anchored /skilltest for '{skill_name}'")
 
-        goal = (
-            f"Run the 5-test protocol for the '{skill_name}' skill:\n\n"
-            f"1. Happy path: invoke the skill with clean, complete, ideal input. Does output match spec?\n"
-            f"2. Minimal input: invoke with absolute minimum info. Does it ask for what's missing?\n"
-            f"3. Edge case: invoke with unusual input (missing fields, contradictions, long/short). Handles gracefully?\n"
-            f"4. Negative test: try to trigger the skill with a request that should NOT activate it. Does it stay silent?\n"
-            f"5. Repeat test: run the same input 2 more times. Is output consistent?\n\n"
-            f"For each test: state PASS or FAIL and explain why.\n"
-            f"End with VERDICT: PASS (all 5 pass), PARTIAL (3-4 pass), or FAIL (2 or fewer pass) "
-            f"and a list of issues to fix."
+        path_note = (
+            f"The skill SKILL.md is at: `{skill_path_hint}`\n"
+            if skill_path_hint
+            else f"Search ~/.hermes/skills/{skill_name}/SKILL.md and the default skills directory.\n"
         )
+
+        goal = f"""\
+Run the spec-anchored 4-phase TDD protocol for the '{skill_name}' skill.
+{path_note}{skill_spec_block}
+
+---
+
+## Phase 1 — Spec-anchored test generation
+
+delegate_task with agent_type="spec-test-writer".
+
+Goal for that agent:
+  You have been given the contract (spec-only view) for the '{skill_name}' skill above.
+  You have NOT seen the workflow steps or examples — this is intentional.
+  Write 6-8 test cases from the spec contract ONLY.
+  Mark each COWARDLY (would pass any implementation) or DISCRIMINATING (would catch a broken one).
+  Output the summary block:
+    TESTS_WRITTEN: N
+    COWARDLY_COUNT: M
+    DISCRIMINATING_COUNT: K
+    MOST_DISCRIMINATING: [test name]
+
+## Phase 2 — Adversarial attack design
+
+delegate_task with agent_type="adversarial-skill".
+
+Goal for that agent:
+  Using the same contract above (no workflow, no examples), design 5 adversarial inputs
+  that are most likely to break a naive implementation of the '{skill_name}' skill.
+  Cover: false positive, false negative, spec violation, edge case, inconsistency.
+  Output the summary block:
+    ATTACKS_DESIGNED: N
+    MOST_DANGEROUS: [attack name]
+    ATTACK_TYPES: [comma-separated list]
+
+## Phase 3 — RED check (cowardly test audit)
+
+Review the tests from Phase 1.
+For each test marked COWARDLY: explain SPECIFICALLY what change to the test would make it
+discriminating (i.e., would cause a do-nothing implementation to fail it).
+Count: how many of the {skill_name} tests are genuinely discriminating vs cowardly?
+A test is ONLY discriminating if a skill that returns an empty string would FAIL it.
+
+## Phase 4 — Final verdict
+
+Consolidate Phases 1-3 and produce:
+
+VERDICT: PASS      — ≥ 5 discriminating tests, ≥ 3 adversarial attacks covered, 0 spec violations found
+VERDICT: PARTIAL   — some discriminating tests but gaps: list what's missing
+VERDICT: FAIL      — fewer than 3 discriminating tests OR spec contract is too vague to test against
+
+Then list:
+- The top 3 most discriminating test inputs
+- The single most dangerous adversarial attack
+- Any spec ambiguities that made testing hard (these are bugs in the skill's SKILL.md)
+"""
+
         msg = (
-            f"Use delegate_task to test a skill using the verify agent:\n\n"
-            f"{goal}\n\n"
-            f'Call: delegate_task(goal="""{goal}""", agent_type="verify")'
+            f"Run the spec-anchored /skilltest protocol for '{skill_name}'.\n\n"
+            f"Execute each phase in order using delegate_task with the appropriate agent_type.\n\n"
+            f"{goal}"
         )
+
         if hasattr(self, '_pending_input'):
             self._pending_input.put(msg)
+        else:
+            _cprint("  [bold red]skilltest unavailable: input queue not initialized[/]")
 
     def _handle_builtin_agent_command(self, cmd: str, agent_type: str):
         """

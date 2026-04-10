@@ -500,3 +500,87 @@ def _name_from_path(path: Optional[str]) -> Optional[str]:
     if p.name == "SKILL.md":
         return p.parent.name
     return p.stem
+
+
+# ---------------------------------------------------------------------------
+# Spec extraction — contract-only view for spec-anchored testing
+# ---------------------------------------------------------------------------
+
+# Sections that describe the CONTRACT (what the skill does and produces)
+_SPEC_SECTIONS = [
+    re.compile(r"^##\s+overview\b.*?(?=\n##\s|\Z)", re.MULTILINE | re.IGNORECASE | re.DOTALL),
+    re.compile(r"^##\s+output[\s_-]*format\b.*?(?=\n##\s|\Z)", re.MULTILINE | re.IGNORECASE | re.DOTALL),
+    re.compile(r"^##\s+(?:trigger|when[\s_-]*to[\s_-]*use)\b.*?(?=\n##\s|\Z)", re.MULTILINE | re.IGNORECASE | re.DOTALL),
+]
+
+# Sections deliberately EXCLUDED from spec view (implementation detail)
+_IMPL_SECTION_PATTERN = re.compile(
+    r"^##\s+(?:workflow|steps?|examples?|how[\s_-]*to)\b",
+    re.MULTILINE | re.IGNORECASE,
+)
+
+
+def extract_skill_spec(content: str) -> str:
+    """Extract the contract-only view of a SKILL.md for spec-anchored testing.
+
+    Returns only: frontmatter (trigger phrases + description) + Overview +
+    Output Format + any Trigger/When-to-use section.
+
+    Deliberately EXCLUDES: Workflow steps, Examples, implementation hints.
+    This is the spec the test writer and adversarial agent see — they must write
+    tests anchored to the contract, not the implementation.
+
+    Args:
+        content: Full SKILL.md content.
+
+    Returns:
+        Spec-only string suitable for passing to spec-test-writer / adversarial-skill agents.
+    """
+    parts: list[str] = []
+
+    # 1. Always include YAML frontmatter (trigger phrases live here)
+    fm_match = re.match(r"^(---\n.*?\n---)\n", content, re.DOTALL)
+    if fm_match:
+        parts.append(fm_match.group(1))
+
+    # 2. Include contract sections (overview, output format, trigger)
+    for pattern in _SPEC_SECTIONS:
+        m = pattern.search(content)
+        if m:
+            parts.append(m.group(0).strip())
+
+    if not parts:
+        # Fallback: first 600 chars (frontmatter at minimum)
+        return content[:600].strip()
+
+    spec = "\n\n".join(parts)
+
+    # Sanity note so the agent knows what was omitted
+    spec += (
+        "\n\n"
+        "> **Note:** Workflow steps and Examples have been intentionally excluded.\n"
+        "> Write your tests against the declared contract above, not against any implementation.\n"
+    )
+    return spec
+
+
+def find_skill_path(skill_name: str) -> Optional[Path]:
+    """Find the SKILL.md path for a skill by name.
+
+    Searches all skills directories (bundled + user ~/.hermes/skills/).
+    Returns the first match, or None if not found.
+    """
+    from hermes_constants import get_hermes_home
+    from agent.skill_utils import get_all_skills_dirs
+
+    hermes_home = get_hermes_home()
+    for skills_dir in get_all_skills_dirs(hermes_home):
+        candidate = skills_dir / skill_name / "SKILL.md"
+        if candidate.exists():
+            return candidate
+        # Also check flat layout (skills_dir/skill_name.md unlikely but handle anyway)
+        flat = skills_dir / f"{skill_name}.md"
+        if flat.exists():
+            return flat
+
+    return None

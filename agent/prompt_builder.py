@@ -1056,7 +1056,11 @@ def _load_cursorrules(cwd_path: Path) -> str:
     return _truncate_content(cursorrules_content, ".cursorrules")
 
 
-def build_context_files_prompt(cwd: Optional[str] = None, skip_soul: bool = False) -> str:
+def build_context_files_prompt(
+    cwd: Optional[str] = None,
+    skip_soul: bool = False,
+    agent_type: Optional[str] = None,
+) -> str:
     """Discover and load context files for the system prompt.
 
     Priority (first found wins — only ONE project context type is loaded):
@@ -1066,6 +1070,8 @@ def build_context_files_prompt(cwd: Optional[str] = None, skip_soul: bool = Fals
       4. .cursorrules / .cursor/rules/*.mdc  (cwd only)
 
     SOUL.md from HERMES_HOME is independent and always included when present.
+    Context Library (~/.hermes/context/*.md) is always appended — agent-type
+    filtering applies when *agent_type* is provided.
     Each context source is capped at 20,000 chars.
 
     When *skip_soul* is True, SOUL.md is not included here (it was already
@@ -1092,6 +1098,15 @@ def build_context_files_prompt(cwd: Optional[str] = None, skip_soul: bool = Fals
         soul_content = load_soul_md()
         if soul_content:
             sections.append(soul_content)
+
+    # Context Library — ~/.hermes/context/*.md (always included, agent-filtered)
+    try:
+        from agent.context_library import load_context_library
+        ctx_lib = load_context_library(agent_type=agent_type)
+        if ctx_lib:
+            sections.append(ctx_lib)
+    except Exception as e:
+        logger.debug("Could not load context library: %s", e)
 
     if not sections:
         return ""
