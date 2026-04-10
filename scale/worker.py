@@ -129,10 +129,12 @@ class HermesWorker:
 
         logger.info("Worker %d: _message_loop started", self.worker_id)
         logger.info("Worker %d: _autonomous_loop started", self.worker_id)
+        logger.info("Worker %d: _dream_loop started", self.worker_id)
         await asyncio.gather(
             self._main_loop(),
             self._autonomous_loop(),
             self._digest_loop(),
+            self._dream_loop(),
         )
 
     def _shutdown(self):
@@ -333,6 +335,14 @@ class HermesWorker:
                 "message_id": msg.get("message_id"),
                 "response": final_response,
             }))
+
+            # 11. Fire-and-forget: detect entities from conversation and ingest into brain
+            combined_text = f"{user_message}\n{final_response}"
+            asyncio.create_task(
+                self.brain.detect_and_ingest(
+                    uuid.UUID(tenant_id), combined_text, f"conversation:{session_key}"
+                )
+            )
 
             self._messages_processed += 1
             logger.info(
@@ -886,10 +896,79 @@ async def _digest_loop(self):
             await asyncio.sleep(10)
 
 
+def _seconds_until_3am() -> float:
+    """Return seconds until next 3:00 UTC."""
+    now = datetime.now(timezone.utc)
+    next_3am = now.replace(hour=3, minute=0, second=0, microsecond=0)
+    if now.hour >= 3:
+        next_3am += timedelta(days=1)
+    return (next_3am - now).total_seconds()
+
+
+async def _dream_loop(self):
+    """Nightly memory consolidation at 3am UTC — resynthesize stale brain pages, extract patterns."""
+    while self.running:
+        try:
+            wait_secs = _seconds_until_3am()
+            logger.info("Dream loop: next cycle in %.0f minutes", wait_secs / 60)
+            await asyncio.sleep(wait_secs)
+
+            from run_agent import AIAgent
+            or_key = os.getenv("OPENROUTER_API_KEY", "")
+
+            def _agent_factory():
+                if not or_key:
+                    return None
+                try:
+                    return AIAgent(
+                        model="google/gemini-2.5-flash-preview",
+                        api_key=or_key,
+                        base_url="https://openrouter.ai/api/v1",
+                        provider="openrouter",
+                        max_iterations=1,
+                        quiet_mode=True,
+                        skip_memory=True,
+                        skip_context_files=True,
+                        enabled_toolsets=[],
+                    )
+                except Exception:
+                    return None
+
+            from scale.dream import run_dream_cycle
+
+            tenants = await self.db.fetch(
+                "SELECT id FROM tenants WHERE active = true"
+            )
+            for tenant in tenants:
+                try:
+                    result = await run_dream_cycle(
+                        tenant["id"], self.db, self.brain, _agent_factory
+                    )
+                    logger.info(
+                        "Dream complete [%s]: pages_updated=%d patterns=%d actions=%d",
+                        str(tenant["id"])[:8],
+                        result["pages_updated"],
+                        result["patterns_found"],
+                        result["actions_processed"],
+                    )
+                except Exception as e:
+                    logger.warning("Dream failed for tenant %s: %s", str(tenant["id"])[:8], e)
+
+            # Sleep 23h before checking again (avoids re-firing in the same 3am window)
+            await asyncio.sleep(82800)
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error("Dream loop error: %s", e, exc_info=True)
+            await asyncio.sleep(3600)  # retry in 1 hour on unexpected error
+
+
 # Inject autonomous methods onto the actual HermesWorker class
 HermesWorker._autonomous_loop = _autonomous_loop
 HermesWorker._run_autonomous_decision = _run_autonomous_decision
 HermesWorker._digest_loop = _digest_loop
+HermesWorker._dream_loop = _dream_loop
 
 
 # ---------------------------------------------------------------------------
