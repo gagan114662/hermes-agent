@@ -418,10 +418,11 @@ def mark_task_complete(spec_path: Path, task_id: str) -> bool:
     """Update a task's status to 'complete' in the spec file. Returns True on success."""
     try:
         content = spec_path.read_text(encoding="utf-8")
-        # Find the task block and update its status field
-        # Match the task id line and the status line that follows within the block
+        # Find the task block and update its status field.
+        # \b prevents t1 from matching t10/t11 etc.
+        # (?:(?!- id:).)* prevents the match from crossing into the next task block.
         pattern = re.compile(
-            r"(- id:\s*" + re.escape(task_id) + r".*?status:\s*)pending",
+            r"(- id:\s*" + re.escape(task_id) + r"\b(?:(?!- id:).)*?status:\s*)pending",
             re.DOTALL,
         )
         new_content, count = pattern.subn(r"\1complete", content, count=1)
