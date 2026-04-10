@@ -2740,26 +2740,6 @@ class AIAgent:
         if system_message is not None:
             prompt_parts.append(system_message)
 
-        if self._memory_store:
-            if self._memory_enabled:
-                mem_block = self._memory_store.format_for_system_prompt("memory")
-                if mem_block:
-                    prompt_parts.append(mem_block)
-            # USER.md is always included when enabled.
-            if self._user_profile_enabled:
-                user_block = self._memory_store.format_for_system_prompt("user")
-                if user_block:
-                    prompt_parts.append(user_block)
-
-        # External memory provider system prompt block (additive to built-in)
-        if self._memory_manager:
-            try:
-                _ext_mem_block = self._memory_manager.build_system_prompt()
-                if _ext_mem_block:
-                    prompt_parts.append(_ext_mem_block)
-            except Exception:
-                pass
-
         has_skills_tools = any(name in self.valid_tool_names for name in ['skills_list', 'skill_view', 'skill_manage'])
         if has_skills_tools:
             avail_toolsets = {
@@ -2789,16 +2769,9 @@ class AIAgent:
             if context_files_prompt:
                 prompt_parts.append(context_files_prompt)
 
-        from hermes_time import now as _hermes_now
-        now = _hermes_now()
-        timestamp_line = f"Conversation started: {now.strftime('%A, %B %d, %Y %I:%M %p')}"
-        if self.pass_session_id and self.session_id:
-            timestamp_line += f"\nSession ID: {self.session_id}"
-        if self.model:
-            timestamp_line += f"\nModel: {self.model}"
-        if self.provider:
-            timestamp_line += f"\nProvider: {self.provider}"
-        prompt_parts.append(timestamp_line)
+        platform_key = (self.platform or "").lower().strip()
+        if platform_key in PLATFORM_HINTS:
+            prompt_parts.append(PLATFORM_HINTS[platform_key])
 
         # Alibaba Coding Plan API always returns "glm-4.7" as model name regardless
         # of the requested model. Inject explicit model identity into the system prompt
@@ -2812,11 +2785,57 @@ class AIAgent:
                 f"not on any model name returned by the API."
             )
 
-        platform_key = (self.platform or "").lower().strip()
-        if platform_key in PLATFORM_HINTS:
-            prompt_parts.append(PLATFORM_HINTS[platform_key])
+        # ── STATIC / DYNAMIC BOUNDARY (ported from CC's prompts.ts) ──────────
+        # Everything above is cache-stable (identity, tools, skills, context files,
+        # platform). Everything below changes turn-to-turn (memory, timestamp,
+        # token budget) and should NOT bust the static prefix cache.
+        # prompt_caching.py detects this marker and applies cache_control only to
+        # the static prefix — so memory updates don't invalidate cached tokens.
+        from agent.prompt_builder import DYNAMIC_BOUNDARY
+        static_prompt = "\n\n".join(prompt_parts)
 
-        return "\n\n".join(prompt_parts)
+        # ── Dynamic suffix: memory, timestamp, token budget ──────────────────
+        dynamic_parts = []
+
+        if self._memory_store:
+            if self._memory_enabled:
+                mem_block = self._memory_store.format_for_system_prompt("memory")
+                if mem_block:
+                    dynamic_parts.append(mem_block)
+            # USER.md is always included when enabled.
+            if self._user_profile_enabled:
+                user_block = self._memory_store.format_for_system_prompt("user")
+                if user_block:
+                    dynamic_parts.append(user_block)
+
+        # External memory provider system prompt block (additive to built-in)
+        if self._memory_manager:
+            try:
+                _ext_mem_block = self._memory_manager.build_system_prompt()
+                if _ext_mem_block:
+                    dynamic_parts.append(_ext_mem_block)
+            except Exception:
+                pass
+
+        from hermes_time import now as _hermes_now
+        now = _hermes_now()
+        timestamp_line = f"Conversation started: {now.strftime('%A, %B %d, %Y %I:%M %p')}"
+        if self.pass_session_id and self.session_id:
+            timestamp_line += f"\nSession ID: {self.session_id}"
+        if self.model:
+            timestamp_line += f"\nModel: {self.model}"
+        if self.provider:
+            timestamp_line += f"\nProvider: {self.provider}"
+        dynamic_parts.append(timestamp_line)
+
+        dynamic_prompt = "\n\n".join(dynamic_parts)
+
+        # Cache the last built static prefix so fork_agent.py can inherit it
+        self._last_built_static_prompt = static_prompt
+
+        if dynamic_prompt:
+            return static_prompt + DYNAMIC_BOUNDARY + dynamic_prompt
+        return static_prompt
 
     # =========================================================================
     # Pre/post-call guardrails (inspired by PR #1321 — @alireza78a)
@@ -7029,7 +7048,37 @@ class AIAgent:
         """Build the result dict returned by run_conversation.
 
         Returns a standardised dict that callers (CLI, gateway, cron) inspect.
+
+        Self-heal: if the session was complex (many tool calls) and self_heal_enabled,
+        spawn a verify+repair cycle before returning. Appends heal summary to
+        final_response so the user sees the verdict.
         """
+        tool_call_count = sum(1 for m in messages if isinstance(m, dict) and m.get("role") == "tool")
+
+        # ── Self-heal loop ───────────────────────────────────────────────────
+        heal_summary = ""
+        if completed and tool_call_count >= 5:
+            try:
+                from agent.self_heal import maybe_self_heal, format_heal_summary
+                # Extract task description from first user message
+                task_description = ""
+                for m in messages:
+                    if isinstance(m, dict) and m.get("role") == "user":
+                        content = m.get("content", "")
+                        if isinstance(content, str):
+                            task_description = content[:200]
+                            break
+                if task_description:
+                    heal_result = maybe_self_heal(
+                        self, messages, task_description, tool_call_count
+                    )
+                    heal_summary = format_heal_summary(heal_result)
+            except Exception:
+                pass
+
+        if heal_summary:
+            final_response = final_response + heal_summary
+
         return {
             "final_response": final_response,
             "messages": messages,
@@ -7367,6 +7416,17 @@ class AIAgent:
             api_call_count += 1
             self._api_call_count = api_call_count
             self._touch_activity(f"starting API call #{api_call_count}")
+
+            # ── Context economy: selective tool result clearing ───────────────
+            # Every 10 iterations, replace old large tool results with placeholders
+            # to reclaim context window without losing model reasoning.
+            # Ported from CC's function result clearing pattern.
+            try:
+                from agent.context_economy import apply_selective_result_clearing, should_apply_clearing
+                if should_apply_clearing(api_call_count):
+                    messages = apply_selective_result_clearing(messages, api_call_count)
+            except Exception:
+                pass
             if not self.iteration_budget.consume():
                 _turn_exit_reason = "budget_exhausted"
                 if not self.quiet_mode:

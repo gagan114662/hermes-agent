@@ -54,6 +54,15 @@ def run_stop_hooks(
     except Exception:
         pass
 
+    # Hook 6: Learning loop — extract reusable skills from this session
+    # Runs async in background so user gets their response immediately.
+    # Only fires for complex sessions (>= 4 tool calls).
+    try:
+        from agent.learning_loop import trigger_learning_loop
+        trigger_learning_loop(agent, messages, final_response, async_mode=True)
+    except Exception:
+        pass
+
 
 def _maybe_detect_deal_transition(messages: list, final_response: str, agent: "AIAgent") -> None:
     """Detect if a deal stage changed and emit hook."""

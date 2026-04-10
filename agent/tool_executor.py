@@ -72,10 +72,48 @@ class ToolExecutor:
         Handles both agent-level tools (todo, memory, etc.) and registry-dispatched
         tools. Used by the concurrent execution path; the sequential path retains
         its own inline invocation for backward-compatible display handling.
+
+        Pre/Post tool hooks are applied here — hooks can block, rewrite input,
+        inject ephemeral context, or stop the agent loop.
         """
+        # ── Pre-tool hooks ───────────────────────────────────────────────────
+        try:
+            from agent.tool_hooks import run_pre_hooks, run_post_hooks, run_failure_hooks, ToolHookContext
+            _hooks_available = True
+        except Exception:
+            _hooks_available = False
+
+        if _hooks_available:
+            _pre_ctx = ToolHookContext(
+                tool_name=function_name,
+                tool_input=function_args,
+                agent=self.agent,
+            )
+            _pre_result = run_pre_hooks(_pre_ctx)
+
+            # Blocking error — cancel tool call, return error string to model
+            if _pre_result.blocking_error:
+                return f"[Tool blocked by policy: {_pre_result.blocking_error}]"
+
+            # Rewritten args — use updated input going forward
+            if _pre_result.updated_input:
+                function_args = _pre_result.updated_input
+
+            # Ephemeral context injection
+            if _pre_result.additional_context:
+                try:
+                    existing = self.agent.ephemeral_system_prompt or ""
+                    self.agent.ephemeral_system_prompt = (
+                        (existing + "\n\n" + _pre_result.additional_context).strip()
+                    )
+                except Exception:
+                    pass
+        else:
+            _hooks_available = False
+
         if function_name == "todo":
             from tools.todo_tool import todo_tool as _todo_tool
-            return _todo_tool(
+            _tool_result = _todo_tool(
                 todos=function_args.get("todos"),
                 merge=function_args.get("merge", False),
                 store=self.agent._todo_store,
@@ -84,7 +122,7 @@ class ToolExecutor:
             if not self.agent._session_db:
                 return json.dumps({"success": False, "error": "Session database not available."})
             from tools.session_search_tool import session_search as _session_search
-            return _session_search(
+            _tool_result = _session_search(
                 query=function_args.get("query", ""),
                 role_filter=function_args.get("role_filter"),
                 limit=function_args.get("limit", 3),
@@ -94,7 +132,7 @@ class ToolExecutor:
         elif function_name == "memory":
             target = function_args.get("target", "memory")
             from tools.memory_tool import memory_tool as _memory_tool
-            result = _memory_tool(
+            _tool_result = _memory_tool(
                 action=function_args.get("action"),
                 target=target,
                 content=function_args.get("content"),
@@ -104,31 +142,70 @@ class ToolExecutor:
             # Also send user observations to Honcho when active
             if self.agent._honcho and target == "user" and function_args.get("action") == "add":
                 self.agent._honcho_save_user_observation(function_args.get("content", ""))
-            return result
         elif function_name == "clarify":
             from tools.clarify_tool import clarify_tool as _clarify_tool
-            return _clarify_tool(
+            _tool_result = _clarify_tool(
                 question=function_args.get("question", ""),
                 choices=function_args.get("choices"),
                 callback=self.agent.clarify_callback,
             )
         elif function_name == "delegate_task":
             from tools.delegate_tool import delegate_task as _delegate_task
-            return _delegate_task(
+            _tool_result = _delegate_task(
                 goal=function_args.get("goal"),
                 context=function_args.get("context"),
                 toolsets=function_args.get("toolsets"),
                 tasks=function_args.get("tasks"),
                 max_iterations=function_args.get("max_iterations"),
+                agent_type=function_args.get("agent_type"),
+                agent_name=function_args.get("agent_name"),
                 parent_agent=self.agent,
             )
         else:
-            return handle_function_call(
+            _tool_result = handle_function_call(
                 function_name, function_args, effective_task_id,
                 enabled_tools=list(self.agent.valid_tool_names) if self.agent.valid_tool_names else None,
                 honcho_manager=self.agent._honcho,
                 honcho_session_key=self.agent._honcho_session_key,
             )
+
+        # ── Post-tool hooks ──────────────────────────────────────────────────
+        if _hooks_available:
+            _post_ctx = ToolHookContext(
+                tool_name=function_name,
+                tool_input=function_args,
+                result=_tool_result,
+                agent=self.agent,
+            )
+            _post_result = run_post_hooks(_post_ctx)
+
+            if _post_result.additional_context:
+                try:
+                    existing = self.agent.ephemeral_system_prompt or ""
+                    self.agent.ephemeral_system_prompt = (
+                        (existing + "\n\n" + _post_result.additional_context).strip()
+                    )
+                except Exception:
+                    pass
+
+            if _post_result.message:
+                try:
+                    # Inject as a synthetic user message so the model sees it next turn
+                    if hasattr(self.agent, "_pending_hook_messages"):
+                        self.agent._pending_hook_messages.append(_post_result.message)
+                    else:
+                        self.agent._pending_hook_messages = [_post_result.message]
+                except Exception:
+                    pass
+
+            if _post_result.prevent_continuation:
+                try:
+                    self.agent._stop_reason = "hook_prevented_continuation"
+                    self.agent._interrupt_requested = True
+                except Exception:
+                    pass
+
+        return _tool_result
 
     def execute_concurrent(self, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
         """Execute multiple tool calls concurrently using a thread pool.

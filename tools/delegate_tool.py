@@ -201,6 +201,16 @@ def _build_child_agent(
     else:
         child_toolsets = _strip_blocked_tools(DEFAULT_TOOLSETS)
 
+    # ── Inject memdir session knowledge into child context ───────────────────
+    # Automatically pass session discoveries to children so they don't
+    # re-discover what sibling agents already found.
+    try:
+        from agent.memdir import inject_memdir_context
+        session_id = getattr(parent_agent, "session_id", None) or "default"
+        context = inject_memdir_context(session_id, context)
+    except Exception as _memdir_exc:
+        logger.debug("delegate_tool: memdir inject failed: %s", _memdir_exc)
+
     child_prompt = _build_child_system_prompt(goal, context)
     # Extract parent's API key so subagents inherit auth (e.g. Nous Portal).
     parent_api_key = getattr(parent_agent, "api_key", None)
@@ -454,6 +464,7 @@ def delegate_task(
     max_iterations: Optional[int] = None,
     parent_agent=None,
     agent_name: Optional[str] = None,
+    agent_type: Optional[str] = None,
 ) -> str:
     """
     Spawn one or more child agents to handle delegated tasks.
@@ -465,8 +476,49 @@ def delegate_task(
     When agent_name is provided, the specialist is registered in the session
     registry and reused on subsequent calls with accumulated conversation history.
 
+    When agent_type is one of the built-in agent types (explore, plan, verify,
+    general, researcher), the child gets a typed persona, tool restrictions,
+    and behavioral contract from builtin_agents.py.
+
     Returns JSON with results array, one entry per task.
     """
+    # ── Built-in agent type resolution ──────────────────────────────────────
+    _builtin_def = None
+    if agent_type:
+        try:
+            from agent.builtin_agents import get_agent_def
+            _builtin_def = get_agent_def(agent_type)
+            if _builtin_def is None:
+                logger.warning("delegate_task: unknown agent_type %r — using generic", agent_type)
+        except Exception as exc:
+            logger.debug("delegate_task: builtin_agents import failed: %s", exc)
+
+    # If a builtin def is found, prepend its system prompt as context injection
+    # and apply its tool restrictions via allowed/blocked lists.
+    if _builtin_def is not None and goal:
+        # Prepend the persona — child sees it as additional system context
+        persona_prefix = _builtin_def.system_prompt
+        if context:
+            context = f"{persona_prefix}\n\n---\n\n{context}"
+        else:
+            context = persona_prefix
+        # Apply tool restrictions: convert allowed_tools to toolset list if set
+        if _builtin_def.allowed_tools and toolsets is None:
+            toolsets = _builtin_def.allowed_tools
+        # Respect max_turns
+        if max_iterations is None and _builtin_def.max_turns:
+            max_iterations = _builtin_def.max_turns
+
+    # ── Named agent snapshot injection ──────────────────────────────────────
+    if agent_name:
+        try:
+            from agent.context_economy import get_agent_snapshot
+            snapshot = get_agent_snapshot(agent_name)
+            if snapshot:
+                snapshot_prefix = f"## Your memory from the previous session\n{snapshot}\n\n---\n\n"
+                context = snapshot_prefix + (context or "")
+        except Exception as exc:
+            logger.debug("delegate_task: snapshot injection failed: %s", exc)
     if parent_agent is None:
         return tool_error("delegate_task requires a parent agent context.")
 
@@ -673,6 +725,17 @@ def delegate_task(
             logger.debug("agent_registry: registered specialist %r", agent_name)
         except Exception as exc:
             logger.debug("agent_registry: registration failed: %s", exc)
+
+    # ── Save agent memory snapshot for named agents ──────────────────────────
+    # Lets the agent be resumed later without re-reading everything it explored.
+    if agent_name and n_tasks == 1 and results:
+        try:
+            from agent.context_economy import save_agent_snapshot
+            summary = results[0].get("summary", "")
+            if summary:
+                save_agent_snapshot(agent_name, summary)
+        except Exception as exc:
+            logger.debug("delegate_task: snapshot save failed: %s", exc)
 
     return json.dumps({
         "results": results,
