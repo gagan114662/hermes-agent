@@ -2534,6 +2534,8 @@ class HermesCLI:
             return "Generating HermesSpec..."
         if cmd_lower.startswith("/specexec"):
             return "Executing spec tasks..."
+        if cmd_lower.startswith("/revengineer"):
+            return "Scanning codebase..."
         if cmd_lower == "/reload-mcp":
             return "Reloading MCP servers..."
         if cmd_lower.startswith("/browser"):
@@ -4952,6 +4954,8 @@ class HermesCLI:
             self._handle_speclist_command(cmd_original)
         elif canonical == "specexec":
             self._handle_specexec_command(cmd_original)
+        elif canonical == "revengineer":
+            self._handle_revengineer_command(cmd_original)
         elif canonical == "retry":
             retry_msg = self.retry_last()
             if retry_msg and hasattr(self, '_pending_input'):
@@ -5683,6 +5687,132 @@ Execute all pending tasks from the HermesSpec '{spec.name}'.
             self._pending_input.put(msg)
         else:
             _cprint("  [bold red]specexec unavailable: input queue not initialized[/]")
+
+    # ------------------------------------------------------------------
+    # /revengineer — reverse-engineer any codebase into context + spec
+    # ------------------------------------------------------------------
+
+    def _handle_revengineer_command(self, cmd: str):
+        """Handle /revengineer <path|github-url> — scan a codebase and bootstrap Hermes context.
+
+        Scans the codebase at the given path (or clones a GitHub URL), then dispatches
+        the reverse-engineer agent which produces three outputs:
+          - ~/.hermes/context/<repo>.md   — auto-injected into every future agent
+          - ~/.hermes/skills/<pattern>/SKILL.md — one per discovered skill pattern
+          - ~/.hermes/specs/<repo>.md     — reverse-engineered HermesSpec
+
+        Usage:
+            /revengineer .
+            /revengineer ~/projects/my-app
+            /revengineer https://github.com/owner/repo
+        """
+        parts = cmd.strip().split(maxsplit=1)
+        target = parts[1].strip() if len(parts) > 1 else ""
+
+        if not target:
+            _cprint("  Usage: /revengineer <path|github-url>")
+            _cprint("  Examples:")
+            _cprint("    /revengineer .")
+            _cprint("    /revengineer ~/projects/my-app")
+            _cprint("    /revengineer https://github.com/owner/repo")
+            return
+
+        _cprint(f"  🔍 Scanning codebase: [bold]{target}[/bold]")
+        _cprint("  Building directory tree, reading key files, detecting tech stack…")
+
+        try:
+            from agent.reverse_engineer import build_revengineer_context
+            root, context = build_revengineer_context(target)
+        except FileNotFoundError as e:
+            _cprint(f"  [bold red]Error:[/bold red] {e}")
+            return
+        except NotADirectoryError as e:
+            _cprint(f"  [bold red]Error:[/bold red] {e}")
+            return
+        except Exception as e:
+            _cprint(f"  [bold red]Scan failed:[/bold red] {e}")
+            return
+
+        repo_name = root.name
+
+        # Build context/specs dirs for the agent's save instructions
+        try:
+            from agent.context_library import ensure_context_dir
+            context_dir = ensure_context_dir()
+        except Exception:
+            context_dir = Path("~/.hermes/context").expanduser()
+
+        try:
+            from agent.spec_engine import ensure_specs_dir
+            specs_dir = ensure_specs_dir()
+        except Exception:
+            specs_dir = Path("~/.hermes/specs").expanduser()
+
+        try:
+            from agent.skill_utils import get_all_skills_dirs
+            skills_dirs = get_all_skills_dirs()
+            skills_dir = skills_dirs[0] if skills_dirs else Path("~/.hermes/skills").expanduser()
+        except Exception:
+            skills_dir = Path("~/.hermes/skills").expanduser()
+
+        _cprint(f"  ✅ Scan complete — dispatching reverse-engineer agent for [bold]{repo_name}[/bold]")
+
+        goal = f"""\
+Reverse-engineer the following codebase and produce three outputs.
+
+## Codebase Scan
+
+{context}
+
+## Required outputs
+
+### 1. Context file
+Write the context file to: {context_dir}/{repo_name}.md
+
+Use write_file to save it. This file will be auto-injected into every future
+Hermes agent working on this codebase.
+
+### 2. Skill patterns
+List any repeatable, parameterizable behaviors as SKILL CANDIDATES.
+For each recommended skill, write a starter SKILL.md to:
+  {skills_dir}/<skill-name>/SKILL.md
+
+### 3. HermesSpec
+Write a draft HermesSpec to: {specs_dir}/{repo_name}.md
+
+Use write_file to save it.
+
+## Output format
+Wrap each section with delimiters:
+  === CONTEXT FILE: {repo_name}.md ===
+  ...
+  === END CONTEXT FILE ===
+
+  === SKILL CANDIDATES ===
+  ...
+  === END SKILL CANDIDATES ===
+
+  === HERMESSPEC: {repo_name}.md ===
+  ...
+  === END HERMESSPEC ===
+
+After saving all three files, confirm:
+  "Reverse engineering complete for {repo_name}:
+   - Context: {context_dir}/{repo_name}.md
+   - Spec: {specs_dir}/{repo_name}.md
+   - Skills: <N> candidates found, <M> written"
+"""
+
+        msg = (
+            f"Reverse-engineer the codebase at {root}\n\n"
+            f"Use delegate_task with agent_type='reverse-engineer':\n\n"
+            f"delegate_task(goal=\"\"\"{ goal }\"\"\", agent_type=\"reverse-engineer\")"
+        )
+
+        if hasattr(self, '_pending_input'):
+            self._pending_input.put(msg)
+        else:
+            _cprint("  [bold red]revengineer unavailable: input queue not initialized[/]")
 
     def _handle_background_command(self, cmd: str):
         """Handle /background <prompt> — run a prompt in a separate background session.
