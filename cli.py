@@ -4580,6 +4580,12 @@ class HermesCLI:
             self._handle_memdir_command(cmd_original)
         elif canonical == "learn":
             self._handle_learn_command(cmd_original)
+        elif canonical == "skillnew":
+            self._handle_skillnew_command(cmd_original)
+        elif canonical == "skillcheck":
+            self._handle_skillcheck_command(cmd_original)
+        elif canonical == "skilltest":
+            self._handle_skilltest_command(cmd_original)
         elif canonical == "retry":
             retry_msg = self.retry_last()
             if retry_msg and hasattr(self, '_pending_input'):
@@ -4861,6 +4867,122 @@ class HermesCLI:
             "For each non-trivial workflow or pattern discovered, save it as a skill using skill_manage. "
             "Also save any failure patterns to memory. "
             "Report: how many skills created/updated, what they are."
+        )
+        if hasattr(self, '_pending_input'):
+            self._pending_input.put(msg)
+
+    def _handle_skillnew_command(self, cmd: str):
+        """Handle /skillnew — create a new production-quality skill via skill-writer agent."""
+        parts = cmd.strip().split(maxsplit=1)
+        user_arg = parts[1].strip() if len(parts) > 1 else ""
+
+        if not user_arg:
+            _cprint("  Usage: /skillnew <name> [-- task description]")
+            _cprint("  Example: /skillnew proposal-writer -- generates client proposals from project details")
+            return
+
+        # Parse optional description after --
+        if " -- " in user_arg:
+            skill_name, task_desc = user_arg.split(" -- ", 1)
+            skill_name = skill_name.strip()
+            task_desc = task_desc.strip()
+        else:
+            skill_name = user_arg.strip()
+            task_desc = f"perform the {skill_name} task"
+
+        _cprint(f"  ✍️  Skill writer agent starting for '{skill_name}'...")
+
+        # Generate a starter template inline so the agent has a scaffold to improve
+        try:
+            from agent.skill_quality import generate_skill_template
+            template = generate_skill_template(skill_name, task_desc)
+            template_hint = f"\n\nStarter template (fill in the placeholders):\n```markdown\n{template}\n```"
+        except Exception:
+            template_hint = ""
+
+        goal = (
+            f"Create a production-quality skill named '{skill_name}' that: {task_desc}.\n\n"
+            f"Follow the 5-component structure: YAML trigger (5+ phrases + negative boundaries), "
+            f"Overview, Workflow (numbered imperative steps, no vague verbs), "
+            f"Output Format (length + tone + what NOT to include), Examples (happy-path + edge-case).\n"
+            f"Save it to ~/.hermes/skills/{skill_name}/SKILL.md using the skill_manage tool.{template_hint}"
+        )
+        msg = (
+            f"Use delegate_task to create a skill using the skill-writer agent:\n\n"
+            f"{goal}\n\n"
+            f'Call: delegate_task(goal="""{goal}""", agent_type="skill-writer")'
+        )
+        if hasattr(self, '_pending_input'):
+            self._pending_input.put(msg)
+
+    def _handle_skillcheck_command(self, cmd: str):
+        """Handle /skillcheck [skill-name] — validate a skill against quality criteria."""
+        parts = cmd.strip().split(maxsplit=1)
+        skill_name = parts[1].strip() if len(parts) > 1 else ""
+
+        try:
+            from agent.skill_quality import validate_skill_file, validate_all_skills
+            from agent.skill_utils import get_all_skills_dirs, iter_skill_index_files
+
+            if skill_name:
+                # Validate one specific skill
+                skill_path = None
+                for skills_dir in get_all_skills_dirs():
+                    candidate = skills_dir / skill_name / "SKILL.md"
+                    if candidate.exists():
+                        skill_path = candidate
+                        break
+                if not skill_path:
+                    _cprint(f"  ❌ Skill '{skill_name}' not found in skills directories")
+                    return
+                report = validate_skill_file(skill_path)
+                _cprint("")
+                _cprint(report.full_report())
+            else:
+                # Validate all skills and show summary
+                reports = validate_all_skills()
+                if not reports:
+                    _cprint("  No skills found. Create one with /skillnew <name>")
+                    return
+                _cprint(f"\n  📊 Skill Quality Report — {len(reports)} skill(s)\n")
+                for r in reports:
+                    grade_icon = {"A": "✅", "B": "✅", "C": "⚠️", "D": "⚠️", "F": "❌"}.get(r.grade, "•")
+                    _cprint(f"  {grade_icon} {r.summary()}")
+                avg = sum(r.score for r in reports) // len(reports)
+                _cprint(f"\n  Average score: {avg}/100")
+                worst = [r for r in reports if r.grade in ("D", "F")]
+                if worst:
+                    _cprint(f"  Run '/skillcheck {worst[0].skill_name}' to see details on the worst skill.")
+        except Exception as exc:
+            _cprint(f"  [skillcheck] Error: {exc}")
+
+    def _handle_skilltest_command(self, cmd: str):
+        """Handle /skilltest <skill-name> — run 5-test protocol via verify agent."""
+        parts = cmd.strip().split(maxsplit=1)
+        skill_name = parts[1].strip() if len(parts) > 1 else ""
+
+        if not skill_name:
+            _cprint("  Usage: /skilltest <skill-name>")
+            _cprint("  Runs: happy path, minimal input, edge case, negative test, repeat consistency")
+            return
+
+        _cprint(f"  🧪 Running 5-test protocol for skill '{skill_name}'...")
+
+        goal = (
+            f"Run the 5-test protocol for the '{skill_name}' skill:\n\n"
+            f"1. Happy path: invoke the skill with clean, complete, ideal input. Does output match spec?\n"
+            f"2. Minimal input: invoke with absolute minimum info. Does it ask for what's missing?\n"
+            f"3. Edge case: invoke with unusual input (missing fields, contradictions, long/short). Handles gracefully?\n"
+            f"4. Negative test: try to trigger the skill with a request that should NOT activate it. Does it stay silent?\n"
+            f"5. Repeat test: run the same input 2 more times. Is output consistent?\n\n"
+            f"For each test: state PASS or FAIL and explain why.\n"
+            f"End with VERDICT: PASS (all 5 pass), PARTIAL (3-4 pass), or FAIL (2 or fewer pass) "
+            f"and a list of issues to fix."
+        )
+        msg = (
+            f"Use delegate_task to test a skill using the verify agent:\n\n"
+            f"{goal}\n\n"
+            f'Call: delegate_task(goal="""{goal}""", agent_type="verify")'
         )
         if hasattr(self, '_pending_input'):
             self._pending_input.put(msg)
