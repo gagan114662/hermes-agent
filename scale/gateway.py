@@ -496,6 +496,26 @@ async def tenant_stats(tenant_slug: str):
         "SELECT count(*) FROM sessions WHERE tenant_id = $1", tid
     )
 
+    # Quality scores by task type (hill-climbing trend data)
+    score_rows = await db_pool.fetch(
+        """SELECT task_type,
+                  ROUND(AVG(quality_score)) as avg_score,
+                  MAX(quality_score) as best_score,
+                  COUNT(*) as attempts
+           FROM worker_actions
+           WHERE tenant_id = $1 AND quality_score IS NOT NULL
+           GROUP BY task_type""",
+        tid,
+    )
+    quality_trends = {
+        r["task_type"]: {
+            "avg": int(r["avg_score"]),
+            "best": r["best_score"],
+            "attempts": r["attempts"],
+        }
+        for r in score_rows
+    }
+
     return {
         "tenant": tenant["name"],
         "sessions": session_count,
@@ -504,6 +524,7 @@ async def tenant_stats(tenant_slug: str):
         "total_tokens": (counts["total_input_tokens"] or 0) + (counts["total_output_tokens"] or 0),
         "total_cost_usd": round(float(counts["total_cost"] or 0), 4),
         "avg_response_ms": round(float(counts["avg_duration_ms"] or 0)),
+        "quality_trends": quality_trends,
     }
 
 

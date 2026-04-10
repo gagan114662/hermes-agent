@@ -390,6 +390,155 @@ If it is very late at night (after midnight, before 5am), set action to "rest".
 If you completed very similar work within the last 60 minutes, set action to "rest".
 """
 
+_TASK_TYPE_PROMPT = """You are classifying a task.
+
+Task: {task}
+
+Classify into exactly one of these types (respond with just the type keyword, nothing else):
+- lead_research   (finding leads, prospects, companies, contacts)
+- content         (writing posts, articles, newsletters, copy, social media)
+- outreach        (drafting emails, messages, pitches, follow-ups)
+- research        (competitor analysis, market research, news monitoring, intel)
+- ops             (scheduling, organizing, summarizing, reporting, admin)
+- other           (anything that doesn't fit above)
+"""
+
+_GRADER_PROMPTS = {
+    "lead_research": """You are grading an AI worker's lead research output.
+
+Task given: {task}
+Output produced: {output}
+
+Score on these dimensions (each 0-25 points):
+1. Quantity — how many leads/companies found vs what was asked
+2. Relevance — how well do they match the stated criteria
+3. Completeness — how much useful info per lead (name, company, signal, contact)
+4. Actionability — can a human immediately act on this without more research
+
+Respond in JSON only:
+{{
+  "quantity_score": 0,
+  "relevance_score": 0,
+  "completeness_score": 0,
+  "actionability_score": 0,
+  "total": 0,
+  "best_thing": "one specific thing done well",
+  "biggest_gap": "one specific thing missing or weak",
+  "beat_this_next_time": "one concrete instruction for how to score higher next time"
+}}""",
+
+    "content": """You are grading an AI worker's content writing output.
+
+Task given: {task}
+Output produced: {output}
+
+Score on these dimensions (each 0-25 points):
+1. On-brief — does it match what was asked (format, topic, audience, tone)
+2. Quality — is it well-written, clear, engaging, not generic
+3. Specificity — specific details, examples, data — not vague filler
+4. Completeness — is it a finished, usable draft or just an outline
+
+Respond in JSON only:
+{{
+  "on_brief_score": 0,
+  "quality_score": 0,
+  "specificity_score": 0,
+  "completeness_score": 0,
+  "total": 0,
+  "best_thing": "one specific thing done well",
+  "biggest_gap": "one specific thing missing or weak",
+  "beat_this_next_time": "one concrete instruction for how to score higher next time"
+}}""",
+
+    "outreach": """You are grading an AI worker's outreach draft.
+
+Task given: {task}
+Output produced: {output}
+
+Score on these dimensions (each 0-25 points):
+1. Personalization — specific to the recipient, not generic
+2. Clarity — clear value prop, easy to understand in 10 seconds
+3. Call to action — specific, low-friction ask
+4. Tone — appropriate for the relationship and context
+
+Respond in JSON only:
+{{
+  "personalization_score": 0,
+  "clarity_score": 0,
+  "cta_score": 0,
+  "tone_score": 0,
+  "total": 0,
+  "best_thing": "one specific thing done well",
+  "biggest_gap": "one specific thing missing or weak",
+  "beat_this_next_time": "one concrete instruction for how to score higher next time"
+}}""",
+
+    "research": """You are grading an AI worker's research output.
+
+Task given: {task}
+Output produced: {output}
+
+Score on these dimensions (each 0-25 points):
+1. Depth — how thoroughly was the topic covered
+2. Sources — were multiple sources used, are they credible
+3. Synthesis — is raw info turned into useful insight, not just facts
+4. Actionability — does it tell the reader what to DO with this information
+
+Respond in JSON only:
+{{
+  "depth_score": 0,
+  "sources_score": 0,
+  "synthesis_score": 0,
+  "actionability_score": 0,
+  "total": 0,
+  "best_thing": "one specific thing done well",
+  "biggest_gap": "one specific thing missing or weak",
+  "beat_this_next_time": "one concrete instruction for how to score higher next time"
+}}""",
+
+    "ops": """You are grading an AI worker's operations/admin output.
+
+Task given: {task}
+Output produced: {output}
+
+Score on these dimensions (each 0-25 points):
+1. Accuracy — is the information correct and complete
+2. Clarity — easy to read and act on
+3. Format — appropriate structure for the type of output (table, bullets, prose)
+4. Time-saving — does this actually save the manager meaningful time
+
+Respond in JSON only:
+{{
+  "accuracy_score": 0,
+  "clarity_score": 0,
+  "format_score": 0,
+  "time_saving_score": 0,
+  "total": 0,
+  "best_thing": "one specific thing done well",
+  "biggest_gap": "one specific thing missing or weak",
+  "beat_this_next_time": "one concrete instruction for how to score higher next time"
+}}""",
+
+    "other": """You are grading an AI worker's output.
+
+Task given: {task}
+Output produced: {output}
+
+Score holistically (0-100):
+- Was the task completed as requested?
+- Is the output high quality and usable?
+- Is it specific rather than generic?
+- Does it save the manager time?
+
+Respond in JSON only:
+{{
+  "total": 0,
+  "best_thing": "one specific thing done well",
+  "biggest_gap": "one specific thing missing or weak",
+  "beat_this_next_time": "one concrete instruction for how to score higher next time"
+}}""",
+}
+
 
 async def _autonomous_loop(self):
     """
@@ -449,6 +598,24 @@ async def _run_autonomous_decision(self, tenant, config: dict):
     model = tenant["model"] or "openrouter/google/gemini-2.5-flash-preview"
     or_model = model[len("openrouter/"):] if model.startswith("openrouter/") else model
 
+    # Load recent scores per task type so the decision LLM knows what to beat
+    score_rows = await self.db.fetch(
+        """SELECT task_type, quality_score FROM worker_actions
+           WHERE tenant_id = $1 AND quality_score IS NOT NULL
+           ORDER BY created_at DESC LIMIT 10""",
+        tenant_id,
+    )
+    scores_by_type: dict = {}
+    for row in score_rows:
+        if row["task_type"] not in scores_by_type:
+            scores_by_type[row["task_type"]] = row["quality_score"]
+
+    scores_text = ""
+    if scores_by_type:
+        scores_text = "\n\n## Your Recent Quality Scores (beat these)\n"
+        for t, s in scores_by_type.items():
+            scores_text += f"- {t}: {s}/100\n"
+
     # Step 1: Ask LLM what to do (no tools — pure reasoning)
     decision_agent = AIAgent(
         model=or_model,
@@ -466,7 +633,7 @@ async def _run_autonomous_decision(self, tenant, config: dict):
             worker_name=config.get("worker_name", "Worker"),
             worker_role=config.get("worker_role", "AI Assistant"),
             business_name=tenant["name"],
-            memory=memory_text,
+            memory=memory_text + scores_text,
             recent_actions=recent_text,
             current_datetime=datetime.now().strftime("%A %B %d %Y, %I:%M %p"),
             standing_instructions=config.get("standing_instructions", "Do your best work."),
@@ -534,47 +701,119 @@ async def _run_autonomous_decision(self, tenant, config: dict):
     work_result = work_agent.run_conversation(user_message=autonomous_task)
     output = work_result.get("final_response", "")
 
-    # Step 4: Log the action
+    # Step 4: Classify task type
+    task_type = "other"
+    if output and len(output) > 30:
+        try:
+            classify_agent = AIAgent(
+                model=or_model, api_key=or_key,
+                base_url="https://openrouter.ai/api/v1", provider="openrouter",
+                max_iterations=1, quiet_mode=True,
+                skip_memory=True, skip_context_files=True, enabled_toolsets=[],
+            )
+            raw_type = classify_agent.run_conversation(
+                user_message=_TASK_TYPE_PROMPT.format(task=task)
+            ).get("final_response", "other").strip().lower()
+            if raw_type in _GRADER_PROMPTS:
+                task_type = raw_type
+        except Exception:
+            pass
+
+    # Step 5: Grade the output (Karpathy-style — every action gets a number)
+    quality_score = None
+    grader_reasoning = None
+    beat_this = None
+    grade: dict = {}
+
+    if output and len(output) > 50:
+        try:
+            grade_agent = AIAgent(
+                model=or_model, api_key=or_key,
+                base_url="https://openrouter.ai/api/v1", provider="openrouter",
+                max_iterations=1, quiet_mode=True,
+                skip_memory=True, skip_context_files=True, enabled_toolsets=[],
+            )
+            rubric = _GRADER_PROMPTS.get(task_type, _GRADER_PROMPTS["other"])
+            raw_grade = grade_agent.run_conversation(
+                user_message=rubric.format(task=task, output=output[:1500])
+            ).get("final_response", "").strip()
+            if raw_grade.startswith("```"):
+                import re as _re
+                raw_grade = _re.sub(r"^```[a-z]*\n?", "", raw_grade)
+                raw_grade = _re.sub(r"\n?```$", "", raw_grade.rstrip())
+            grade = json.loads(raw_grade)
+            quality_score = int(grade.get("total", 0))
+            beat_this = grade.get("beat_this_next_time", "")
+            grader_reasoning = json.dumps({k: v for k, v in grade.items() if k != "total"})
+        except Exception as e:
+            logger.debug("Grading failed for tenant %s: %s", str(tenant_id)[:8], e)
+
+    # Step 6: Log action WITH score
     summary = f"{datetime.now().strftime('%Y-%m-%d %H:%M')} — {task[:120]}"
+    if quality_score is not None:
+        summary += f" [score: {quality_score}/100]"
+
     await self.db.execute(
-        "INSERT INTO worker_actions (tenant_id, summary, full_output, created_at) VALUES ($1, $2, $3, NOW())",
-        tenant_id, summary, output,
+        """INSERT INTO worker_actions
+           (tenant_id, summary, full_output, task_type, quality_score, grader_reasoning, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6, NOW())""",
+        tenant_id, summary, output, task_type, quality_score, grader_reasoning,
     )
 
-    # Step 5: Extract one-sentence learning (brief call, no tools)
-    if output and len(output) > 100:
-        try:
-            learn_agent = AIAgent(
-                model=or_model,
-                api_key=or_key,
-                base_url="https://openrouter.ai/api/v1",
-                provider="openrouter",
-                max_iterations=1,
-                quiet_mode=True,
-                skip_memory=True,
-                skip_context_files=True,
-                enabled_toolsets=[],
-            )
-            learning = learn_agent.run_conversation(
-                user_message=(
-                    f"You just completed: {task}\n\n"
-                    f"Result: {output[:600]}\n\n"
-                    f"In exactly one sentence: what specific thing will you do differently or better next time?"
-                )
-            )
-            learning_text = learning.get("final_response", "").strip()
-            if learning_text:
-                # Use a unique memory_type per learning to avoid unique constraint conflicts
-                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                await self.db.execute(
-                    "INSERT INTO tenant_memory (tenant_id, memory_type, content) VALUES ($1, $2, $3)"
-                    " ON CONFLICT (tenant_id, memory_type) DO UPDATE SET content = EXCLUDED.content, updated_at = NOW()",
-                    tenant_id, f"learning_{ts}", learning_text,
-                )
-        except Exception as e:
-            logger.debug("Learning extraction failed: %s", e)
+    # Step 7: Hill-climb — compare to previous score for same task type
+    if quality_score is not None and task_type != "other":
+        prev = await self.db.fetchrow(
+            """SELECT quality_score FROM worker_actions
+               WHERE tenant_id = $1 AND task_type = $2 AND quality_score IS NOT NULL
+               AND created_at < NOW() - INTERVAL '10 minutes'
+               ORDER BY created_at DESC LIMIT 1""",
+            tenant_id, task_type,
+        )
+        if prev and prev["quality_score"] is not None:
+            prev_score = prev["quality_score"]
+            delta = quality_score - prev_score
+            if delta > 0:
+                trend = f"IMPROVED +{delta} points ({prev_score} → {quality_score})"
+                what = f"What worked: {grade.get('best_thing', '')}"
+            elif delta < 0:
+                trend = f"REGRESSED {delta} points ({prev_score} → {quality_score})"
+                what = f"What went wrong: {grade.get('biggest_gap', '')}"
+            else:
+                trend = f"SAME score ({quality_score}/100)"
+                what = f"What worked: {grade.get('best_thing', '')}"
 
-    logger.info("Autonomous task complete [%s]: %s", str(tenant_id)[:8], task[:80])
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            hill_note = (
+                f"{trend} on {task_type}.\n"
+                f"Task: {task[:100]}\n"
+                f"{what}\n"
+                f"Next time: {beat_this or 'maintain approach'}"
+            )
+            await self.db.execute(
+                """INSERT INTO tenant_memory (tenant_id, memory_type, content)
+                   VALUES ($1, $2, $3)
+                   ON CONFLICT (tenant_id, memory_type)
+                   DO UPDATE SET content = EXCLUDED.content, updated_at = NOW()""",
+                tenant_id, f"hill_climb_{task_type}_{ts}", hill_note,
+            )
+
+    # Step 8: Save beat_this as a standing learning for next time
+    if beat_this:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        await self.db.execute(
+            """INSERT INTO tenant_memory (tenant_id, memory_type, content)
+               VALUES ($1, $2, $3)
+               ON CONFLICT (tenant_id, memory_type)
+               DO UPDATE SET content = EXCLUDED.content, updated_at = NOW()""",
+            tenant_id, f"learning_{ts}",
+            f"[{task_type}] Score: {quality_score}/100. Next time: {beat_this}",
+        )
+
+    logger.info(
+        "Autonomous task complete [%s] type=%s score=%s",
+        str(tenant_id)[:8], task_type,
+        f"{quality_score}/100" if quality_score is not None else "ungraded",
+    )
 
 
 async def _digest_loop(self):
