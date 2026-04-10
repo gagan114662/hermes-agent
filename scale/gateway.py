@@ -31,7 +31,9 @@ from typing import Dict, Optional
 import asyncpg
 import redis.asyncio as aioredis
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 logging.basicConfig(
     level=logging.INFO,
@@ -306,6 +308,52 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Hermes Scale Gateway", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+)
+
+
+class OnboardRequest(BaseModel):
+    business_name: str
+    business_info: str
+    telegram_token: str
+    manager_chat_id: str
+
+
+@app.post("/onboard")
+async def onboard(req: OnboardRequest):
+    """
+    Deploy a new AI worker. Generates worker identity from scratch via LLM,
+    provisions filesystem, inserts tenant into Postgres, sends Telegram welcome.
+    """
+    import sys as _sys
+    import os as _os
+    _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+    from scale.onboard import run_onboard
+
+    try:
+        result = await run_onboard(
+            business_name=req.business_name,
+            business_info=req.business_info,
+            telegram_token=req.telegram_token,
+            manager_chat_id=req.manager_chat_id,
+            db=db_pool,
+            redis=redis_client,
+        )
+    except (ValueError, KeyError) as e:
+        raise HTTPException(status_code=422, detail=f"Worker design failed: {e}")
+    except Exception as e:
+        logger.error("Onboard error: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+    # Hot-reload tenants so gateway starts polling the new bot immediately
+    await load_tenants()
+
+    return result
 
 
 @app.get("/health")

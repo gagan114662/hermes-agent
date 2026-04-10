@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Hermes | Your AI Coworker</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.development.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.development.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
+    body { font-family: 'Inter', -apple-system, sans-serif; background: #f5f0eb; color: #1a1a1a; -webkit-font-smoothing: antialiased; }
+    button { font-family: inherit; cursor: pointer; }
+    input, textarea { font-family: inherit; }
+
+    @keyframes marquee {
+      0% { transform: translateX(0); }
+      100% { transform: translateX(-50%); }
+    }
+    .marquee-track {
+      display: flex;
+      width: max-content;
+      animation: marquee 28s linear infinite;
+    }
+    .marquee-track:hover { animation-play-state: paused; }
+
+    @keyframes blink {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0; }
+    }
+    .cursor { animation: blink 1s infinite; }
+
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(12px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .fade-up { animation: fadeUp 0.4s ease forwards; }
+
+    @keyframes typingDot {
+      0%, 80%, 100% { opacity: 0.2; transform: scale(0.8); }
+      40% { opacity: 1; transform: scale(1); }
+    }
+    .dot1 { animation: typingDot 1.2s infinite; }
+    .dot2 { animation: typingDot 1.2s infinite 0.2s; }
+    .dot3 { animation: typingDot 1.2s infinite 0.4s; }
+
+    ::-webkit-scrollbar { width: 0; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    const CAPABILITIES = [
+      "find leads", "write content", "monitor competitors", "draft emails",
+      "research markets", "enrich your CRM", "summarize meetings", "track mentions",
+      "generate reports", "plan campaigns", "analyze traffic", "follow up automatically",
+      "scout job signals", "write LinkedIn posts", "book meetings", "triage your inbox",
+    ];
+
+    const DEMO_MESSAGES = [
+      { role: "user", text: "Find 5 companies in logistics that just raised funding and draft outreach for each." },
+      { role: "thinking", text: "Searching Crunchbase for logistics funding rounds..." },
+      { role: "assistant", text: "Found 5 recent raises. Here's what I've got:" },
+      { role: "card", items: [
+        { company: "FleetOps", raised: "$12M Series A", signal: "Hiring VP Sales + 3 AEs", fit: "High" },
+        { company: "Shipyard AI", raised: "$8M Seed", signal: "Just launched warehouse product", fit: "High" },
+        { company: "CargoLoop", raised: "$22M Series B", signal: "Expanding to EU", fit: "Medium" },
+      ]},
+      { role: "assistant", text: "Outreach drafted for all 5. Want me to personalise the subject lines and send via your email, or save as drafts first?" },
+    ];
+
+    const PRICING = [
+      { name: "Free", price: 0, desc: "Try it out", features: ["1 Hermes worker", "100 tasks/mo", "Connect via Telegram"] },
+      { name: "Starter", price: 49, desc: "For individuals", features: ["1 Hermes worker", "1,000 tasks/mo", "Memory + context", "All tools"] },
+      { name: "Pro", price: 99, desc: "Most popular", popular: true, features: ["3 Hermes workers", "5,000 tasks/mo", "Proactive briefs", "Priority support"] },
+      { name: "Business", price: 299, desc: "For teams", features: ["Unlimited workers", "30,000 tasks/mo", "Custom personas", "Dedicated support"] },
+    ];
+
+    function HireModal({ onClose }) {
+      const [step, setStep] = useState(1);
+      const [form, setForm] = useState({ name: "", about: "", token: "", chatId: "" });
+      const [done, setDone] = useState(false);
+      const [loading, setLoading] = useState(false);
+      const [error, setError] = useState("");
+      const [worker, setWorker] = useState(null);
+
+      const inp = { width:"100%", border:"1.5px solid #ddd", borderRadius:12, padding:"10px 14px", fontSize:14, outline:"none", background:"#fff", boxSizing:"border-box" };
+
+      const deploy = async () => {
+        setLoading(true);
+        setError("");
+        try {
+          const res = await fetch("http://localhost:8443/onboard", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              business_name: form.name,
+              business_info: form.about,
+              telegram_token: form.token,
+              manager_chat_id: form.chatId,
+            }),
+          });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.detail || "Deployment failed");
+          if (data.ok) { setWorker(data); setDone(true); }
+          else throw new Error(data.detail || "Deployment failed");
+        } catch (e) {
+          setError(e.message || "Something went wrong. Check your token and try again.");
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      return (
+        <div onClick={onClose} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.4)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:999,padding:20,backdropFilter:"blur(4px)"}}>
+          <div onClick={e=>e.stopPropagation()} style={{background:"#fff",borderRadius:24,width:"100%",maxWidth:460,overflow:"hidden",boxShadow:"0 32px 64px rgba(0,0,0,0.2)"}}>
+            {done ? (
+              <div style={{padding:48,textAlign:"center"}}>
+                <div style={{fontSize:48,marginBottom:16}}>🎉</div>
+                <div style={{fontSize:22,fontWeight:800,marginBottom:8}}>
+                  {worker ? `${worker.worker_name} is live!` : "Hermes is live!"}
+                </div>
+                <div style={{color:"#666",fontSize:14,marginBottom:worker?16:28,lineHeight:1.6}}>
+                  Your AI worker is booting up. You'll get a message on Telegram in about 30 seconds. Say hi.
+                </div>
+                {worker && (
+                  <div style={{background:"#f5f0eb",borderRadius:14,padding:16,fontSize:13,color:"#444",textAlign:"left",marginBottom:24,lineHeight:1.7}}>
+                    <div style={{fontWeight:700,marginBottom:4}}>{worker.worker_name} · {worker.worker_role}</div>
+                    <div style={{color:"#666",fontSize:12}}>📧 {worker.worker_email}</div>
+                  </div>
+                )}
+                <button onClick={onClose} style={{width:"100%",padding:"13px 0",borderRadius:50,background:"#1a1a1a",color:"#fff",fontWeight:700,fontSize:14,border:"none"}}>
+                  Done →
+                </button>
+              </div>
+            ) : (
+              <>
+                <div style={{background:"#1a1a1a",padding:"28px 28px 24px",color:"#fff"}}>
+                  <div style={{fontSize:18,fontWeight:800,marginBottom:4}}>Hire your Hermes worker</div>
+                  <div style={{fontSize:13,color:"#999",marginBottom:20}}>Takes about 2 minutes</div>
+                  <div style={{display:"flex",gap:6}}>
+                    {[1,2].map(s=>(
+                      <div key={s} style={{flex:1,height:3,borderRadius:99,background:step>=s?"#fff":"rgba(255,255,255,0.2)",transition:"background 0.3s"}}/>
+                    ))}
+                  </div>
+                </div>
+                <div style={{padding:28}}>
+                  {step===1 && (
+                    <div style={{display:"flex",flexDirection:"column",gap:16}}>
+                      <div style={{fontWeight:700,fontSize:15,marginBottom:4}}>Tell Hermes about your business</div>
+                      <div>
+                        <div style={{fontSize:12,fontWeight:600,color:"#555",marginBottom:6,textTransform:"uppercase",letterSpacing:0.5}}>Your name / company</div>
+                        <input style={inp} placeholder="e.g. Gagan at Foolish" value={form.name} onChange={e=>setForm({...form,name:e.target.value})}/>
+                      </div>
+                      <div>
+                        <div style={{fontSize:12,fontWeight:600,color:"#555",marginBottom:6,textTransform:"uppercase",letterSpacing:0.5}}>What do you do? Who do you sell to?</div>
+                        <textarea style={{...inp,resize:"none",height:90,lineHeight:1.5}} placeholder="e.g. We help logistics companies automate warehouse ops. Our customers are VP Operations at 100-500 person companies." value={form.about} onChange={e=>setForm({...form,about:e.target.value})}/>
+                      </div>
+                      <button disabled={!form.name||!form.about} onClick={()=>setStep(2)} style={{padding:"12px 0",borderRadius:50,border:"none",background:form.name&&form.about?"#1a1a1a":"#e5e5e5",color:form.name&&form.about?"#fff":"#999",fontWeight:700,fontSize:14}}>
+                        Continue →
+                      </button>
+                    </div>
+                  )}
+                  {step===2 && (
+                    <div style={{display:"flex",flexDirection:"column",gap:16}}>
+                      <div style={{fontWeight:700,fontSize:15,marginBottom:4}}>Connect to Telegram</div>
+                      <div style={{background:"#f5f0eb",borderRadius:14,padding:16,fontSize:13,color:"#444",lineHeight:1.8}}>
+                        <strong>Create a bot in 60 seconds:</strong><br/>
+                        1. Open Telegram → <code style={{background:"#e8e0d8",padding:"1px 6px",borderRadius:4,fontFamily:"monospace"}}>@BotFather</code><br/>
+                        2. Send <code style={{background:"#e8e0d8",padding:"1px 6px",borderRadius:4,fontFamily:"monospace"}}>/newbot</code><br/>
+                        3. Paste the token below<br/>
+                        4. Message <code style={{background:"#e8e0d8",padding:"1px 6px",borderRadius:4,fontFamily:"monospace"}}>@userinfobot</code> to get your chat ID
+                      </div>
+                      <div>
+                        <div style={{fontSize:12,fontWeight:600,color:"#555",marginBottom:6,textTransform:"uppercase",letterSpacing:0.5}}>Bot token</div>
+                        <input style={{...inp,fontFamily:"monospace",fontSize:12}} placeholder="1234567890:AAF-xxxxxxxxxxxxxxxxxxxx" value={form.token} onChange={e=>setForm({...form,token:e.target.value})}/>
+                      </div>
+                      <div>
+                        <div style={{fontSize:12,fontWeight:600,color:"#555",marginBottom:6,textTransform:"uppercase",letterSpacing:0.5}}>Your Telegram chat ID</div>
+                        <input style={{...inp,fontFamily:"monospace",fontSize:12}} placeholder="e.g. 123456789" value={form.chatId} onChange={e=>setForm({...form,chatId:e.target.value})}/>
+                      </div>
+                      {error && (
+                        <div style={{background:"#fff0f0",border:"1px solid #fca5a5",borderRadius:10,padding:"10px 14px",fontSize:13,color:"#dc2626"}}>
+                          {error}
+                        </div>
+                      )}
+                      <div style={{display:"flex",gap:10}}>
+                        <button onClick={()=>setStep(1)} style={{flex:1,padding:"12px 0",borderRadius:50,border:"1.5px solid #ddd",background:"#fff",fontWeight:600,fontSize:14,color:"#333"}}>← Back</button>
+                        <button
+                          disabled={!form.token||!form.chatId||loading}
+                          onClick={deploy}
+                          style={{flex:2,padding:"12px 0",borderRadius:50,border:"none",background:form.token&&form.chatId&&!loading?"#1a1a1a":"#e5e5e5",color:form.token&&form.chatId&&!loading?"#fff":"#999",fontWeight:700,fontSize:14}}
+                        >
+                          {loading ? "Deploying…" : "Deploy Hermes 🚀"}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    function DemoChat() {
+      const [shown, setShown] = useState(0);
+      const [typing, setTyping] = useState(false);
+
+      useEffect(() => {
+        if (shown >= DEMO_MESSAGES.length) return;
+        const delay = shown === 0 ? 800 : shown === 1 ? 600 : shown === 2 ? 1200 : shown === 3 ? 400 : 1000;
+        const t = setTimeout(() => {
+          if (DEMO_MESSAGES[shown].role === "assistant" || DEMO_MESSAGES[shown].role === "card") {
+            setTyping(true);
+            setTimeout(() => { setTyping(false); setShown(s => s+1); }, 900);
+          } else {
+            setShown(s => s+1);
+          }
+        }, delay);
+        return () => clearTimeout(t);
+      }, [shown]);
+
+      return (
+        <div style={{background:"#fff",borderRadius:20,overflow:"hidden",boxShadow:"0 2px 40px rgba(0,0,0,0.10)",height:440,display:"flex",flexDirection:"column",border:"1px solid #e8e0d8"}}>
+          {/* Chat header */}
+          <div style={{padding:"14px 18px",borderBottom:"1px solid #f0ebe4",display:"flex",alignItems:"center",gap:10}}>
+            <div style={{width:32,height:32,borderRadius:99,background:"#1a1a1a",display:"flex",alignItems:"center",justifyContent:"center",color:"#fff",fontWeight:800,fontSize:13}}>H</div>
+            <div>
+              <div style={{fontWeight:700,fontSize:13}}>Hermes</div>
+              <div style={{fontSize:11,color:"#10b981",fontWeight:600}}>● Online</div>
+            </div>
+          </div>
+
+          {/* Messages */}
+          <div style={{flex:1,overflowY:"auto",padding:"16px 16px 0",display:"flex",flexDirection:"column",gap:10}}>
+            {DEMO_MESSAGES.slice(0, shown).map((msg, i) => (
+              <div key={i} className="fade-up">
+                {msg.role === "user" && (
+                  <div style={{display:"flex",justifyContent:"flex-end"}}>
+                    <div style={{background:"#1a1a1a",color:"#fff",borderRadius:"18px 18px 4px 18px",padding:"10px 14px",fontSize:13,maxWidth:"80%",lineHeight:1.5}}>{msg.text}</div>
+                  </div>
+                )}
+                {msg.role === "thinking" && (
+                  <div style={{display:"flex",alignItems:"center",gap:8}}>
+                    <div style={{width:24,height:24,borderRadius:99,background:"#f5f0eb",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:800,color:"#666",flexShrink:0}}>H</div>
+                    <div style={{background:"#f5f0eb",borderRadius:"4px 18px 18px 18px",padding:"8px 12px",fontSize:12,color:"#666",fontStyle:"italic"}}>{msg.text}</div>
+                  </div>
+                )}
+                {msg.role === "assistant" && (
+                  <div style={{display:"flex",alignItems:"flex-start",gap:8}}>
+                    <div style={{width:24,height:24,borderRadius:99,background:"#1a1a1a",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:800,color:"#fff",flexShrink:0}}>H</div>
+                    <div style={{background:"#f5f0eb",borderRadius:"4px 18px 18px 18px",padding:"10px 14px",fontSize:13,maxWidth:"80%",lineHeight:1.5}}>{msg.text}</div>
+                  </div>
+                )}
+                {msg.role === "card" && (
+                  <div style={{marginLeft:32,display:"flex",flexDirection:"column",gap:6}}>
+                    {msg.items.map((item, j) => (
+                      <div key={j} style={{background:"#fff",border:"1px solid #e8e0d8",borderRadius:12,padding:"10px 14px",fontSize:12}}>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+                          <span style={{fontWeight:700,fontSize:13}}>{item.company}</span>
+                          <span style={{background:item.fit==="High"?"#dcfce7":"#fef9c3",color:item.fit==="High"?"#16a34a":"#ca8a04",fontSize:10,padding:"2px 8px",borderRadius:99,fontWeight:700}}>{item.fit} fit</span>
+                        </div>
+                        <div style={{color:"#666"}}>Raised {item.raised} · {item.signal}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+
+            {typing && (
+              <div style={{display:"flex",alignItems:"center",gap:8}} className="fade-up">
+                <div style={{width:24,height:24,borderRadius:99,background:"#1a1a1a",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:800,color:"#fff",flexShrink:0}}>H</div>
+                <div style={{background:"#f5f0eb",borderRadius:"4px 18px 18px 18px",padding:"12px 16px",display:"flex",gap:4,alignItems:"center"}}>
+                  <span className="dot1" style={{width:6,height:6,borderRadius:99,background:"#666",display:"inline-block"}}/>
+                  <span className="dot2" style={{width:6,height:6,borderRadius:99,background:"#666",display:"inline-block"}}/>
+                  <span className="dot3" style={{width:6,height:6,borderRadius:99,background:"#666",display:"inline-block"}}/>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Input bar */}
+          <div style={{padding:"12px 16px",borderTop:"1px solid #f0ebe4"}}>
+            <div style={{background:"#f5f0eb",borderRadius:50,padding:"10px 16px",display:"flex",alignItems:"center",gap:10}}>
+              <span style={{fontSize:13,color:"#aaa",flex:1}}>Message Hermes...</span>
+              <div style={{width:28,height:28,borderRadius:99,background:"#1a1a1a",display:"flex",alignItems:"center",justifyContent:"center"}}>
+                <span style={{color:"#fff",fontSize:14}}>↑</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function App() {
+      const [showModal, setShowModal] = useState(false);
+
+      const doubled = [...CAPABILITIES, ...CAPABILITIES];
+
+      return (
+        <div style={{minHeight:"100vh"}}>
+          {/* Nav */}
+          <nav style={{position:"fixed",top:0,left:0,right:0,zIndex:50,padding:"0 32px",height:56,display:"flex",alignItems:"center",justifyContent:"space-between",background:"rgba(245,240,235,0.9)",backdropFilter:"blur(12px)",borderBottom:"1px solid rgba(0,0,0,0.06)"}}>
+            <div style={{display:"flex",alignItems:"center",gap:8}}>
+              <div style={{width:28,height:28,borderRadius:8,background:"#1a1a1a",display:"flex",alignItems:"center",justifyContent:"center",color:"#fff",fontWeight:900,fontSize:13}}>H</div>
+              <span style={{fontWeight:800,fontSize:15}}>Hermes</span>
+            </div>
+            <div style={{display:"flex",alignItems:"center",gap:12}}>
+              <a href="#pricing" style={{fontSize:13,fontWeight:500,color:"#555",textDecoration:"none"}}>Pricing</a>
+              <button onClick={()=>setShowModal(true)} style={{background:"#1a1a1a",color:"#fff",border:"none",padding:"8px 20px",borderRadius:50,fontSize:13,fontWeight:700}}>
+                Get started →
+              </button>
+            </div>
+          </nav>
+
+          {/* Hero */}
+          <section style={{minHeight:"100vh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:"80px 24px 40px",textAlign:"center"}}>
+            <div style={{fontSize:12,fontWeight:700,letterSpacing:2,textTransform:"uppercase",color:"#888",marginBottom:24}}>
+              AI coworker · Runs on Telegram
+            </div>
+            <h1 style={{fontSize:"clamp(48px, 8vw, 96px)",fontWeight:900,lineHeight:1.05,letterSpacing:"-0.03em",maxWidth:900,marginBottom:24}}>
+              Your AI coworker.<br/>
+              Works while you sleep.
+            </h1>
+            <p style={{fontSize:"clamp(16px, 2.5vw, 20px)",color:"#555",maxWidth:520,lineHeight:1.6,marginBottom:40}}>
+              Hermes is not a chatbot. It's an AI coworker that does real work — research, outreach, content, ops — and gets better over time.
+            </p>
+            <div style={{display:"flex",gap:12,flexWrap:"wrap",justifyContent:"center",marginBottom:16}}>
+              <button onClick={()=>setShowModal(true)} style={{background:"#1a1a1a",color:"#fff",border:"none",padding:"16px 32px",borderRadius:50,fontWeight:700,fontSize:16}}>
+                Hire Hermes for free →
+              </button>
+              <a href="#demo" style={{background:"transparent",color:"#333",border:"1.5px solid #ccc",padding:"16px 32px",borderRadius:50,fontWeight:600,fontSize:16,textDecoration:"none"}}>
+                See it work ↓
+              </a>
+            </div>
+            <div style={{fontSize:13,color:"#aaa"}}>No credit card · Works in Telegram · Setup in 2 min</div>
+          </section>
+
+          {/* Capabilities marquee */}
+          <section style={{background:"#1a1a1a",padding:"20px 0",overflow:"hidden"}}>
+            <div className="marquee-track">
+              {doubled.map((cap, i) => (
+                <span key={i} style={{display:"inline-flex",alignItems:"center",gap:12,padding:"0 20px",color:"#fff",fontSize:14,fontWeight:500,whiteSpace:"nowrap"}}>
+                  <span style={{width:4,height:4,borderRadius:99,background:"#666",display:"inline-block"}}/>
+                  {cap}
+                </span>
+              ))}
+            </div>
+          </section>
+
+          {/* Demo */}
+          <section id="demo" style={{padding:"100px 24px",maxWidth:1100,margin:"0 auto"}}>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:64,alignItems:"center"}}>
+              <div>
+                <div style={{fontSize:12,fontWeight:700,letterSpacing:2,textTransform:"uppercase",color:"#888",marginBottom:20}}>How it works</div>
+                <h2 style={{fontSize:"clamp(32px, 4vw, 52px)",fontWeight:900,lineHeight:1.1,letterSpacing:"-0.02em",marginBottom:20}}>
+                  You talk.<br/>Hermes does.
+                </h2>
+                <p style={{fontSize:16,color:"#555",lineHeight:1.7,marginBottom:32}}>
+                  Tell Hermes what you need — in plain English, on Telegram. It searches, writes, researches, drafts, and reports back. No prompts. No setup. Just results.
+                </p>
+                <div style={{display:"flex",flexDirection:"column",gap:16}}>
+                  {[
+                    { icon: "🧠", title: "Memory that grows", desc: "Hermes remembers your business, preferences, and past work." },
+                    { icon: "⏰", title: "Proactive briefs", desc: "Get morning reports without asking — leads, news, tasks." },
+                    { icon: "🔧", title: "100+ tools built in", desc: "Web search, email, research, writing, spreadsheets and more." },
+                  ].map(f => (
+                    <div key={f.title} style={{display:"flex",gap:14,alignItems:"flex-start"}}>
+                      <span style={{fontSize:22,marginTop:2}}>{f.icon}</span>
+                      <div>
+                        <div style={{fontWeight:700,fontSize:14,marginBottom:3}}>{f.title}</div>
+                        <div style={{fontSize:13,color:"#666",lineHeight:1.5}}>{f.desc}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <DemoChat />
+            </div>
+          </section>
+
+          {/* Bold statement */}
+          <section style={{background:"#1a1a1a",color:"#fff",padding:"100px 24px",textAlign:"center"}}>
+            <h2 style={{fontSize:"clamp(28px, 5vw, 64px)",fontWeight:900,lineHeight:1.1,letterSpacing:"-0.02em",maxWidth:800,margin:"0 auto 24px"}}>
+              Hermes is not a chatbot.<br/>Hermes is a coworker.
+            </h2>
+            <p style={{fontSize:18,color:"#888",maxWidth:500,margin:"0 auto 40px",lineHeight:1.6}}>
+              It has memory. It works proactively. It uses real tools. It gets better the more you use it.
+            </p>
+            <button onClick={()=>setShowModal(true)} style={{background:"#fff",color:"#1a1a1a",border:"none",padding:"16px 36px",borderRadius:50,fontWeight:800,fontSize:16}}>
+              Hire Hermes →
+            </button>
+          </section>
+
+          {/* Pricing */}
+          <section id="pricing" style={{padding:"100px 24px",maxWidth:1000,margin:"0 auto"}}>
+            <div style={{textAlign:"center",marginBottom:60}}>
+              <h2 style={{fontSize:"clamp(28px, 4vw, 48px)",fontWeight:900,letterSpacing:"-0.02em",marginBottom:12}}>Simple pricing</h2>
+              <p style={{fontSize:16,color:"#666"}}>Start free. Scale as you grow.</p>
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(200px,1fr))",gap:16}}>
+              {PRICING.map(p => (
+                <div key={p.name} style={{background:p.popular?"#1a1a1a":"#fff",borderRadius:20,padding:28,border:p.popular?"none":"1.5px solid #e8e0d8",position:"relative"}}>
+                  {p.popular && <div style={{position:"absolute",top:-10,left:"50%",transform:"translateX(-50%)",background:"#fff",color:"#1a1a1a",fontSize:11,fontWeight:800,padding:"3px 14px",borderRadius:99,whiteSpace:"nowrap",letterSpacing:0.5}}>MOST POPULAR</div>}
+                  <div style={{fontSize:15,fontWeight:700,color:p.popular?"#fff":"#111",marginBottom:6}}>{p.name}</div>
+                  <div style={{marginBottom:6}}>
+                    <span style={{fontSize:36,fontWeight:900,color:p.popular?"#fff":"#111"}}>${p.price}</span>
+                    {p.price>0 && <span style={{fontSize:13,color:p.popular?"#888":"#999"}}>/mo</span>}
+                  </div>
+                  <div style={{fontSize:13,color:p.popular?"#888":"#666",marginBottom:20}}>{p.desc}</div>
+                  <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:24}}>
+                    {p.features.map(f => (
+                      <div key={f} style={{fontSize:13,color:p.popular?"#ccc":"#444",display:"flex",alignItems:"center",gap:8}}>
+                        <span style={{color:p.popular?"#fff":"#1a1a1a",fontWeight:700}}>✓</span> {f}
+                      </div>
+                    ))}
+                  </div>
+                  <button onClick={()=>setShowModal(true)} style={{width:"100%",padding:"11px 0",borderRadius:50,border:p.popular?"none":"1.5px solid #1a1a1a",background:p.popular?"#fff":"transparent",color:p.popular?"#1a1a1a":"#1a1a1a",fontWeight:700,fontSize:13}}>
+                    {p.price===0?"Get started free →":"Get started →"}
+                  </button>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          {/* Footer */}
+          <footer style={{borderTop:"1px solid #e8e0d8",padding:"32px 24px",display:"flex",alignItems:"center",justifyContent:"space-between",maxWidth:1100,margin:"0 auto"}}>
+            <div style={{display:"flex",alignItems:"center",gap:8}}>
+              <div style={{width:24,height:24,borderRadius:6,background:"#1a1a1a",display:"flex",alignItems:"center",justifyContent:"center",color:"#fff",fontWeight:900,fontSize:11}}>H</div>
+              <span style={{fontWeight:700,fontSize:14}}>Hermes</span>
+            </div>
+            <div style={{fontSize:12,color:"#999"}}>© 2026 Hermes · Privacy · Terms</div>
+          </footer>
+
+          {showModal && <HireModal onClose={()=>setShowModal(false)}/>}
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+  </script>
+</body>
+</html>
