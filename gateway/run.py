@@ -601,11 +601,7 @@ class GatewayRunner:
             self._honcho_last_access[session_key] = _time.time()
             return self._honcho_managers[session_key], self._honcho_configs.get(session_key)
 
-        import time as _time
-        if session_key in self._honcho_managers:
-            self._honcho_last_access[session_key] = _time.time()
-            return self._honcho_managers[session_key], self._honcho_configs.get(session_key)
-
+        try:
             hcfg = HonchoClientConfig.from_global_config()
             if not hcfg.enabled or not (hcfg.api_key or hcfg.base_url):
                 return None, hcfg
