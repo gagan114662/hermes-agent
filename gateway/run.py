@@ -414,11 +414,16 @@ def _resolve_hermes_bin() -> Optional[list[str]]:
 class GatewayRunner:
     """
     Main gateway controller.
-    
+
     Manages the lifecycle of all platform adapters and routes
     messages to/from the agent.
     """
-    
+
+    # Class-level defaults so tests that bypass __init__ still work.
+    _use_subprocess_agents: bool = False
+    _process_registry: "ProcessRegistry | None" = None
+
+
     def __init__(self, config: Optional[GatewayConfig] = None):
         self.config = config or load_gateway_config()
         self.adapters: Dict[Platform, BasePlatformAdapter] = {}
