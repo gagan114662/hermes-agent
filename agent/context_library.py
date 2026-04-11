@@ -242,6 +242,6 @@ def list_context_files() -> list[dict]:
                 "size_chars": len(raw),
                 "agents_filter": agents,
             })
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Could not parse context file metadata %s: %s", f, e)
     return result
