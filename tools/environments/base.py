@@ -562,6 +562,13 @@ class BaseEnvironment(ABC):
         except Exception:
             pass
 
+    def _timeout_result(self, timeout: int | None) -> dict:
+        """Standard return dict when a command times out."""
+        return {
+            "output": f"Command timed out after {timeout or self.timeout}s",
+            "returncode": 124,
+        }
+
     def _prepare_command(self, command: str) -> tuple[str, str | None]:
         """Transform sudo commands if SUDO_PASSWORD is available."""
         from tools.terminal_tool import _transform_sudo_command

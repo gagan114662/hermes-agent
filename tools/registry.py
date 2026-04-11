@@ -16,10 +16,20 @@ Import chain (circular-import safe):
 
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Set
 
 logger = logging.getLogger(__name__)
+
+
+def _get_metrics():
+    """Return the global MetricsCollector instance (lazy import to avoid circular deps)."""
+    try:
+        from tools.metrics import METRICS
+        return METRICS
+    except Exception:
+        return None
 
 
 @dataclass

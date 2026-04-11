@@ -113,7 +113,50 @@ class SSHEnvironment(BaseEnvironment):
         cmd.append(mkdir_cmd)
         subprocess.run(cmd, capture_output=True, text=True, timeout=10)
 
-    # _get_sync_files provided via iter_sync_files in FileSyncManager init
+    def _sync_skills_and_credentials(self) -> None:
+        """Rsync skills directory and credential files to the remote host."""
+        try:
+            container_base = f"{self._remote_home}/.hermes"
+            from tools.credential_files import get_credential_file_mounts, get_skills_directory_mount
+
+            rsync_base = ["rsync", "-az", "--timeout=30", "--safe-links"]
+            ssh_opts = f"ssh -o ControlPath={self.control_socket} -o ControlMaster=auto"
+            if self.port != 22:
+                ssh_opts += f" -p {self.port}"
+            if self.key_path:
+                ssh_opts += f" -i {self.key_path}"
+            rsync_base.extend(["-e", ssh_opts])
+            dest_prefix = f"{self.user}@{self.host}"
+
+            for mount_entry in get_credential_file_mounts():
+                remote_path = mount_entry["container_path"].replace("/root/.hermes", container_base, 1)
+                parent_dir = str(Path(remote_path).parent)
+                mkdir_cmd = self._build_ssh_command()
+                mkdir_cmd.append(f"mkdir -p {parent_dir}")
+                subprocess.run(mkdir_cmd, capture_output=True, text=True, timeout=10)
+                cmd = rsync_base + [mount_entry["host_path"], f"{dest_prefix}:{remote_path}"]
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                if result.returncode == 0:
+                    logger.info("SSH: synced credential %s -> %s", mount_entry["host_path"], remote_path)
+                else:
+                    logger.debug("SSH: rsync credential failed: %s", result.stderr.strip())
+
+            for skills_mount in get_skills_directory_mount(container_base=container_base):
+                remote_path = skills_mount["container_path"]
+                mkdir_cmd = self._build_ssh_command()
+                mkdir_cmd.append(f"mkdir -p {remote_path}")
+                subprocess.run(mkdir_cmd, capture_output=True, text=True, timeout=10)
+                cmd = rsync_base + [
+                    skills_mount["host_path"].rstrip("/") + "/",
+                    f"{dest_prefix}:{remote_path}/",
+                ]
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+                if result.returncode == 0:
+                    logger.info("SSH: synced skills dir %s -> %s", skills_mount["host_path"], remote_path)
+                else:
+                    logger.debug("SSH: rsync skills dir failed: %s", result.stderr.strip())
+        except Exception as e:
+            logger.debug("SSH: could not sync skills/credentials: %s", e)
 
     def _scp_upload(self, host_path: str, remote_path: str) -> None:
         """Upload a single file via scp over ControlMaster."""

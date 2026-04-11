@@ -329,6 +329,26 @@ async def admin(request: Request) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def parse_checkout_session(event: dict):
+    """Parse a Stripe event and return a customer dict for checkout.session.completed."""
+    if event.get("type") != "checkout.session.completed":
+        return None
+    obj = event.get("data", {}).get("object", {})
+    details = obj.get("customer_details", {})
+    return {
+        "email": obj.get("customer_email") or details.get("email", ""),
+        "name": details.get("name", ""),
+        "phone": details.get("phone", ""),
+        "telegram_id": obj.get("metadata", {}).get("telegram_id", ""),
+        "stripe_session_id": obj.get("id", ""),
+        "amount": obj.get("amount_total", 0),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 

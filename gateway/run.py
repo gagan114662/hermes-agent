@@ -480,6 +480,7 @@ class GatewayRunner:
     _restart_detached: bool = False
     _restart_via_service: bool = False
     _use_subprocess_agents: bool = False
+    _agent_cache_last_access: Dict[str, float] = {}
     _stop_task: Optional[asyncio.Task] = None
     _session_model_overrides: Dict[str, Dict[str, str]] = {}
     
@@ -6525,10 +6526,11 @@ class GatewayRunner:
             thread_id=str(context.source.thread_id) if context.source.thread_id else "",
         )
 
-    def _clear_session_env(self, tokens: list) -> None:
+    def _clear_session_env(self, tokens: list = None) -> None:
         """Restore session context variables to their pre-handler values."""
-        from gateway.session_context import clear_session_vars
-        clear_session_vars(tokens)
+        if tokens is not None:
+            from gateway.session_context import clear_session_vars
+            clear_session_vars(tokens)
     
     async def _enrich_message_with_vision(
         self,
@@ -7825,7 +7827,7 @@ def _start_cron_ticker(stop_event: threading.Event, adapters=None, interval: int
     logger.info("Cron ticker stopped")
 
 
-async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = False) -> bool:
+async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = False, verbosity: int = None) -> bool:
     """
     Start the gateway and run until interrupted.
     
