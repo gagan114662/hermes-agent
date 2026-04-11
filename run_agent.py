@@ -95,6 +95,7 @@ from agent.subdirectory_hints import SubdirectoryHintTracker
 from agent.prompt_caching import apply_anthropic_cache_control
 from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, load_soul_md, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, DEVELOPER_ROLE_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE, OPENAI_MODEL_EXECUTION_GUIDANCE
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
+from agent import telemetry as _tel
 from agent.display import (
     KawaiiSpinner, build_tool_preview as _build_tool_preview,
     get_cute_tool_message as _get_cute_tool_message_impl,
@@ -4276,57 +4277,93 @@ class AIAgent:
         close that worker-local client, so retries and other requests never
         inherit a closed transport.
         """
-        result = {"response": None, "error": None}
-        request_client_holder = {"client": None}
+        _span = None
+        try:
+            _span = _tel.start_span(
+                "agent.llm_call",
+                attributes={
+                    "model": getattr(self, "model", None),
+                    "provider": getattr(self, "provider", None),
+                    "api_mode": getattr(self, "api_mode", None),
+                },
+            )
+        except Exception:
+            pass
 
-        def _call():
-            try:
-                if self.api_mode == "codex_responses":
-                    request_client_holder["client"] = self._create_request_openai_client(reason="codex_stream_request")
-                    result["response"] = self._run_codex_stream(
-                        api_kwargs,
-                        client=request_client_holder["client"],
-                        on_first_delta=getattr(self, "_codex_on_first_delta", None),
-                    )
-                elif self.api_mode == "anthropic_messages":
-                    result["response"] = self._anthropic_messages_create(api_kwargs)
-                else:
-                    request_client_holder["client"] = self._create_request_openai_client(reason="chat_completion_request")
-                    result["response"] = request_client_holder["client"].chat.completions.create(**api_kwargs)
-            except Exception as e:
-                result["error"] = e
-            finally:
-                request_client = request_client_holder.get("client")
-                if request_client is not None:
-                    self._close_request_openai_client(request_client, reason="request_complete")
+        try:
+            result = {"response": None, "error": None}
+            request_client_holder = {"client": None}
 
-        t = threading.Thread(target=_call, daemon=True)
-        t.start()
-        while t.is_alive():
-            t.join(timeout=0.3)
-            if self._interrupt_requested:
-                # Force-close the in-flight worker-local HTTP connection to stop
-                # token generation without poisoning the shared client used to
-                # seed future retries.
+            def _call():
                 try:
-                    if self.api_mode == "anthropic_messages":
-                        from agent.anthropic_adapter import build_anthropic_client
-
-                        self._anthropic_client.close()
-                        self._anthropic_client = build_anthropic_client(
-                            self._anthropic_api_key,
-                            getattr(self, "_anthropic_base_url", None),
+                    if self.api_mode == "codex_responses":
+                        request_client_holder["client"] = self._create_request_openai_client(reason="codex_stream_request")
+                        result["response"] = self._run_codex_stream(
+                            api_kwargs,
+                            client=request_client_holder["client"],
+                            on_first_delta=getattr(self, "_codex_on_first_delta", None),
                         )
+                    elif self.api_mode == "anthropic_messages":
+                        result["response"] = self._anthropic_messages_create(api_kwargs)
                     else:
-                        request_client = request_client_holder.get("client")
-                        if request_client is not None:
-                            self._close_request_openai_client(request_client, reason="interrupt_abort")
-                except Exception:
-                    pass
-                raise InterruptedError("Agent interrupted during API call")
-        if result["error"] is not None:
-            raise result["error"]
-        return result["response"]
+                        request_client_holder["client"] = self._create_request_openai_client(reason="chat_completion_request")
+                        result["response"] = request_client_holder["client"].chat.completions.create(**api_kwargs)
+                except Exception as e:
+                    result["error"] = e
+                finally:
+                    request_client = request_client_holder.get("client")
+                    if request_client is not None:
+                        self._close_request_openai_client(request_client, reason="request_complete")
+
+            t = threading.Thread(target=_call, daemon=True)
+            t.start()
+            while t.is_alive():
+                t.join(timeout=0.3)
+                if self._interrupt_requested:
+                    # Force-close the in-flight worker-local HTTP connection to stop
+                    # token generation without poisoning the shared client used to
+                    # seed future retries.
+                    try:
+                        if self.api_mode == "anthropic_messages":
+                            from agent.anthropic_adapter import build_anthropic_client
+
+                            self._anthropic_client.close()
+                            self._anthropic_client = build_anthropic_client(
+                                self._anthropic_api_key,
+                                getattr(self, "_anthropic_base_url", None),
+                            )
+                        else:
+                            request_client = request_client_holder.get("client")
+                            if request_client is not None:
+                                self._close_request_openai_client(request_client, reason="interrupt_abort")
+                    except Exception:
+                        pass
+                    raise InterruptedError("Agent interrupted during API call")
+            if result["error"] is not None:
+                raise result["error"]
+            response = result["response"]
+            try:
+                if _span is not None:
+                    usage = getattr(response, "usage", None)
+                    if usage:
+                        _span.set_attribute("input_tokens", getattr(usage, "prompt_tokens", 0))
+                        _span.set_attribute("output_tokens", getattr(usage, "completion_tokens", 0))
+            except Exception:
+                pass
+            return response
+        except Exception as _exc:
+            try:
+                if _span is not None:
+                    _span.set_attribute("error", type(_exc).__name__)
+            except Exception:
+                pass
+            raise
+        finally:
+            try:
+                if _span is not None:
+                    _tel.end_span(_span)
+            except Exception:
+                pass
 
     # ── Unified streaming API call ─────────────────────────────────────────
 
