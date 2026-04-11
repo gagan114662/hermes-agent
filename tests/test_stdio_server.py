@@ -57,14 +57,15 @@ def test_process_registry_removes_on_cleanup():
 
 
 def test_gateway_subprocess_flag_config_logic():
-    """_use_subprocess_agents flag logic: True only when agent.process_mode=subprocess."""
+    """Subprocess mode is the default; in-process mode is the opt-out."""
     def _resolve_flag(config):
-        return (config.get("agent") or {}).get("process_mode") == "subprocess"
+        # True (subprocess) by default; False only when explicitly set to in-process
+        return (config.get("agent") or {}).get("process_mode") != "in-process"
 
-    assert _resolve_flag({}) is False
-    assert _resolve_flag({"agent": {}}) is False
-    assert _resolve_flag({"agent": {"process_mode": "subprocess"}}) is True
-    assert _resolve_flag({"agent": {"process_mode": "in-process"}}) is False
+    assert _resolve_flag({}) is True                                           # default: subprocess
+    assert _resolve_flag({"agent": {}}) is True                               # default: subprocess
+    assert _resolve_flag({"agent": {"process_mode": "subprocess"}}) is True   # explicit subprocess
+    assert _resolve_flag({"agent": {"process_mode": "in-process"}}) is False  # opt-out
 
 
 def test_pipe_mode_does_not_hang_on_pipe_input():

@@ -595,13 +595,15 @@ class GatewayRunner:
         # Per-session agent subprocess registry (Unix philosophy thin gateway)
         self._process_registry = ProcessRegistry(ttl_seconds=3600)
 
-        # Feature flag: route messages through per-session stdio subprocesses
-        # Enable via config.yaml:  agent: {process_mode: subprocess}
-        self._use_subprocess_agents = False
+        # Agent process mode: subprocess (Unix thin-gateway) is the default.
+        # Disable via config.yaml:  agent: {process_mode: in-process}
+        self._use_subprocess_agents = True
         try:
             _init_cfg = _load_gateway_config()
-            if (_init_cfg.get("agent") or {}).get("process_mode") == "subprocess":
-                self._use_subprocess_agents = True
+            if (_init_cfg.get("agent") or {}).get("process_mode") == "in-process":
+                self._use_subprocess_agents = False
+                logger.info("Agent process mode: in-process (legacy)")
+            else:
                 logger.info("Agent process mode: subprocess (Unix thin-gateway)")
         except Exception:
             pass
@@ -7361,9 +7363,9 @@ class GatewayRunner:
                 }
             except Exception as e:
                 logger.warning(
-                    "Subprocess agent dispatch failed, falling back to in-process: %s", e
+                    "Subprocess agent dispatch failed, falling back to in-process agent: %s", e
                 )
-                # Fall through to existing in-process agent path
+                # Fall through to in-process agent path
 
         from run_agent import AIAgent
         import queue

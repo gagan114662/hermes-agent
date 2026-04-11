@@ -19,8 +19,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import sys
-from typing import Any, Dict, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -29,9 +31,71 @@ class StdioServerError(Exception):
     pass
 
 
+def _resolve_agent_kwargs() -> dict:
+    """Resolve provider credentials — same logic as the gateway."""
+    from hermes_cli.runtime_provider import resolve_runtime_provider
+    runtime = resolve_runtime_provider()
+    return {
+        "api_key": runtime.get("api_key"),
+        "base_url": runtime.get("base_url"),
+        "provider": runtime.get("provider"),
+        "api_mode": runtime.get("api_mode"),
+        "command": runtime.get("command"),
+        "args": list(runtime.get("args") or []),
+        "credential_pool": runtime.get("credential_pool"),
+    }
+
+
+def _resolve_model() -> str:
+    """Read model from config.yaml."""
+    try:
+        from hermes_constants import get_hermes_home
+        import yaml
+        cfg_path = get_hermes_home() / "config.yaml"
+        if cfg_path.exists():
+            cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+            model_cfg = cfg.get("model", {})
+            if isinstance(model_cfg, str):
+                return model_cfg
+            if isinstance(model_cfg, dict):
+                return model_cfg.get("default") or model_cfg.get("model") or ""
+    except Exception:
+        pass
+    return ""
+
+
+def _load_history(session_id: str) -> List[Dict[str, Any]]:
+    """Load conversation history from the session transcript store."""
+    try:
+        from hermes_constants import get_hermes_home
+        transcripts_dir = get_hermes_home() / "sessions"
+        transcript_path = transcripts_dir / f"{session_id}.jsonl"
+        if not transcript_path.exists():
+            return []
+        messages = []
+        for line in transcript_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                msg = json.loads(line)
+                role = msg.get("role")
+                if role in ("user", "assistant", "tool") and msg.get("content"):
+                    messages.append({"role": role, "content": msg["content"]})
+            except json.JSONDecodeError:
+                pass
+        return messages
+    except Exception as e:
+        logger.debug("Could not load history for session %s: %s", session_id, e)
+        return []
+
+
 class StdioServer:
     """
     Handles JSON-L messages from stdin and writes JSON-L responses to stdout.
+
+    Owns its own AIAgent instance per session — resolves credentials and loads
+    history from the transcript store so it is fully self-contained.
 
     dry_run=True skips actual LLM calls — used in tests.
     """
@@ -39,12 +103,13 @@ class StdioServer:
     def __init__(self, session_id: Optional[str] = None, dry_run: bool = False):
         self.session_id = session_id
         self.dry_run = dry_run
-        self._agent = None  # lazy-init real AIAgent when not dry_run
+        self._agent = None  # lazy-init on first real message
 
     async def handle_message(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Process one message, return final response dict."""
         session_id = payload.get("session_id", "").strip()
         message = payload.get("message", "").strip()
+        platform = payload.get("platform", "api")
 
         if not session_id:
             raise StdioServerError("session_id required")
@@ -59,21 +124,61 @@ class StdioServer:
                 "usage": {},
             }
 
-        # Real agent execution
-        agent = await self._get_agent()
-        content = await agent.run(message)
+        agent = self._get_or_create_agent(session_id, platform)
+        history = _load_history(session_id)
+
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: agent.run_conversation(
+                message,
+                conversation_history=history,
+                task_id=session_id,
+            ),
+        )
+
+        content = result.get("final_response") or result.get("error") or ""
         return {
             "session_id": session_id,
             "done": True,
             "content": content,
-            "usage": {},
+            "usage": {
+                "input_tokens": getattr(agent, "session_prompt_tokens", 0),
+                "output_tokens": getattr(agent, "session_completion_tokens", 0),
+            },
         }
 
-    async def _get_agent(self):
-        if self._agent is None:
-            # Import here to avoid slow startup in dry_run / test mode
-            from run_agent import create_agent
-            self._agent = await create_agent(session_id=self.session_id)
+    def _get_or_create_agent(self, session_id: str, platform: str):
+        """Return cached agent or create one for this session."""
+        if self._agent is not None:
+            return self._agent
+
+        from run_agent import AIAgent
+        from dotenv import load_dotenv
+        from hermes_constants import get_hermes_home
+
+        # Re-read credentials (long-lived process — keys may change)
+        env_path = get_hermes_home() / ".env"
+        try:
+            load_dotenv(env_path, override=True, encoding="utf-8")
+        except Exception:
+            pass
+
+        model = _resolve_model()
+        try:
+            runtime_kwargs = _resolve_agent_kwargs()
+        except Exception as e:
+            raise StdioServerError(f"Provider auth failed: {e}") from e
+
+        self._agent = AIAgent(
+            model=model,
+            **runtime_kwargs,
+            max_iterations=90,
+            quiet_mode=True,
+            verbose_logging=False,
+            session_id=session_id,
+            platform=platform,
+        )
         return self._agent
 
     async def run_forever(self) -> None:
@@ -84,7 +189,7 @@ class StdioServer:
         read_protocol = asyncio.StreamReaderProtocol(reader)
         await loop.connect_read_pipe(lambda: read_protocol, sys.stdin)
 
-        write_transport, write_protocol = await loop.connect_write_pipe(
+        write_transport, _ = await loop.connect_write_pipe(
             asyncio.BaseProtocol, sys.stdout.buffer
         )
 
