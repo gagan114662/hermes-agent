@@ -642,9 +642,20 @@ def cmd_chat(args):
         except Exception:
             pass
 
+    # Pipe mode: if stdin is not a TTY, read piped content and prepend to query.
+    # Allows: echo "hello" | hermes   or   cat file.txt | hermes "summarize this"
+    if not sys.stdin.isatty():
+        try:
+            piped_content = sys.stdin.read().strip()
+        except Exception:
+            piped_content = ""
+        if piped_content:
+            existing_query = args.query or ""
+            args.query = f"{existing_query}\n\n{piped_content}".strip() if existing_query else piped_content
+
     # Import and run the CLI
     from cli import main as cli_main
-    
+
     # Build kwargs from args
     kwargs = {
         "model": args.model,
@@ -4570,7 +4581,41 @@ For more help on a command:
     gateway_subparsers.add_parser("setup", help="Configure messaging platforms")
 
     gateway_parser.set_defaults(func=cmd_gateway)
-    
+
+    # =========================================================================
+    # agent command
+    # =========================================================================
+    agent_parser = subparsers.add_parser("agent", help="Agent process management")
+    agent_subparsers = agent_parser.add_subparsers(dest="agent_command")
+    serve_parser = agent_subparsers.add_parser(
+        "serve", help="Run agent as a long-running JSON-L stdio server"
+    )
+    serve_parser.add_argument(
+        "--transport", default="stdio", choices=["stdio"],
+        help="Transport protocol (default: stdio)",
+    )
+    serve_parser.add_argument(
+        "--session-id", default=None,
+        help="Session ID for this agent process (optional)",
+    )
+
+    def cmd_agent(args):
+        agent_cmd = getattr(args, "agent_command", None)
+        if agent_cmd == "serve":
+            transport = getattr(args, "transport", "stdio")
+            session_id = getattr(args, "session_id", None)
+            if transport == "stdio":
+                import asyncio
+                from agent.stdio_server import main as stdio_main
+                asyncio.run(stdio_main(session_id=session_id))
+            else:
+                print(f"Unknown transport: {transport}", file=sys.stderr)
+                sys.exit(1)
+        else:
+            agent_parser.print_help()
+
+    agent_parser.set_defaults(func=cmd_agent)
+
     # =========================================================================
     # setup command
     # =========================================================================

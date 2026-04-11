@@ -225,6 +225,7 @@ from gateway.session import (
 )
 from gateway.delivery import DeliveryRouter
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType
+from gateway.process_registry import ProcessRegistry
 
 
 def _normalize_whatsapp_identifier(value: str) -> str:
@@ -413,11 +414,16 @@ def _resolve_hermes_bin() -> Optional[list[str]]:
 class GatewayRunner:
     """
     Main gateway controller.
-    
+
     Manages the lifecycle of all platform adapters and routes
     messages to/from the agent.
     """
-    
+
+    # Class-level defaults so tests that bypass __init__ still work.
+    _use_subprocess_agents: bool = False
+    _process_registry: "ProcessRegistry | None" = None
+
+
     def __init__(self, config: Optional[GatewayConfig] = None):
         self.config = config or load_gateway_config()
         self.adapters: Dict[Platform, BasePlatformAdapter] = {}
@@ -480,7 +486,25 @@ class GatewayRunner:
         self._honcho_configs: Dict[str, Any] = {}
         self._honcho_last_access: Dict[str, float] = {}
 
+        # Per-session agent subprocess registry (Unix philosophy thin gateway).
+        # Subprocess mode is opt-in: set agent.process_mode: subprocess in config.yaml
+        self._process_registry = ProcessRegistry(ttl_seconds=3600)
+        self._use_subprocess_agents = False
+        try:
+            _init_cfg = _load_gateway_config()
+            if (_init_cfg.get("agent") or {}).get("process_mode") == "subprocess":
+                self._use_subprocess_agents = True
+                logger.info("Agent process mode: subprocess (Unix thin-gateway)")
+        except Exception:
+            pass
 
+        # Initialise OpenTelemetry tracing (Honeycomb or OTLP-compatible backend).
+        # Non-fatal — gateway continues if OTel packages are not installed.
+        try:
+            from agent.telemetry import configure_from_config
+            configure_from_config()
+        except Exception as _tel_err:
+            logger.debug("Telemetry init skipped: %s", _tel_err)
 
         # Ensure tirith security scanner is available (downloads if needed)
         try:
@@ -1296,11 +1320,63 @@ class GatewayRunner:
                 ", ".join(p.value for p in self._failed_platforms),
             )
         asyncio.create_task(self._platform_reconnect_watcher())
+        asyncio.create_task(self._sweep_agent_processes())
 
         logger.info("Press Ctrl+C to stop")
-        
+
         return True
-    
+
+    async def _dispatch_to_agent_process(
+        self, session_id: str, message: str, platform: str
+    ) -> str:
+        """Send message to per-session stdio agent subprocess, return response."""
+        import json as _json
+        from agent import telemetry as _tel
+
+        with _tel.span(
+            "gateway.dispatch_subprocess",
+            session_id=session_id,
+            platform=platform,
+            message_length=len(message),
+        ) as _span:
+            proc = await self._process_registry.spawn(session_id)
+
+            payload = _json.dumps({
+                "session_id": session_id,
+                "message": message,
+                "platform": platform,
+            }) + "\n"
+
+            proc.stdin.write(payload.encode())
+            await proc.stdin.drain()
+
+            # Timeout is configurable; default 300s to accommodate long agent tasks
+            _timeout = float(
+                (_load_gateway_config().get("agent") or {}).get("subprocess_timeout", 300)
+            )
+            full_content = ""
+            while True:
+                line = await asyncio.wait_for(proc.stdout.readline(), timeout=_timeout)
+                if not line:
+                    break
+                response = _json.loads(line.decode().strip())
+                if "delta" in response:
+                    full_content += response["delta"]
+                if response.get("done"):
+                    full_content = response.get("content", full_content)
+                    break
+
+            _span.set_attribute("response_length", len(full_content))
+            return full_content
+
+    async def _sweep_agent_processes(self):
+        """Periodically reap idle agent processes."""
+        while True:
+            await asyncio.sleep(300)
+            reaped = await self._process_registry.sweep_expired()
+            if reaped:
+                logger.info("Swept %d expired agent processes", reaped)
+
     async def _session_expiry_watcher(self, interval: int = 300):
         """Background task that proactively flushes memories for expired sessions.
         
@@ -5717,9 +5793,34 @@ class GatewayRunner:
         This is run in a thread pool to not block the event loop.
         Supports interruption via new messages.
         """
+        # Unix thin-gateway path: dispatch to per-session stdio subprocess.
+        # Enabled via config.yaml:  agent: {process_mode: subprocess}
+        if self._use_subprocess_agents:
+            platform_str = source.platform.value if source.platform else "api"
+            try:
+                response_text = await self._dispatch_to_agent_process(
+                    session_id, message, platform_str
+                )
+                return {
+                    "final_response": response_text,
+                    "messages": [],
+                    "api_calls": 0,
+                    "tools": [],
+                    "history_offset": len(history),
+                    "last_prompt_tokens": 0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "session_id": session_id,
+                }
+            except Exception as e:
+                logger.warning(
+                    "Subprocess agent dispatch failed, falling back to in-process agent: %s", e
+                )
+                # Fall through to in-process agent path
+
         from run_agent import AIAgent
         import queue
-        
+
         user_config = _load_gateway_config()
         platform_key = _platform_config_key(source.platform)
 

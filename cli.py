@@ -5380,6 +5380,7 @@ class HermesCLI:
             else:
                 _cprint(f"  🧪 Spec-anchored /skilltest for '{skill_name}' (skill file not found — agents will search)")
         except Exception:
+            logger.warning("Could not load skill spec for %r", skill_name, exc_info=True)
             _cprint(f"  🧪 Spec-anchored /skilltest for '{skill_name}'")
 
         path_note = (

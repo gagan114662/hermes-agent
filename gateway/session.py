@@ -811,6 +811,7 @@ class SessionStore:
         self,
         session_key: str,
         last_prompt_tokens: int = None,
+        **kwargs,
     ) -> None:
         """Update lightweight session metadata after an interaction."""
         with self._lock:
