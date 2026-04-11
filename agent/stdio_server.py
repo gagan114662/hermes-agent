@@ -59,8 +59,8 @@ def _resolve_model() -> str:
                 return model_cfg
             if isinstance(model_cfg, dict):
                 return model_cfg.get("default") or model_cfg.get("model") or ""
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Could not read model from config.yaml: %s", e)
     return ""
 
 
@@ -166,8 +166,8 @@ class StdioServer:
         env_path = get_hermes_home() / ".env"
         try:
             load_dotenv(env_path, override=True, encoding="utf-8")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Could not load .env file %s: %s", env_path, e)
 
         model = _resolve_model()
         try:
