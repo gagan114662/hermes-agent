@@ -309,6 +309,13 @@ class APIServerAdapter(BasePlatformAdapter):
         self._run_streams_created: Dict[str, float] = {}
         self._session_db: Optional[Any] = None  # Lazy-init SessionDB for session continuity
 
+        # Initialise OpenTelemetry tracing (non-fatal if packages not installed).
+        try:
+            from agent.telemetry import configure_from_config
+            configure_from_config()
+        except Exception as _tel_err:
+            logger.debug("Telemetry init skipped in ApiServerAdapter: %s", _tel_err)
+
     @staticmethod
     def _parse_cors_origins(value: Any) -> tuple[str, ...]:
         """Normalize configured CORS origins into a stable tuple."""
@@ -481,6 +488,28 @@ class APIServerAdapter(BasePlatformAdapter):
 
     async def _handle_chat_completions(self, request: "web.Request") -> "web.Response":
         """POST /v1/chat/completions — OpenAI Chat Completions format."""
+        try:
+            from agent import telemetry as _tel
+            _trace_ctx = _tel.span(
+                "api_server.chat_completions",
+                platform="open_webui",
+                stream=str(request.method),
+            )
+            _trace_span_mgr = _trace_ctx.__enter__()
+        except Exception:
+            _trace_span_mgr = None
+
+        try:
+            return await self._handle_chat_completions_inner(request, _trace_span_mgr)
+        finally:
+            try:
+                if _trace_span_mgr is not None:
+                    _trace_ctx.__exit__(None, None, None)
+            except Exception:
+                pass
+
+    async def _handle_chat_completions_inner(self, request: "web.Request", _span) -> "web.Response":
+        """Inner implementation of POST /v1/chat/completions."""
         auth_err = self._check_auth(request)
         if auth_err:
             return auth_err
@@ -548,6 +577,16 @@ class APIServerAdapter(BasePlatformAdapter):
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:29]}"
         model_name = body.get("model", "hermes-agent")
         created = int(time.time())
+
+        if _span is not None:
+            try:
+                _span.set_attribute("session_id", session_id)
+                _span.set_attribute("model", model_name)
+                _span.set_attribute("stream", stream)
+                _span.set_attribute("message_length", len(user_message))
+                _span.set_attribute("history_turns", len(history))
+            except Exception:
+                pass
 
         if stream:
             import queue as _q

@@ -428,8 +428,30 @@ def handle_function_call(
         except Exception:
             pass  # file_tools may not be loaded yet
 
+    # --- telemetry span setup (non-fatal) ---
+    _tel_span = None
+    _tel_ctx = None
+    try:
+        from agent import telemetry as _tel
+        _tel_ctx = _tel.span(
+            "agent.tool_call",
+            tool_name=function_name,
+            session_id=session_id or "",
+        )
+        _tel_span = _tel_ctx.__enter__()
+    except Exception:
+        _tel_span = None
+        _tel_ctx = None
+
     try:
         if function_name in _AGENT_LOOP_TOOLS:
+            try:
+                if _tel_span is not None:
+                    _tel_span.set_attribute("success", False)
+                if _tel_ctx is not None:
+                    _tel_ctx.__exit__(None, None, None)
+            except Exception:
+                pass
             return json.dumps({"error": f"{function_name} must be handled by the agent loop"})
 
         # Pre-tool hook
@@ -480,6 +502,14 @@ def handle_function_call(
         except Exception:
             pass
 
+        try:
+            if _tel_span is not None:
+                _tel_span.set_attribute("success", True)
+            if _tel_ctx is not None:
+                _tel_ctx.__exit__(None, None, None)
+        except Exception:
+            pass
+
         return result
 
     except Exception as e:
@@ -489,6 +519,14 @@ def handle_function_call(
             from hermes_cli.plugins import invoke_hook
             invoke_hook("on_tool_error", tool_name=function_name, args=function_args,
                         error=str(e), task_id=task_id or "")
+        except Exception:
+            pass
+        try:
+            if _tel_span is not None:
+                _tel_span.set_attribute("success", False)
+                _tel_span.set_attribute("error_type", type(e).__name__)
+            if _tel_ctx is not None:
+                _tel_ctx.__exit__(None, None, None)
         except Exception:
             pass
         return json.dumps({"error": error_msg}, ensure_ascii=False)
