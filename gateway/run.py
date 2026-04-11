@@ -236,7 +236,17 @@ from gateway.session import (
     build_session_key,
 )
 from gateway.delivery import DeliveryRouter
-from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType
+from gateway.platforms.base import (
+    BasePlatformAdapter,
+    MessageEvent,
+    MessageType,
+    merge_pending_message_event,
+)
+from gateway.restart import (
+    DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT,
+    GATEWAY_SERVICE_RESTART_EXIT_CODE,
+    parse_restart_drain_timeout,
+)
 from gateway.process_registry import ProcessRegistry
 
 
