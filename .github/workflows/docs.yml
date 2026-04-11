@@ -22,11 +22,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Set up Iron Proxy (egress control)
-        uses: ironsh/iron-proxy-action@v1
-        with:
-          egress-rules: egress-rules.yaml
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -42,8 +37,3 @@ jobs:
       - name: Build and deploy docs
         run: mkdocs gh-deploy --force --clean
 
-      - name: Iron Proxy summary
-        if: always()
-        uses: ironsh/iron-proxy-action@v1
-        with:
-          show-summary: true
