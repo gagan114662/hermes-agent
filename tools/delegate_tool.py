@@ -519,9 +519,9 @@ def _run_single_child(
         _heartbeat_stop.set()
         _heartbeat_thread.join(timeout=5)
 
-        if child_pool is not None and leased_cred_id is not None:
+        if _pool is not None and _leased_id is not None:
             try:
-                child_pool.release_lease(leased_cred_id)
+                _pool.release_lease(_leased_id)
             except Exception as exc:
                 logger.debug("Failed to release credential lease: %s", exc)
 
@@ -569,6 +569,7 @@ def delegate_task(
     max_iterations: Optional[int] = None,
     parent_agent=None,
     agent_name: Optional[str] = None,
+    agent_type: Optional[str] = None,
 ) -> str:
     """
     Spawn one or more child agents to handle delegated tasks.

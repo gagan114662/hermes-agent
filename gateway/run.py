@@ -479,6 +479,7 @@ class GatewayRunner:
     _restart_task_started: bool = False
     _restart_detached: bool = False
     _restart_via_service: bool = False
+    _use_subprocess_agents: bool = False
     _stop_task: Optional[asyncio.Task] = None
     _session_model_overrides: Dict[str, Dict[str, str]] = {}
     
@@ -1915,13 +1916,6 @@ class GatewayRunner:
         except Exception:
             pass
 
-        # Run registered cleanup functions (2s timeout)
-        try:
-            from agent.cleanup_registry import run_all_cleanups
-            run_all_cleanups(timeout=2.0)
-        except Exception:
-            pass
-
         for session_key, agent in list(self._running_agents.items()):
             if agent is _AGENT_PENDING_SENTINEL:
                 continue
@@ -1961,9 +1955,6 @@ class GatewayRunner:
             self._update_runtime_status("stopped", self._exit_reason)
             logger.info("Gateway stopped")
 
-        self._stop_task = asyncio.create_task(_stop_impl())
-        await self._stop_task
-    
     async def wait_for_shutdown(self) -> None:
         """Wait for shutdown signal."""
         await self._shutdown_event.wait()

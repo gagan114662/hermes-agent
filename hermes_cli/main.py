@@ -1125,6 +1125,22 @@ def select_provider_and_model(args=None):
             and not selected_provider.startswith("custom:"):
         _clear_stale_openai_base_url()
 
+def _clear_stale_openai_base_url():
+    """Remove OPENAI_BASE_URL from ~/.hermes/.env if the active provider is not 'custom'."""
+    from hermes_cli.config import get_env_value, save_env_value, load_config
+    cfg = load_config()
+    model_cfg = cfg.get("model", {})
+    if isinstance(model_cfg, dict):
+        provider = (model_cfg.get("provider") or "").strip().lower()
+    else:
+        provider = ""
+    if provider == "custom" or not provider:
+        return
+    stale_url = get_env_value("OPENAI_BASE_URL")
+    if stale_url:
+        save_env_value("OPENAI_BASE_URL", "")
+
+
 def _prompt_provider_choice(choices, *, default=0):
     """Show provider selection menu with curses arrow-key navigation.
 

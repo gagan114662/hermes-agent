@@ -991,6 +991,7 @@ _ACCENT_ANSI_DEFAULT = "\033[1;38;2;255;215;0m"  # True-color #FFD700 bold — f
 _BOLD = "\033[1m"
 _DIM = "\033[2m"
 _RST = "\033[0m"
+_GOLD = "\033[1;38;2;255;215;0m"
 
 
 def _hex_to_ansi_bold(hex_color: str) -> str:

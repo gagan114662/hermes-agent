@@ -112,6 +112,16 @@ class ToolRegistry:
         if check_fn and toolset not in self._toolset_checks:
             self._toolset_checks[toolset] = check_fn
 
+    def get_max_result_size(self, name: str, default=None):
+        """Return per-tool max result size, or *default* (or global default)."""
+        entry = self._tools.get(name)
+        if entry and entry.max_result_size_chars is not None:
+            return entry.max_result_size_chars
+        if default is not None:
+            return default
+        from tools.budget_config import DEFAULT_RESULT_SIZE_CHARS
+        return DEFAULT_RESULT_SIZE_CHARS
+
     def deregister(self, name: str) -> None:
         """Remove a tool from the registry.
 
