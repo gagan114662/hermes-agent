@@ -1365,7 +1365,9 @@ class APIServerAdapter(BasePlatformAdapter):
             }
             return result, usage
 
-        return await loop.run_in_executor(None, _run)
+        import contextvars as _cv
+        _api_ctx = _cv.copy_context()
+        return await loop.run_in_executor(None, lambda: _api_ctx.run(_run))
 
     # ------------------------------------------------------------------
     # /v1/runs — structured event streaming
