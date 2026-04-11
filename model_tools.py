@@ -437,6 +437,7 @@ def handle_function_call(
             "agent.tool_call",
             tool_name=function_name,
             session_id=session_id or "",
+            tool_call_id=tool_call_id or "",
         )
         _tel_span = _tel_ctx.__enter__()
     except Exception:

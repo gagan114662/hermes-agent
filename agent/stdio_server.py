@@ -129,20 +129,38 @@ class StdioServer:
                 "usage": {},
             }
 
-        from agent import telemetry as _tel
-        with _tel.span(
+        # Extract W3C traceparent from gateway so this span is a child of gateway.dispatch_subprocess
+        traceparent = payload.get("traceparent")
+        _otel_parent_ctx = None
+        if traceparent:
+            try:
+                from opentelemetry.propagate import extract
+                _otel_parent_ctx = extract({"traceparent": traceparent})
+            except Exception:
+                pass
+
+        from agent.telemetry import get_tracer
+        _tracer = get_tracer("hermes")
+        with _tracer.start_as_current_span(
             "stdio_server.handle_message",
-            session_id=session_id,
-            platform=platform,
-            message_length=len(message),
+            context=_otel_parent_ctx,  # None → new root span (graceful fallback)
         ) as _span:
+            try:
+                _span.set_attribute("session_id", session_id)
+                _span.set_attribute("platform", platform)
+                _span.set_attribute("message_length", len(message))
+            except Exception:
+                pass
             agent = self._get_or_create_agent(session_id, platform)
             history = _load_history(session_id)
 
+            import contextvars as _cv
+            _stdio_ctx = _cv.copy_context()
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(
                 None,
-                lambda: agent.run_conversation(
+                lambda: _stdio_ctx.run(
+                    agent.run_conversation,
                     message,
                     conversation_history=history,
                     task_id=session_id,

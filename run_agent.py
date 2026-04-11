@@ -4277,43 +4277,46 @@ class AIAgent:
         close that worker-local client, so retries and other requests never
         inherit a closed transport.
         """
-        _span = None
-        try:
-            _span = _tel.start_span(
-                "agent.llm_call",
-                attributes={
-                    "model": getattr(self, "model", None),
-                    "provider": getattr(self, "provider", None),
-                    "api_mode": getattr(self, "api_mode", None),
-                },
-            )
-        except Exception:
-            pass
+        import contextvars as _cv
+        from agent import telemetry as _tel
 
-        try:
+        # Capture the active OTel span context BEFORE spawning the thread so
+        # agent.llm_call becomes a proper child of whatever span is current.
+        _otel_ctx = _cv.copy_context()
+
+        with _tel.span(
+            "agent.llm_call",
+            model=getattr(self, "model", None) or "",
+            provider=getattr(self, "provider", None) or "",
+            api_mode=getattr(self, "api_mode", None) or "",
+            session_id=getattr(self, "session_id", None) or "",
+        ) as _span:
             result = {"response": None, "error": None}
             request_client_holder = {"client": None}
 
             def _call():
-                try:
-                    if self.api_mode == "codex_responses":
-                        request_client_holder["client"] = self._create_request_openai_client(reason="codex_stream_request")
-                        result["response"] = self._run_codex_stream(
-                            api_kwargs,
-                            client=request_client_holder["client"],
-                            on_first_delta=getattr(self, "_codex_on_first_delta", None),
-                        )
-                    elif self.api_mode == "anthropic_messages":
-                        result["response"] = self._anthropic_messages_create(api_kwargs)
-                    else:
-                        request_client_holder["client"] = self._create_request_openai_client(reason="chat_completion_request")
-                        result["response"] = request_client_holder["client"].chat.completions.create(**api_kwargs)
-                except Exception as e:
-                    result["error"] = e
-                finally:
-                    request_client = request_client_holder.get("client")
-                    if request_client is not None:
-                        self._close_request_openai_client(request_client, reason="request_complete")
+                def _inner():
+                    try:
+                        if self.api_mode == "codex_responses":
+                            request_client_holder["client"] = self._create_request_openai_client(reason="codex_stream_request")
+                            result["response"] = self._run_codex_stream(
+                                api_kwargs,
+                                client=request_client_holder["client"],
+                                on_first_delta=getattr(self, "_codex_on_first_delta", None),
+                            )
+                        elif self.api_mode == "anthropic_messages":
+                            result["response"] = self._anthropic_messages_create(api_kwargs)
+                        else:
+                            request_client_holder["client"] = self._create_request_openai_client(reason="chat_completion_request")
+                            result["response"] = request_client_holder["client"].chat.completions.create(**api_kwargs)
+                    except Exception as e:
+                        result["error"] = e
+                    finally:
+                        request_client = request_client_holder.get("client")
+                        if request_client is not None:
+                            self._close_request_openai_client(request_client, reason="request_complete")
+                # Run with the captured OTel context so this span is parented correctly
+                _otel_ctx.run(_inner)
 
             t = threading.Thread(target=_call, daemon=True)
             t.start()
@@ -4343,27 +4346,13 @@ class AIAgent:
                 raise result["error"]
             response = result["response"]
             try:
-                if _span is not None:
-                    usage = getattr(response, "usage", None)
-                    if usage:
-                        _span.set_attribute("input_tokens", getattr(usage, "prompt_tokens", 0))
-                        _span.set_attribute("output_tokens", getattr(usage, "completion_tokens", 0))
+                usage = getattr(response, "usage", None)
+                if usage:
+                    _span.set_attribute("input_tokens", getattr(usage, "prompt_tokens", 0))
+                    _span.set_attribute("output_tokens", getattr(usage, "completion_tokens", 0))
             except Exception:
                 pass
             return response
-        except Exception as _exc:
-            try:
-                if _span is not None:
-                    _span.set_attribute("error", type(_exc).__name__)
-            except Exception:
-                pass
-            raise
-        finally:
-            try:
-                if _span is not None:
-                    _tel.end_span(_span)
-            except Exception:
-                pass
 
     # ── Unified streaming API call ─────────────────────────────────────────
 

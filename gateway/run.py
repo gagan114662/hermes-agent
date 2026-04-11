@@ -1341,10 +1341,18 @@ class GatewayRunner:
         ) as _span:
             proc = await self._process_registry.spawn(session_id)
 
+            # Inject W3C traceparent so the subprocess span becomes a child trace
+            _tp_headers: dict = {}
+            try:
+                from opentelemetry.propagate import inject
+                inject(_tp_headers)
+            except Exception:
+                pass
             payload = _json.dumps({
                 "session_id": session_id,
                 "message": message,
                 "platform": platform,
+                "traceparent": _tp_headers.get("traceparent"),
             }) + "\n"
 
             proc.stdin.write(payload.encode())
@@ -6468,9 +6476,23 @@ class GatewayRunner:
         interrupt_monitor = asyncio.create_task(monitor_for_interrupt())
         
         try:
-            # Run in thread pool to not block
+            # Run in thread pool to not block.
+            # Capture OTel context + open a root span BEFORE entering the executor
+            # so agent.llm_call and agent.tool_call become children of this span.
+            import contextvars as _cv
+            from agent import telemetry as _tel
+            _platform_str = source.platform.value if source.platform else "unknown"
+            _gateway_ctx = _cv.copy_context()
             loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(None, run_sync)
+            with _tel.span(
+                "gateway.agent_request",
+                session_id=session_id,
+                platform=_platform_str,
+                user_id=getattr(source, "user_id", None) or "",
+                chat_id=str(getattr(source, "chat_id", None) or ""),
+                user_name=getattr(source, "user_name", None) or "",
+            ):
+                response = await loop.run_in_executor(None, lambda: _gateway_ctx.run(run_sync))
 
             # Track fallback model state: if the agent switched to a
             # fallback model during this run, persist it so /model shows
