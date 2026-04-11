@@ -498,6 +498,14 @@ class GatewayRunner:
         except Exception:
             pass
 
+        # Initialise OpenTelemetry tracing (Honeycomb or OTLP-compatible backend).
+        # Non-fatal — gateway continues if OTel packages are not installed.
+        try:
+            from agent.telemetry import configure_from_config
+            configure_from_config()
+        except Exception as _tel_err:
+            logger.debug("Telemetry init skipped: %s", _tel_err)
+
         # Ensure tirith security scanner is available (downloads if needed)
         try:
             from tools.tirith_security import ensure_installed
@@ -1323,34 +1331,43 @@ class GatewayRunner:
     ) -> str:
         """Send message to per-session stdio agent subprocess, return response."""
         import json as _json
-        proc = await self._process_registry.spawn(session_id)
+        from agent import telemetry as _tel
 
-        payload = _json.dumps({
-            "session_id": session_id,
-            "message": message,
-            "platform": platform,
-        }) + "\n"
+        with _tel.span(
+            "gateway.dispatch_subprocess",
+            session_id=session_id,
+            platform=platform,
+            message_length=len(message),
+        ) as _span:
+            proc = await self._process_registry.spawn(session_id)
 
-        proc.stdin.write(payload.encode())
-        await proc.stdin.drain()
+            payload = _json.dumps({
+                "session_id": session_id,
+                "message": message,
+                "platform": platform,
+            }) + "\n"
 
-        # Timeout is configurable; default 300s to accommodate long agent tasks
-        _timeout = float(
-            (_load_gateway_config().get("agent") or {}).get("subprocess_timeout", 300)
-        )
-        full_content = ""
-        while True:
-            line = await asyncio.wait_for(proc.stdout.readline(), timeout=_timeout)
-            if not line:
-                break
-            response = _json.loads(line.decode().strip())
-            if "delta" in response:
-                full_content += response["delta"]
-            if response.get("done"):
-                full_content = response.get("content", full_content)
-                break
+            proc.stdin.write(payload.encode())
+            await proc.stdin.drain()
 
-        return full_content
+            # Timeout is configurable; default 300s to accommodate long agent tasks
+            _timeout = float(
+                (_load_gateway_config().get("agent") or {}).get("subprocess_timeout", 300)
+            )
+            full_content = ""
+            while True:
+                line = await asyncio.wait_for(proc.stdout.readline(), timeout=_timeout)
+                if not line:
+                    break
+                response = _json.loads(line.decode().strip())
+                if "delta" in response:
+                    full_content += response["delta"]
+                if response.get("done"):
+                    full_content = response.get("content", full_content)
+                    break
+
+            _span.set_attribute("response_length", len(full_content))
+            return full_content
 
     async def _sweep_agent_processes(self):
         """Periodically reap idle agent processes."""

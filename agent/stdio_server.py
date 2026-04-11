@@ -129,29 +129,43 @@ class StdioServer:
                 "usage": {},
             }
 
-        agent = self._get_or_create_agent(session_id, platform)
-        history = _load_history(session_id)
+        from agent import telemetry as _tel
+        with _tel.span(
+            "stdio_server.handle_message",
+            session_id=session_id,
+            platform=platform,
+            message_length=len(message),
+        ) as _span:
+            agent = self._get_or_create_agent(session_id, platform)
+            history = _load_history(session_id)
 
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(
-            None,
-            lambda: agent.run_conversation(
-                message,
-                conversation_history=history,
-                task_id=session_id,
-            ),
-        )
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None,
+                lambda: agent.run_conversation(
+                    message,
+                    conversation_history=history,
+                    task_id=session_id,
+                ),
+            )
 
-        content = result.get("final_response") or result.get("error") or ""
-        return {
-            "session_id": session_id,
-            "done": True,
-            "content": content,
-            "usage": {
-                "input_tokens": getattr(agent, "session_prompt_tokens", 0),
-                "output_tokens": getattr(agent, "session_completion_tokens", 0),
-            },
-        }
+            content = result.get("final_response") or result.get("error") or ""
+            _span.set_attribute("response_length", len(content))
+            _span.set_attribute(
+                "input_tokens", getattr(agent, "session_prompt_tokens", 0)
+            )
+            _span.set_attribute(
+                "output_tokens", getattr(agent, "session_completion_tokens", 0)
+            )
+            return {
+                "session_id": session_id,
+                "done": True,
+                "content": content,
+                "usage": {
+                    "input_tokens": getattr(agent, "session_prompt_tokens", 0),
+                    "output_tokens": getattr(agent, "session_completion_tokens", 0),
+                },
+            }
 
     def _get_or_create_agent(self, session_id: str, platform: str):
         """Return cached agent or create one for this session."""
@@ -188,6 +202,13 @@ class StdioServer:
 
     async def run_forever(self) -> None:
         """Main loop: read JSON-L from stdin, write JSON-L to stdout."""
+        # Initialise telemetry once at server start (non-fatal).
+        try:
+            from agent.telemetry import configure_from_config
+            configure_from_config()
+        except Exception as _tel_err:
+            logger.debug("Telemetry init skipped: %s", _tel_err)
+
         loop = asyncio.get_event_loop()
 
         reader = asyncio.StreamReader()

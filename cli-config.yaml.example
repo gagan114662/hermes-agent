@@ -848,3 +848,18 @@ display:
 #   # Names and usernames are NOT affected (user-chosen, publicly visible).
 #   # Routing/delivery still uses the original values internally.
 #   redact_pii: false
+
+
+# =============================================================================
+# Telemetry (OpenTelemetry → Honeycomb)
+# =============================================================================
+# Sends traces to Honeycomb (or any OTLP-compatible backend).
+# Requires: pip install 'hermes-agent[otel]'
+#
+# telemetry:
+#   enabled: true
+#   honeycomb_api_key: "YOUR_HONEYCOMB_API_KEY"   # or set HONEYCOMB_API_KEY env var
+#   honeycomb_dataset: hermes-agent
+#   service_name: hermes-agent
+#   # Override endpoint for self-hosted OTLP collectors:
+#   # otlp_endpoint: "http://localhost:4318"
