@@ -556,6 +556,24 @@ def _resolve_session_by_name_or_id(name_or_id: str) -> Optional[str]:
 
 def cmd_chat(args):
     """Run interactive chat CLI."""
+    # ---------------------------------------------------------------------------
+    # Pipe mode: when stdin is not a TTY (e.g. cat file | hermes "analyze"),
+    # read the piped content and combine it with any positional query argument.
+    # This enables: cat file | hermes "analyze"  and  echo "hello" | hermes
+    # ---------------------------------------------------------------------------
+    if not sys.stdin.isatty():
+        try:
+            piped_content = sys.stdin.read().strip()
+        except Exception:
+            piped_content = ""
+        if piped_content:
+            existing_query = getattr(args, "query", None) or ""
+            if existing_query:
+                combined = f"{existing_query}\n\n{piped_content}"
+            else:
+                combined = piped_content
+            args.query = combined
+
     # Resolve --continue into --resume with the latest CLI session or by name
     continue_val = getattr(args, "continue_last", None)
     if continue_val and not getattr(args, "resume", None):

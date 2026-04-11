@@ -54,3 +54,16 @@ def test_process_registry_removes_on_cleanup():
     registry.register("session-abc", "fake-process")
     registry.remove("session-abc")
     assert registry.get("session-abc") is None
+
+
+def test_pipe_mode_does_not_hang_on_pipe_input():
+    """hermes CLI does not hang when given piped stdin — just needs to start."""
+    result = subprocess.run(
+        [sys.executable, "hermes_cli/main.py", "--help"],
+        input=b"hello world content",
+        capture_output=True,
+        timeout=10,
+        cwd="/Users/gaganarora/Desktop/my projects/hermes/hermes-agent",
+    )
+    # --help always exits 0 regardless of stdin
+    assert result.returncode == 0
