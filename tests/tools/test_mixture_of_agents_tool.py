@@ -11,11 +11,81 @@ moa = importlib.import_module("tools.mixture_of_agents_tool")
 def test_moa_defaults_track_current_openrouter_frontier_models():
     assert moa.REFERENCE_MODELS == [
         "anthropic/claude-opus-4.6",
-        "google/gemini-3-pro-preview",
+        "google/gemini-2.5-pro",
         "openai/gpt-5.4-pro",
         "deepseek/deepseek-v3.2",
     ]
     assert moa.AGGREGATOR_MODEL == "anthropic/claude-opus-4.6"
+
+
+def test_reference_models_does_not_contain_deprecated_gemini_3_pro_preview():
+    assert "google/gemini-3-pro-preview" not in moa.REFERENCE_MODELS
+
+
+@pytest.mark.asyncio
+async def test_reference_model_passes_max_tokens_to_api(monkeypatch):
+    """max_tokens must be forwarded to the API call so OpenRouter budgets correctly."""
+    captured = {}
+
+    async def fake_create(**kwargs):
+        captured.update(kwargs)
+        resp = MagicMock()
+        resp.choices = [MagicMock(message=MagicMock(content="ok", reasoning_content=None))]
+        return resp
+
+    fake_client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create))
+    )
+    monkeypatch.setattr(moa, "_get_openrouter_client", lambda: fake_client)
+
+    await moa._run_reference_model_safe("deepseek/deepseek-v3.2", "hello", max_tokens=16000, max_retries=1)
+
+    assert "max_tokens" in captured, "max_tokens was not forwarded to the API call"
+    assert captured["max_tokens"] == 16000
+
+
+@pytest.mark.asyncio
+async def test_aggregator_model_passes_max_tokens_to_api_when_set(monkeypatch):
+    """max_tokens must be forwarded by the aggregator when explicitly provided."""
+    captured = {}
+
+    async def fake_create(**kwargs):
+        captured.update(kwargs)
+        resp = MagicMock()
+        resp.choices = [MagicMock(message=MagicMock(content="synthesis", reasoning_content=None))]
+        return resp
+
+    fake_client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create))
+    )
+    monkeypatch.setattr(moa, "_get_openrouter_client", lambda: fake_client)
+
+    await moa._run_aggregator_model("sys", "user", max_tokens=8000)
+
+    assert "max_tokens" in captured, "max_tokens was not forwarded to the aggregator API call"
+    assert captured["max_tokens"] == 8000
+
+
+@pytest.mark.asyncio
+async def test_aggregator_model_defaults_max_tokens_to_32000_when_none(monkeypatch):
+    """When max_tokens is None (default), it must fall back to 32000 to avoid 402s."""
+    captured = {}
+
+    async def fake_create(**kwargs):
+        captured.update(kwargs)
+        resp = MagicMock()
+        resp.choices = [MagicMock(message=MagicMock(content="synthesis", reasoning_content=None))]
+        return resp
+
+    fake_client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create))
+    )
+    monkeypatch.setattr(moa, "_get_openrouter_client", lambda: fake_client)
+
+    await moa._run_aggregator_model("sys", "user")  # max_tokens defaults to None
+
+    assert "max_tokens" in captured, "max_tokens must always be sent to prevent 402 rejections"
+    assert captured["max_tokens"] == 32000, "default max_tokens must be 32000"
 
 
 @pytest.mark.asyncio

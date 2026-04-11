@@ -1,0 +1,113 @@
+version: "3.9"
+
+# Hermes Scale Deployment
+# Usage:
+#   cd scale/
+#   cp .env.example .env  # fill in your values
+#   docker compose -f docker-compose.scale.yml up -d
+#   docker compose -f docker-compose.scale.yml up -d --scale worker=8  # more workers
+
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: hermes
+      POSTGRES_USER: hermes
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hermes_dev}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+    ports:
+      - "${POSTGRES_PORT:-15432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hermes"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 300M
+
+  gateway:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    entrypoint: ["python3"]
+    command: ["scale/gateway.py"]
+    env_file:
+      - ../.env
+    environment:
+      DATABASE_URL: postgresql://hermes:${POSTGRES_PASSWORD:-hermes_dev}@postgres:5432/hermes
+      REDIS_URL: redis://redis:6379
+      GATEWAY_PORT: "8443"
+      HERMES_HOME: /root/.hermes
+    volumes:
+      - ${HOME}/.hermes:/root/.hermes:ro
+      - hermes-data:/opt/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "${GATEWAY_PORT:-8443}:8443"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  worker:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    entrypoint: ["python3"]
+    command: ["scale/worker.py"]
+    env_file:
+      - ../.env
+    environment:
+      DATABASE_URL: postgresql://hermes:${POSTGRES_PASSWORD:-hermes_dev}@postgres:5432/hermes
+      REDIS_URL: redis://redis:6379
+      HERMES_HOME: /root/.hermes
+    volumes:
+      - ${HOME}/.hermes:/root/.hermes
+      - hermes-data:/opt/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      replicas: ${WORKER_REPLICAS:-4}
+      resources:
+        limits:
+          memory: 2G
+
+volumes:
+  postgres-data:
+  redis-data:
+  hermes-data:
+    external: true
+    name: hermes-agent_hermes-data

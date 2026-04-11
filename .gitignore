@@ -32,10 +32,18 @@ data/*
 node_modules/
 browser-use/
 agent-browser/
-# Private keys
+# Private keys and secrets
 *.ppk
 *.pem
 privvy*
+*.key
+*.p12
+*.pfx
+*.jks
+auth.json
+secrets.json
+.secrets
+.secrets/
 images/
 __pycache__/
 hermes_agent.egg-info/

@@ -408,6 +408,37 @@ CONTEXT_FILE_MAX_CHARS = 20_000
 CONTEXT_TRUNCATE_HEAD_RATIO = 0.7
 CONTEXT_TRUNCATE_TAIL_RATIO = 0.2
 
+# ---------------------------------------------------------------------------
+# Static / dynamic prompt boundary — ported from CC's prompts.ts
+#
+# The system prompt is split into two parts:
+#   STATIC PREFIX  — identity, tools, skills, context files, platform hints.
+#                    Stable across turns → cached by Anthropic prefix cache.
+#   DYNAMIC SUFFIX — memory, timestamp, token budget, MCP state, ephemeral.
+#                    Changes each turn → NOT cached (or cached separately).
+#
+# prompt_caching.py respects this marker: when present, only the text BEFORE
+# the boundary gets a cache_control block, so cache is not invalidated when
+# memory or timestamps change mid-session.
+#
+# Usage: build_static_prefix() + DYNAMIC_BOUNDARY + build_dynamic_suffix()
+# ---------------------------------------------------------------------------
+DYNAMIC_BOUNDARY = "\n\n<!-- HERMES_DYNAMIC_START -->\n\n"
+
+
+def split_static_dynamic(system_prompt: str) -> tuple[str, str]:
+    """Split a system prompt string into (static_prefix, dynamic_suffix).
+
+    Returns (full_prompt, "") when no DYNAMIC_BOUNDARY is found — this means
+    the whole prompt is treated as static (safe fallback for subagents).
+    """
+    if DYNAMIC_BOUNDARY in system_prompt:
+        idx = system_prompt.index(DYNAMIC_BOUNDARY)
+        static = system_prompt[:idx]
+        dynamic = system_prompt[idx + len(DYNAMIC_BOUNDARY):]
+        return static, dynamic
+    return system_prompt, ""
+
 
 # =========================================================================
 # Skills prompt cache
@@ -1023,7 +1054,11 @@ def _load_cursorrules(cwd_path: Path) -> str:
     return _truncate_content(cursorrules_content, ".cursorrules")
 
 
-def build_context_files_prompt(cwd: Optional[str] = None, skip_soul: bool = False) -> str:
+def build_context_files_prompt(
+    cwd: Optional[str] = None,
+    skip_soul: bool = False,
+    agent_type: Optional[str] = None,
+) -> str:
     """Discover and load context files for the system prompt.
 
     Priority (first found wins — only ONE project context type is loaded):
@@ -1033,6 +1068,8 @@ def build_context_files_prompt(cwd: Optional[str] = None, skip_soul: bool = Fals
       4. .cursorrules / .cursor/rules/*.mdc  (cwd only)
 
     SOUL.md from HERMES_HOME is independent and always included when present.
+    Context Library (~/.hermes/context/*.md) is always appended — agent-type
+    filtering applies when *agent_type* is provided.
     Each context source is capped at 20,000 chars.
 
     When *skip_soul* is True, SOUL.md is not included here (it was already
@@ -1059,6 +1096,15 @@ def build_context_files_prompt(cwd: Optional[str] = None, skip_soul: bool = Fals
         soul_content = load_soul_md()
         if soul_content:
             sections.append(soul_content)
+
+    # Context Library — ~/.hermes/context/*.md (always included, agent-filtered)
+    try:
+        from agent.context_library import load_context_library
+        ctx_lib = load_context_library(agent_type=agent_type)
+        if ctx_lib:
+            sections.append(ctx_lib)
+    except Exception as e:
+        logger.debug("Could not load context library: %s", e)
 
     if not sections:
         return ""

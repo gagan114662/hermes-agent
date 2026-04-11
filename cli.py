@@ -120,6 +120,18 @@ def _parse_reasoning_config(effort: str) -> dict | None:
     return result
 
 
+def _parse_service_tier_config(raw: str) -> str | None:
+    """Parse a persisted service-tier preference into a Responses API value."""
+    value = str(raw or "").strip().lower()
+    if not value or value in {"normal", "default", "standard", "off", "none"}:
+        return None
+    if value in {"fast", "priority", "on"}:
+        return "priority"
+    logger.warning("Unknown service_tier '%s', ignoring", raw)
+    return None
+
+
+
 def _get_chrome_debug_candidates(system: str) -> list[str]:
     """Return likely browser executables for local CDP auto-launch."""
     candidates: list[str] = []
@@ -1058,7 +1070,7 @@ def _cprint(text: str):
 
 
 # ---------------------------------------------------------------------------
-# File-drop detection — extracted as a pure function for testability.
+# File-drop / local attachment detection — extracted as pure helpers for tests.
 # ---------------------------------------------------------------------------
 
 _IMAGE_EXTENSIONS = frozenset({
@@ -1067,12 +1079,103 @@ _IMAGE_EXTENSIONS = frozenset({
 })
 
 
-def _detect_file_drop(user_input: str) -> "dict | None":
-    """Detect if *user_input* is a dragged/pasted file path, not a slash command.
+from hermes_constants import is_termux as _is_termux_environment
 
-    When a user drags a file into the terminal, macOS pastes the absolute path
-    (e.g. ``/Users/roland/Desktop/file.png``) which starts with ``/`` and would
-    otherwise be mistaken for a slash command.
+
+def _termux_example_image_path(filename: str = "cat.png") -> str:
+    """Return a realistic example media path for the current Termux setup."""
+    candidates = [
+        os.path.expanduser("~/storage/shared"),
+        "/sdcard",
+        "/storage/emulated/0",
+        "/storage/self/primary",
+    ]
+    for root in candidates:
+        if os.path.isdir(root):
+            return os.path.join(root, "Pictures", filename)
+    return os.path.join("~/storage/shared", "Pictures", filename)
+
+
+def _split_path_input(raw: str) -> tuple[str, str]:
+    """Split a leading file path token from trailing free-form text.
+
+    Supports quoted paths and backslash-escaped spaces so callers can accept
+    inputs like:
+      /tmp/pic.png describe this
+      ~/storage/shared/My\ Photos/cat.png what is this?
+      "/storage/emulated/0/DCIM/Camera/cat 1.png" summarize
+    """
+    raw = str(raw or "").strip()
+    if not raw:
+        return "", ""
+
+    if raw[0] in {'"', "'"}:
+        quote = raw[0]
+        pos = 1
+        while pos < len(raw):
+            ch = raw[pos]
+            if ch == '\\' and pos + 1 < len(raw):
+                pos += 2
+                continue
+            if ch == quote:
+                token = raw[1:pos]
+                remainder = raw[pos + 1 :].strip()
+                return token, remainder
+            pos += 1
+        return raw[1:], ""
+
+    pos = 0
+    while pos < len(raw):
+        ch = raw[pos]
+        if ch == '\\' and pos + 1 < len(raw) and raw[pos + 1] == ' ':
+            pos += 2
+        elif ch == ' ':
+            break
+        else:
+            pos += 1
+
+    token = raw[:pos].replace('\\ ', ' ')
+    remainder = raw[pos:].strip()
+    return token, remainder
+
+
+def _resolve_attachment_path(raw_path: str) -> Path | None:
+    """Resolve a user-supplied local attachment path.
+
+    Accepts quoted or unquoted paths, expands ``~`` and env vars, and resolves
+    relative paths from ``TERMINAL_CWD`` when set (matching terminal tool cwd).
+    Returns ``None`` when the path does not resolve to an existing file.
+    """
+    token = str(raw_path or "").strip()
+    if not token:
+        return None
+
+    if (token.startswith('"') and token.endswith('"')) or (token.startswith("'") and token.endswith("'")):
+        token = token[1:-1].strip()
+    if not token:
+        return None
+
+    expanded = os.path.expandvars(os.path.expanduser(token))
+    path = Path(expanded)
+    if not path.is_absolute():
+        base_dir = Path(os.getenv("TERMINAL_CWD", os.getcwd()))
+        path = base_dir / path
+
+    try:
+        resolved = path.resolve()
+    except Exception:
+        resolved = path
+
+    if not resolved.exists() or not resolved.is_file():
+        return None
+    return resolved
+
+
+def _detect_file_drop(user_input: str) -> "dict | None":
+    """Detect if *user_input* starts with a real local file path.
+
+    This catches dragged/pasted paths before they are mistaken for slash
+    commands, and also supports Termux-friendly paths like ``~/storage/...``.
 
     Returns a dict on match::
 
@@ -1084,34 +1187,104 @@ def _detect_file_drop(user_input: str) -> "dict | None":
 
     Returns ``None`` when the input is not a real file path.
     """
-    if not isinstance(user_input, str) or not user_input.startswith("/"):
+    if not isinstance(user_input, str):
         return None
 
-    # Walk the string absorbing backslash-escaped spaces ("\ ").
-    raw = user_input
-    pos = 0
-    while pos < len(raw):
-        ch = raw[pos]
-        if ch == '\\' and pos + 1 < len(raw) and raw[pos + 1] == ' ':
-            pos += 2  # skip escaped space
-        elif ch == ' ':
-            break
-        else:
-            pos += 1
-
-    first_token_raw = raw[:pos]
-    first_token = first_token_raw.replace('\\ ', ' ')
-    drop_path = Path(first_token)
-
-    if not drop_path.exists() or not drop_path.is_file():
+    stripped = user_input.strip()
+    if not stripped:
         return None
 
-    remainder = raw[pos:].strip()
+    starts_like_path = (
+        stripped.startswith("/")
+        or stripped.startswith("~")
+        or stripped.startswith("./")
+        or stripped.startswith("../")
+        or stripped.startswith('"/')
+        or stripped.startswith('"~')
+        or stripped.startswith("'/")
+        or stripped.startswith("'~")
+    )
+    if not starts_like_path:
+        return None
+
+    first_token, remainder = _split_path_input(stripped)
+    drop_path = _resolve_attachment_path(first_token)
+    if drop_path is None:
+        return None
+
     return {
         "path": drop_path,
         "is_image": drop_path.suffix.lower() in _IMAGE_EXTENSIONS,
         "remainder": remainder,
     }
+
+
+def _format_image_attachment_badges(attached_images: list[Path], image_counter: int, width: int | None = None) -> str:
+    """Format the attached-image badge row for the interactive CLI.
+
+    Narrow terminals such as Termux should get a compact summary that fits on a
+    single row, while wider terminals can show the classic per-image badges.
+    """
+    if not attached_images:
+        return ""
+
+    width = width or shutil.get_terminal_size((80, 24)).columns
+
+    def _trunc(name: str, limit: int) -> str:
+        return name if len(name) <= limit else name[: max(1, limit - 3)] + "..."
+
+    if width < 52:
+        if len(attached_images) == 1:
+            return f"[📎 {_trunc(attached_images[0].name, 20)}]"
+        return f"[📎 {len(attached_images)} images attached]"
+
+    if width < 80:
+        if len(attached_images) == 1:
+            return f"[📎 {_trunc(attached_images[0].name, 32)}]"
+        first = _trunc(attached_images[0].name, 20)
+        extra = len(attached_images) - 1
+        return f"[📎 {first}] [+{extra}]"
+
+    base = image_counter - len(attached_images) + 1
+    return " ".join(
+        f"[📎 Image #{base + i}]"
+        for i in range(len(attached_images))
+    )
+
+
+def _should_auto_attach_clipboard_image_on_paste(pasted_text: str) -> bool:
+    """Auto-attach clipboard images only for image-only paste gestures."""
+    return not pasted_text.strip()
+
+
+def _collect_query_images(query: str | None, image_arg: str | None = None) -> tuple[str, list[Path]]:
+    """Collect local image attachments for single-query CLI flows."""
+    message = query or ""
+    images: list[Path] = []
+
+    if isinstance(message, str):
+        dropped = _detect_file_drop(message)
+        if dropped and dropped.get("is_image"):
+            images.append(dropped["path"])
+            message = dropped["remainder"] or f"[User attached image: {dropped['path'].name}]"
+
+    if image_arg:
+        explicit_path = _resolve_attachment_path(image_arg)
+        if explicit_path is None:
+            raise ValueError(f"Image file not found: {image_arg}")
+        if explicit_path.suffix.lower() not in _IMAGE_EXTENSIONS:
+            raise ValueError(f"Not a supported image file: {explicit_path}")
+        images.append(explicit_path)
+
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for img in images:
+        key = str(img)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(img)
+    return message, deduped
 
 
 class ChatConsole:
@@ -2402,6 +2575,18 @@ class HermesCLI:
             return "Installing skill..."
         if cmd_lower.startswith("/skills"):
             return "Processing skills command..."
+        if cmd_lower.startswith("/skillnew"):
+            return "Generating skill..."
+        if cmd_lower.startswith("/skillcheck"):
+            return "Checking skill quality..."
+        if cmd_lower.startswith("/skilltest"):
+            return "Running spec-anchored tests..."
+        if cmd_lower.startswith("/specnew"):
+            return "Generating HermesSpec..."
+        if cmd_lower.startswith("/specexec"):
+            return "Executing spec tasks..."
+        if cmd_lower.startswith("/revengineer"):
+            return "Scanning codebase..."
         if cmd_lower == "/reload-mcp":
             return "Reloading MCP servers..."
         if cmd_lower.startswith("/browser"):
@@ -4077,6 +4262,16 @@ class HermesCLI:
         # Parse --provider and --global flags
         model_input, explicit_provider, persist_global = parse_model_flags(raw_args)
 
+        user_provs = None
+        custom_provs = None
+        try:
+            from hermes_cli.config import load_config
+            cfg = load_config()
+            user_provs = cfg.get("providers")
+            custom_provs = cfg.get("custom_providers")
+        except Exception:
+            pass
+
         # No args at all: show available providers + models
         if not model_input and not explicit_provider:
             model_display = self.model or "unknown"
@@ -4086,18 +4281,10 @@ class HermesCLI:
 
             # Show authenticated providers with top models
             try:
-                # Load user providers from config
-                user_provs = None
-                try:
-                    from hermes_cli.config import load_config
-                    cfg = load_config()
-                    user_provs = cfg.get("providers")
-                except Exception:
-                    pass
-
                 providers = list_authenticated_providers(
                     current_provider=self.provider or "",
                     user_providers=user_provs,
+                    custom_providers=custom_provs,
                     max_models=6,
                 )
                 if providers:
@@ -4138,6 +4325,8 @@ class HermesCLI:
             current_api_key=self.api_key or "",
             is_global=persist_global,
             explicit_provider=explicit_provider,
+            user_providers=user_provs,
+            custom_providers=custom_provs,
         )
 
         if not result.success:
@@ -4871,6 +5060,8 @@ class HermesCLI:
             self._show_usage()
         elif canonical == "insights":
             self._show_insights(cmd_original)
+        elif canonical == "onboard":
+            self._show_onboard(cmd_original)
         elif canonical == "paste":
             self._handle_paste_command()
         elif canonical == "image":
@@ -4925,6 +5116,12 @@ class HermesCLI:
             self._handle_skin_command(cmd_original)
         elif canonical == "voice":
             self._handle_voice_command(cmd_original)
+        elif canonical == "lineage":
+            self._show_lineage(cmd_original)
+        elif canonical == "costmap":
+            self._show_costmap()
+        elif canonical in ("marketplace", "market"):
+            self._handle_marketplace_command(cmd_original)
         else:
             # Check for user-defined quick commands (bypass agent loop, no LLM call)
             base_cmd = cmd_lower.split()[0]
@@ -6034,6 +6231,49 @@ Then list:
         else:
             _cprint(f"  {_ACCENT}✓ {feature_name} set to {label} (session only){_RST}")
 
+    def _handle_fast_command(self, cmd: str):
+        """Handle /fast — toggle fast mode (OpenAI Priority Processing / Anthropic Fast Mode)."""
+        if not self._fast_command_available():
+            _cprint("  (._.) /fast is only available for models that support fast mode (OpenAI Priority Processing or Anthropic Fast Mode).")
+            return
+
+        # Determine the branding for the current model
+        try:
+            from hermes_cli.models import _is_anthropic_fast_model
+            agent = getattr(self, "agent", None)
+            model = getattr(agent, "model", None) or getattr(self, "model", None)
+            feature_name = "Anthropic Fast Mode" if _is_anthropic_fast_model(model) else "Priority Processing"
+        except Exception:
+            feature_name = "Fast mode"
+
+        parts = cmd.strip().split(maxsplit=1)
+        if len(parts) < 2 or parts[1].strip().lower() == "status":
+            status = "fast" if self.service_tier == "priority" else "normal"
+            _cprint(f"  {_GOLD}{feature_name}: {status}{_RST}")
+            _cprint(f"  {_DIM}Usage: /fast [normal|fast|status]{_RST}")
+            return
+
+        arg = parts[1].strip().lower()
+
+        if arg in {"fast", "on"}:
+            self.service_tier = "priority"
+            saved_value = "fast"
+            label = "FAST"
+        elif arg in {"normal", "off"}:
+            self.service_tier = None
+            saved_value = "normal"
+            label = "NORMAL"
+        else:
+            _cprint(f"  {_DIM}(._.) Unknown argument: {arg}{_RST}")
+            _cprint(f"  {_DIM}Usage: /fast [normal|fast|status]{_RST}")
+            return
+
+        self.agent = None  # Force agent re-init with new service-tier config
+        if save_config_value("agent.service_tier", saved_value):
+            _cprint(f"  {_GOLD}✓ {feature_name} set to {label} (saved to config){_RST}")
+        else:
+            _cprint(f"  {_GOLD}✓ {feature_name} set to {label} (session only){_RST}")
+
     def _on_reasoning(self, reasoning_text: str):
         """Callback for intermediate reasoning display during tool-call loops."""
         if not reasoning_text:
@@ -6166,6 +6406,363 @@ Then list:
             logging.getLogger().setLevel(logging.INFO)
             for quiet_logger in ('tools', 'run_agent', 'trajectory_compressor', 'cron', 'hermes_cli'):
                 logging.getLogger(quiet_logger).setLevel(logging.ERROR)
+
+    # ------------------------------------------------------------------
+    # /onboard — 3-3-3 journey stage + guidance
+    # ------------------------------------------------------------------
+
+    def _show_onboard(self, command: str = "/onboard"):
+        """Show the user's current journey stage and next recommended action."""
+        parts = command.strip().split(None, 1)
+        sub = parts[1].strip().lower() if len(parts) > 1 else "status"
+
+        try:
+            from agent.onboarding import (
+                get_journey_stage,
+                get_onboarding_state,
+                reset_onboarding,
+            )
+        except Exception as exc:
+            print(f"  Onboarding error: {exc}")
+            return
+
+        if sub == "reset":
+            print("  This will reset your onboarding counter to 0.")
+            print("  Type 'yes' to confirm, anything else to cancel.")
+            try:
+                answer = input("  > ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                answer = ""
+            if answer == "yes":
+                reset_onboarding()
+                print("  Counter reset. You're back at session 0 / day-1 stage.")
+            else:
+                print("  Cancelled.")
+            return
+
+        if sub == "debug":
+            state = get_onboarding_state()
+            print("\n  🔍 Onboarding state (raw)")
+            print(f"  {'─' * 40}")
+            for k, v in state.items():
+                print(f"  {k:<24} {v}")
+            print(f"  {'─' * 40}")
+            return
+
+        # Default: status
+        stage = get_journey_stage()
+        stage_icons = {1: "🌱", 2: "🔧", 3: "🚀"}
+        icon = stage_icons.get(stage.stage, "•")
+
+        print(f"\n  {icon} Hermes Journey — {stage.label} stage")
+        print(f"  {'─' * 50}")
+        print(f"  Sessions so far:  {stage.session_count}")
+        print(f"  Stage:            {stage.stage}/3  ({stage.headline})")
+        print(f"  Next command:     {stage.next_command}")
+        print()
+        print(f"  {stage.tip}")
+        print()
+
+        # Stage-specific secondary suggestions
+        if stage.stage == 1:
+            print("  Other commands worth knowing at this stage:")
+            print("    /specnew <description>   — generate a spec + context library")
+            print("    /help                    — list all available commands")
+        elif stage.stage == 2:
+            print("  Other commands worth knowing at this stage:")
+            print("    /skillnew <description>  — create a reusable skill")
+            print("    /skilltest <skill-name>  — run the 5-test protocol")
+            print("    /specnew                 — update or add a new spec")
+        else:
+            print("  Other commands worth knowing at this stage:")
+            print("    /costmap                 — per-task token cost breakdown")
+            print("    /lineage <file>          — trace which goal wrote a file")
+            print("    /skillnew                — keep automating new workflows")
+
+        print(f"  {'─' * 50}")
+        print(f"  Run /onboard reset to restart the counter from scratch.")
+
+    # ------------------------------------------------------------------
+    # /lineage <file>  — show why a file was written
+    # ------------------------------------------------------------------
+
+    def _show_lineage(self, command: str = "/lineage"):
+        """Show the write lineage (goal chain) for a file."""
+        parts = command.strip().split(None, 1)
+        if len(parts) < 2 or not parts[1].strip():
+            print("  Usage: /lineage <file-path>")
+            print("  Shows which agent goals caused the file to be written.")
+            return
+
+        path_arg = parts[1].strip()
+        try:
+            from agent.lineage import get_lineage
+            records = get_lineage(path_arg, days=90)
+        except Exception as exc:
+            print(f"  Lineage error: {exc}")
+            return
+
+        if not records:
+            print(f"  No lineage records found for: {path_arg}")
+            print("  (Records are created when hermes writes files via write_file.)")
+            return
+
+        print(f"\n  📄 Lineage for: {path_arg}")
+        print(f"  {'─' * 50}")
+        for i, rec in enumerate(records):
+            ts = rec.get("ts", "")[:19].replace("T", " ")
+            goal = rec.get("goal") or "(no goal recorded)"
+            session = rec.get("session_id", "")[:12]
+            model = rec.get("model", "")
+            meta = "  ".join(x for x in [session, model] if x)
+            print(f"  [{i+1}] {ts}")
+            print(f"       Goal:    {goal[:120]}")
+            if meta:
+                print(f"       Context: {meta}")
+        print(f"  {'─' * 50}")
+        print(f"  {len(records)} write(s) recorded")
+
+    # ------------------------------------------------------------------
+    # /costmap  — per-task cost breakdown for this session
+    # ------------------------------------------------------------------
+
+    def _show_costmap(self):
+        """Show per-task token cost breakdown for delegate_task calls this session."""
+        try:
+            from agent.lineage import get_session_costs
+            costs = get_session_costs()
+        except Exception as exc:
+            print(f"  Costmap error: {exc}")
+            return
+
+        if not costs:
+            print("  No delegate_task cost data yet.")
+            print("  Costs appear here after /task or delegate_task calls complete.")
+            return
+
+        print(f"\n  💰 Task Cost Map — {len(costs)} delegated task(s) this session")
+        print(f"  {'─' * 68}")
+        total_usd = 0.0
+        total_in = 0
+        total_out = 0
+        for rec in costs:
+            ts = rec.get("ts", "")[:19].replace("T", " ")
+            label = (rec.get("label") or "?")[:38]
+            model = (rec.get("model") or "?")[:24]
+            in_tok = rec.get("input_tokens", 0)
+            out_tok = rec.get("output_tokens", 0)
+            dur = rec.get("duration_seconds", 0)
+            status = rec.get("status", "?")
+            icon = "✓" if status == "completed" else "✗"
+            cost_usd = rec.get("cost_usd")
+            cost_str = f"~${cost_usd:.4f}" if cost_usd is not None else "  n/a  "
+            total_in += in_tok
+            total_out += out_tok
+            if cost_usd is not None:
+                total_usd += cost_usd
+            print(f"  {icon} {label:<38}  {cost_str:>10}  ({in_tok:>7,}in / {out_tok:>7,}out)  {dur:.1f}s")
+
+        print(f"  {'─' * 68}")
+        total_str = f"~${total_usd:.4f}" if total_usd else "  n/a  "
+        print(f"  {'TOTAL':<38}  {total_str:>10}  ({total_in:>7,}in / {total_out:>7,}out)")
+
+    # ------------------------------------------------------------------
+    # /marketplace — community skill browser + installer
+    # ------------------------------------------------------------------
+
+    def _handle_marketplace_command(self, command: str = "/marketplace"):
+        """Handle /marketplace [search|install|list|info|sync] — community skills."""
+        parts = command.strip().split(None, 2)
+        sub = parts[1].strip().lower() if len(parts) > 1 else "list"
+        arg = parts[2].strip() if len(parts) > 2 else ""
+
+        if sub in ("list", "ls"):
+            self._marketplace_list()
+        elif sub == "search":
+            self._marketplace_search(arg)
+        elif sub == "install":
+            self._marketplace_install(arg)
+        elif sub == "info":
+            self._marketplace_info(arg)
+        elif sub == "sync":
+            self._marketplace_sync()
+        else:
+            print("  Usage: /marketplace <subcommand>")
+            print("  Subcommands:")
+            print("    list                  — show installed skills with provenance")
+            print("    search <query>        — search the community index")
+            print("    install <skill-id>    — install a skill from the community index")
+            print("    info <skill-id>       — show provenance for an installed skill")
+            print("    sync                  — scan skills dirs and register any untracked skills")
+
+    def _marketplace_list(self):
+        """List all installed skills with provenance metadata."""
+        try:
+            from agent.components_registry import list_installed, try_auto_register
+            from agent.skill_utils import get_all_skills_dirs
+        except Exception as exc:
+            print(f"  Marketplace error: {exc}")
+            return
+
+        # Lazy sync: register any SKILL.md files not yet in the registry
+        for skills_dir in get_all_skills_dirs():
+            if not skills_dir.is_dir():
+                continue
+            for skill_dir in skills_dir.iterdir():
+                if (skill_dir / "SKILL.md").exists():
+                    try:
+                        try_auto_register(skill_dir.name, skills_base_dir=str(skills_dir))
+                    except Exception:
+                        pass
+
+        installed = list_installed()
+        if not installed:
+            print("  No skills registered yet.")
+            print("  Create one with /skillnew, or install from the community with")
+            print("  /marketplace install <skill-id>.")
+            return
+
+        print(f"\n  📦 Installed Skills ({len(installed)})")
+        print(f"  {'─' * 64}")
+        for s in installed:
+            source_icon = {"community": "🌐", "local": "🏠", "git": "🔗", "url": "🔗"}.get(
+                s.get("source", "local"), "•"
+            )
+            sid = s.get("id", "?")
+            ver = s.get("version", "local")
+            author = s.get("author", "")
+            desc = (s.get("description") or "")[:50]
+            ts = (s.get("installed_at", "") or "")[:10]
+            author_str = f"  by {author}" if author else ""
+            print(f"  {source_icon} {sid:<28} v{ver:<10} {ts}{author_str}")
+            if desc:
+                print(f"       {desc}")
+        print(f"  {'─' * 64}")
+
+    def _marketplace_search(self, query: str):
+        """Search the community skill index."""
+        if not query:
+            print("  Usage: /marketplace search <query>")
+            return
+        print(f"  🔍 Searching community index for: {query!r} …")
+        try:
+            from hermes_cli.marketplace import fetch_index, search_index, get_index_url
+            index = fetch_index()
+            results = search_index(index, query)
+        except Exception as exc:
+            print(f"  Error fetching index: {exc}")
+            return
+
+        if not results:
+            print(f"  No community skills matched '{query}'.")
+            return
+
+        print(f"\n  Found {len(results)} skill(s)  (index: {get_index_url()[:60]})")
+        print(f"  {'─' * 64}")
+        for s in results:
+            tags = "  [" + ", ".join(s.tags[:4]) + "]" if s.tags else ""
+            print(f"  🌐 {s.id:<28} v{s.version:<8} by {s.author or '?'}")
+            print(f"       {s.description[:70]}{tags}")
+        print(f"  {'─' * 64}")
+        print("  Run /marketplace install <skill-id> to install any of the above.")
+
+    def _marketplace_install(self, skill_id: str):
+        """Install a skill from the community index."""
+        if not skill_id:
+            print("  Usage: /marketplace install <skill-id>")
+            return
+
+        print(f"  📥 Fetching community index …")
+        try:
+            from hermes_cli.marketplace import fetch_index, search_index, install_from_entry
+            index = fetch_index()
+            matches = search_index(index, skill_id)
+            # Exact id match first
+            exact = [s for s in matches if s.id == skill_id]
+            entry = exact[0] if exact else (matches[0] if matches else None)
+        except Exception as exc:
+            print(f"  Error: {exc}")
+            return
+
+        if entry is None:
+            print(f"  No community skill found with id '{skill_id}'.")
+            print("  Use /marketplace search <query> to browse available skills.")
+            return
+
+        if entry.id != skill_id:
+            print(f"  No exact match for '{skill_id}'. Did you mean '{entry.id}'?")
+            print(f"  Run /marketplace install {entry.id} to install it.")
+            return
+
+        print(f"  Installing '{entry.id}' v{entry.version} by {entry.author or '?'} …")
+        result = install_from_entry(entry)
+        if result.success:
+            print(f"  ✅ Installed to {result.path}")
+        else:
+            if "Already installed" in result.error:
+                print(f"  ⚠️  {result.error}")
+                print(f"  Run /marketplace install {skill_id} --force (not yet supported via CLI;")
+                print("  delete the skill directory manually and re-install).")
+            else:
+                print(f"  ❌ Install failed: {result.error}")
+
+    def _marketplace_info(self, skill_id: str):
+        """Show provenance info for an installed skill."""
+        if not skill_id:
+            print("  Usage: /marketplace info <skill-id>")
+            return
+        try:
+            from agent.components_registry import get_provenance
+            rec = get_provenance(skill_id)
+        except Exception as exc:
+            print(f"  Error: {exc}")
+            return
+
+        if rec is None:
+            print(f"  No provenance record for '{skill_id}'.")
+            print("  Run /marketplace sync to register skills from disk.")
+            return
+
+        source_icon = {"community": "🌐", "local": "🏠", "git": "🔗", "url": "🔗"}.get(
+            rec.get("source", "local"), "•"
+        )
+        print(f"\n  {source_icon} {skill_id}")
+        print(f"  {'─' * 50}")
+        for key in ("version", "source", "origin", "author", "description",
+                    "installed_at", "path", "checksum"):
+            val = rec.get(key, "")
+            if val:
+                print(f"  {key:<16} {val}")
+        print(f"  {'─' * 50}")
+
+    def _marketplace_sync(self):
+        """Scan skills directories and register any untracked skills."""
+        try:
+            from agent.components_registry import try_auto_register
+            from agent.skill_utils import get_all_skills_dirs
+        except Exception as exc:
+            print(f"  Sync error: {exc}")
+            return
+
+        registered = 0
+        skipped = 0
+        for skills_dir in get_all_skills_dirs():
+            if not skills_dir.is_dir():
+                continue
+            for skill_dir in skills_dir.iterdir():
+                if not skill_dir.is_dir():
+                    continue
+                if (skill_dir / "SKILL.md").exists():
+                    ok = try_auto_register(skill_dir.name,
+                                           skills_base_dir=str(skills_dir))
+                    if ok:
+                        registered += 1
+                    else:
+                        skipped += 1
+
+        print(f"  ✅ Sync complete — {registered} skill(s) registered, {skipped} skipped.")
+        if registered:
+            print("  Run /marketplace list to see the full inventory.")
 
     def _show_insights(self, command: str = "/insights"):
         """Show usage insights and analytics from session history."""
@@ -7870,6 +8467,20 @@ Then list:
         from hermes_cli.plugins import get_plugin_manager
         get_plugin_manager()._cli_ref = self
 
+        # 3-3-3 onboarding: bump session counter and surface a tip on early sessions
+        try:
+            from agent.onboarding import record_session as _record_session
+            _ob_stage = _record_session()
+            if _ob_stage.session_count <= 3:
+                _tip_line = (
+                    f"[dim]💡 Session {_ob_stage.session_count} · {_ob_stage.label} stage "
+                    f"— try [bold]{_ob_stage.next_command}[/bold] to get the most out of Hermes"
+                    f"  (/onboard for details)[/dim]"
+                )
+                self.console.print(_tip_line)
+        except Exception:
+            pass
+
         # Config file watcher — detect mcp_servers changes and auto-reload
         from hermes_cli.config import get_config_path as _get_config_path
         _cfg_path = _get_config_path()
@@ -8324,7 +8935,7 @@ Then list:
             # Normalise line endings — Windows \r\n and old Mac \r both become \n
             # so the 5-line collapse threshold and display are consistent.
             pasted_text = pasted_text.replace('\r\n', '\n').replace('\r', '\n')
-            if self._try_attach_clipboard_image():
+            if _should_auto_attach_clipboard_image_on_paste(pasted_text) and self._try_attach_clipboard_image():
                 event.app.invalidate()
             if pasted_text:
                 line_count = pasted_text.count('\n')

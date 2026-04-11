@@ -49,6 +49,9 @@ def get_memory_dir() -> Path:
 # should prefer get_memory_dir().
 MEMORY_DIR = get_memory_dir()
 
+# Paths to specific memory files
+TEAM_MEMORY_FILE = str(MEMORY_DIR / "team.md")
+
 ENTRY_DELIMITER = "\n§\n"
 
 # Shared team memory file — readable/writable by all agent instances/sessions
@@ -111,13 +114,15 @@ class MemoryStore:
         Tool responses always reflect this live state.
     """
 
-    def __init__(self, memory_char_limit: int = 2200, user_char_limit: int = 1375):
+    def __init__(self, memory_char_limit: int = 2200, user_char_limit: int = 1375, team_char_limit: int = 2200):
         self.memory_entries: List[str] = []
         self.user_entries: List[str] = []
+        self.team_entries: List[str] = []
         self.memory_char_limit = memory_char_limit
         self.user_char_limit = user_char_limit
+        self.team_char_limit = team_char_limit
         # Frozen snapshot for system prompt -- set once at load_from_disk()
-        self._system_prompt_snapshot: Dict[str, str] = {"memory": "", "user": ""}
+        self._system_prompt_snapshot: Dict[str, str] = {"memory": "", "user": "", "team": ""}
 
     def load_from_disk(self):
         """Load entries from MEMORY.md and USER.md, capture system prompt snapshot."""
@@ -160,6 +165,9 @@ class MemoryStore:
         mem_dir = get_memory_dir()
         if target == "user":
             return mem_dir / "USER.md"
+        if target == "team":
+            import tools.memory_tool as _self_mod
+            return Path(getattr(_self_mod, "TEAM_MEMORY_FILE", str(mem_dir / "team.md")))
         return mem_dir / "MEMORY.md"
 
     def _reload_target(self, target: str):
@@ -179,11 +187,15 @@ class MemoryStore:
     def _entries_for(self, target: str) -> List[str]:
         if target == "user":
             return self.user_entries
+        if target == "team":
+            return self.team_entries
         return self.memory_entries
 
     def _set_entries(self, target: str, entries: List[str]):
         if target == "user":
             self.user_entries = entries
+        elif target == "team":
+            self.team_entries = entries
         else:
             self.memory_entries = entries
 
@@ -196,6 +208,8 @@ class MemoryStore:
     def _char_limit(self, target: str) -> int:
         if target == "user":
             return self.user_char_limit
+        if target == "team":
+            return self.team_char_limit
         return self.memory_char_limit
 
     def add(self, target: str, content: str) -> Dict[str, Any]:
@@ -209,39 +223,90 @@ class MemoryStore:
         if scan_error:
             return {"success": False, "error": scan_error}
 
+        # Quality validation
+        quality_score = 0.0
+        try:
+            from agent.learning_validator import check_memory, check_memory_limit
+            quality_score, quality_error = check_memory(content, target)
+            if quality_error:
+                try:
+                    from agent.learning_journal import record_memory_event
+                    record_memory_event(
+                        action="add", target=target,
+                        previous_entries=[], current_entries=[],
+                        quality=quality_score, outcome="rejected", error=quality_error,
+                    )
+                except Exception:
+                    pass
+                return {"success": False, "error": quality_error, "quality_score": quality_score}
+        except ImportError:
+            pass
+
         with self._file_lock(self._path_for(target)):
             # Re-read from disk under lock to pick up writes from other sessions
             self._reload_target(target)
 
             entries = self._entries_for(target)
-            limit = self._char_limit(target)
+
+            # Check entry count limit
+            try:
+                from agent.learning_validator import check_memory_limit
+                limit_error = check_memory_limit(len(entries))
+                if limit_error:
+                    try:
+                        from agent.learning_journal import record_memory_event
+                        record_memory_event(
+                            action="add", target=target,
+                            previous_entries=list(entries), current_entries=list(entries),
+                            quality=quality_score, outcome="rejected", error=limit_error,
+                        )
+                    except Exception:
+                        pass
+                    return {"success": False, "error": limit_error, "quality_score": quality_score}
+            except ImportError:
+                pass
+
+            char_limit = self._char_limit(target)
 
             # Reject exact duplicates
             if content in entries:
-                return self._success_response(target, "Entry already exists (no duplicate added).")
+                return {**self._success_response(target, "Entry already exists (no duplicate added)."), "quality_score": quality_score}
 
             # Calculate what the new total would be
             new_entries = entries + [content]
             new_total = len(ENTRY_DELIMITER.join(new_entries))
 
-            if new_total > limit:
+            if new_total > char_limit:
                 current = self._char_count(target)
                 return {
                     "success": False,
                     "error": (
-                        f"Memory at {current:,}/{limit:,} chars. "
+                        f"Memory at {current:,}/{char_limit:,} chars. "
                         f"Adding this entry ({len(content)} chars) would exceed the limit. "
                         f"Replace or remove existing entries first."
                     ),
                     "current_entries": entries,
-                    "usage": f"{current:,}/{limit:,}",
+                    "usage": f"{current:,}/{char_limit:,}",
+                    "quality_score": quality_score,
                 }
 
+            previous_entries = list(entries)
             entries.append(content)
             self._set_entries(target, entries)
             self.save_to_disk(target)
 
-        return self._success_response(target, "Entry added.")
+            # Journal the accepted write
+            try:
+                from agent.learning_journal import record_memory_event
+                record_memory_event(
+                    action="add", target=target,
+                    previous_entries=previous_entries, current_entries=list(entries),
+                    quality=quality_score, outcome="accepted",
+                )
+            except Exception:
+                pass
+
+        return {**self._success_response(target, "Entry added."), "quality_score": quality_score}
 
     def replace(self, target: str, old_text: str, new_content: str) -> Dict[str, Any]:
         """Find entry containing old_text substring, replace it with new_content."""
@@ -295,9 +360,21 @@ class MemoryStore:
                     ),
                 }
 
+            previous_entries = list(entries)
             entries[idx] = new_content
             self._set_entries(target, entries)
             self.save_to_disk(target)
+
+            # Journal the replacement
+            try:
+                from agent.learning_journal import record_memory_event
+                record_memory_event(
+                    action="replace", target=target,
+                    previous_entries=previous_entries, current_entries=list(entries),
+                    quality=0.0, outcome="accepted",
+                )
+            except Exception:
+                pass
 
         return self._success_response(target, "Entry replaced.")
 
@@ -329,9 +406,21 @@ class MemoryStore:
                 # All identical -- safe to remove just the first
 
             idx = matches[0][0]
+            previous_entries = list(entries)
             entries.pop(idx)
             self._set_entries(target, entries)
             self.save_to_disk(target)
+
+            # Journal the removal
+            try:
+                from agent.learning_journal import record_memory_event
+                record_memory_event(
+                    action="remove", target=target,
+                    previous_entries=previous_entries, current_entries=list(entries),
+                    quality=0.0, outcome="accepted",
+                )
+            except Exception:
+                pass
 
         return self._success_response(target, "Entry removed.")
 
@@ -437,6 +526,61 @@ class MemoryStore:
                 raise
         except (OSError, IOError) as e:
             raise RuntimeError(f"Failed to write memory file {path}: {e}")
+
+
+def _handle_team_memory(action: str, content: str = None, old_text: str = None) -> str:
+    """Handle team memory operations, reading/writing directly to TEAM_MEMORY_FILE."""
+    import tools.memory_tool as _self_mod
+    team_file = Path(getattr(_self_mod, "TEAM_MEMORY_FILE", str(get_memory_dir() / "team.md")))
+
+    if action == "read":
+        if not team_file.exists():
+            return json.dumps({"success": True, "memories": []})
+        raw = team_file.read_text(encoding="utf-8").strip()
+        if not raw:
+            return json.dumps({"success": True, "memories": []})
+        entries = [e.strip() for e in raw.split(ENTRY_DELIMITER) if e.strip()]
+        return json.dumps({"success": True, "memories": entries})
+
+    if action == "add":
+        if not content:
+            return tool_error("Content is required for 'add' action.", success=False)
+        team_file.parent.mkdir(parents=True, exist_ok=True)
+        existing = team_file.read_text(encoding="utf-8").strip() if team_file.exists() else ""
+        if existing:
+            updated = existing + ENTRY_DELIMITER + content
+        else:
+            updated = content
+        team_file.write_text(updated, encoding="utf-8")
+        return json.dumps({"success": True, "action": "add", "target": "team"})
+
+    if action == "remove":
+        if not old_text:
+            return tool_error("old_text is required for 'remove' action.", success=False)
+        if not team_file.exists():
+            return json.dumps({"success": False, "error": "Entry not found"})
+        raw = team_file.read_text(encoding="utf-8").strip()
+        entries = [e.strip() for e in raw.split(ENTRY_DELIMITER) if e.strip()]
+        new_entries = [e for e in entries if e != old_text.strip()]
+        if len(new_entries) == len(entries):
+            return json.dumps({"success": False, "error": "Entry not found"})
+        team_file.write_text(ENTRY_DELIMITER.join(new_entries), encoding="utf-8")
+        return json.dumps({"success": True, "action": "remove", "target": "team"})
+
+    if action == "replace":
+        if not old_text or not content:
+            return tool_error("old_text and content are required for 'replace'.", success=False)
+        if not team_file.exists():
+            return json.dumps({"success": False, "error": "Entry not found"})
+        raw = team_file.read_text(encoding="utf-8").strip()
+        entries = [e.strip() for e in raw.split(ENTRY_DELIMITER) if e.strip()]
+        new_entries = [content.strip() if e == old_text.strip() else e for e in entries]
+        if new_entries == entries:
+            return json.dumps({"success": False, "error": "Entry not found"})
+        team_file.write_text(ENTRY_DELIMITER.join(new_entries), encoding="utf-8")
+        return json.dumps({"success": True, "action": "replace", "target": "team"})
+
+    return tool_error(f"Unknown action '{action}'. Use: add, replace, remove, read", success=False)
 
 
 def memory_tool(

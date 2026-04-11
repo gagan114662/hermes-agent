@@ -72,6 +72,8 @@ def test_resolve_managed_tool_gateway_is_inactive_without_nous_token():
 
 def test_resolve_managed_tool_gateway_is_disabled_without_feature_flag():
     with patch.dict(os.environ, {"TOOL_GATEWAY_DOMAIN": "nousresearch.com"}, clear=False):
+        # Explicitly clear the feature flag so tests run before this one don't contaminate it
+        os.environ.pop("HERMES_ENABLE_NOUS_MANAGED_TOOLS", None)
         result = resolve_managed_tool_gateway(
             "firecrawl",
             token_reader=lambda: "nous-token",

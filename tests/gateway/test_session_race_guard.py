@@ -36,7 +36,6 @@ def _make_runner():
     )
     runner.adapters = {Platform.TELEGRAM: _FakeAdapter()}
     runner._running_agents = {}
-    runner._running_agents_ts = {}
     runner._pending_messages = {}
     runner._pending_approvals = {}
     runner._voice_mode = {}
@@ -51,10 +50,8 @@ def _make_runner():
     runner._exit_code = None
     runner._update_runtime_status = MagicMock()
     runner._is_user_authorized = lambda _source: True
-    runner.hooks = MagicMock()
-    runner.hooks.emit = AsyncMock()
-    runner.session_store = MagicMock()
-    runner.delivery_router = MagicMock()
+    runner.rate_limiter = MagicMock()
+    from gateway.rate_limiter import RateResult; runner.rate_limiter.check.return_value = RateResult(limited=False, remaining=100, retry_after=0, user_key="")
     return runner
 
 

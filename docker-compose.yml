@@ -1,0 +1,65 @@
+version: "3.9"
+
+# Local development stack for Hermes Agent.
+#
+# Quick start:
+#   cp .env.example .env          # fill in your API keys
+#   docker compose up hermes      # interactive CLI
+#   docker compose up gateway     # messaging gateway (Telegram, Discord, …)
+#
+# Data persists in the named volume "hermes-data" between restarts.
+# Override the image tag: IMAGE_TAG=latest docker compose up
+
+x-hermes-common: &hermes-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: nousresearch/hermes-agent:${IMAGE_TAG:-dev}
+  env_file:
+    - .env
+  volumes:
+    - hermes-data:/opt/data
+  restart: "no"            # containers are interactive by default — set to
+                            # unless-stopped for gateway/daemon services
+
+services:
+
+  # ── Interactive CLI ──────────────────────────────────────────────────────────
+  hermes:
+    <<: *hermes-common
+    container_name: hermes
+    stdin_open: true
+    tty: true
+    command: []             # pass any extra args: docker compose run hermes -p myprofile
+
+  # ── Messaging gateway (Telegram / Discord / Slack / …) ──────────────────────
+  gateway:
+    <<: *hermes-common
+    container_name: hermes-gateway
+    restart: unless-stopped
+    command: ["gateway", "run"]
+    ports:
+      # Expose for Telegram webhook mode or other inbound webhooks.
+      # Remove if using polling mode only.
+      - "${GATEWAY_PORT:-8443}:8443"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9090/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ── Health / metrics sidecar ─────────────────────────────────────────────────
+  health:
+    <<: *hermes-common
+    container_name: hermes-health
+    restart: unless-stopped
+    entrypoint: ["python3", "scripts/health_server.py"]
+    ports:
+      - "${HEALTH_PORT:-9090}:9090"
+    environment:
+      HERMES_HEALTH_PORT: "9090"
+
+volumes:
+  hermes-data:
+    driver: local

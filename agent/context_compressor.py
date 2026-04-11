@@ -62,7 +62,6 @@ _PRUNED_TOOL_PLACEHOLDER = "[Old tool output cleared to save context space]"
 
 # Chars per token rough estimate
 _CHARS_PER_TOKEN = 4
-_SUMMARY_FAILURE_COOLDOWN_SECONDS = 600
 
 
 class ContextCompressor(ContextEngine):
@@ -161,7 +160,49 @@ class ContextCompressor(ContextEngine):
 
         # Stores the previous compaction summary for iterative updates
         self._previous_summary: Optional[str] = None
-        self._summary_failure_cooldown_until: float = 0.0
+
+        # Cooldown: timestamp of last summary failure; None if no failure yet
+        self._last_summary_failure: Optional[float] = None
+        self._summary_cooldown_s: float = 60.0  # skip retries within 60s of failure
+
+        # CC-style armed/urgent states
+        self.arm_threshold: float = 0.65     # warn at 65% — context getting large
+        self.urgent_threshold: float = 0.80  # force compress at 80% — don't wait
+        self.armed: bool = False
+        self.collapse_commits: list = []      # history of CollapseCommit
+
+    def check_arm_state(self, current_tokens: int) -> bool:
+        """Check if context should be armed (65% threshold). Returns True if newly armed."""
+        ratio = current_tokens / self.context_length
+        if ratio >= self.arm_threshold and not self.armed:
+            self.armed = True
+            logger.warning(
+                "[context-collapse] Context at %.0f%% (%d/%d tokens) — armed for compression",
+                ratio * 100, current_tokens, self.context_length
+            )
+            return True
+        elif ratio < self.arm_threshold and self.armed:
+            self.armed = False
+        return False
+
+    def should_force_compress(self, current_tokens: int) -> bool:
+        """Return True if context is at urgent threshold (80%) — compress immediately."""
+        return current_tokens / self.context_length >= self.urgent_threshold
+
+    def _record_commit(self, tokens_before: int, tokens_after: int, summary_length: int) -> None:
+        """Record a compression event."""
+        self.collapse_commits.append(CollapseCommit(
+            timestamp=time.time(),
+            tokens_before=tokens_before,
+            tokens_after=tokens_after,
+            summary_length=summary_length,
+        ))
+        logger.info(
+            "[context-collapse] Commit #%d: %d→%d tokens saved (%.0f%%)",
+            len(self.collapse_commits),
+            tokens_before, tokens_after,
+            (1 - tokens_after/tokens_before) * 100 if tokens_before > 0 else 0
+        )
 
         # CC-style armed/urgent states
         self.arm_threshold: float = 0.65     # warn at 65% — context getting large
@@ -390,14 +431,6 @@ class ContextCompressor(ContextEngine):
         the middle turns without a summary rather than inject a useless
         placeholder.
         """
-        now = time.monotonic()
-        if now < self._summary_failure_cooldown_until:
-            logger.debug(
-                "Skipping context summary during cooldown (%.0fs remaining)",
-                self._summary_failure_cooldown_until - now,
-            )
-            return None
-
         summary_budget = self._compute_summary_budget(turns_to_summarize)
         content_to_summarize = self._serialize_for_summary(turns_to_summarize)
 
@@ -487,6 +520,12 @@ Target ~{summary_budget} tokens. Be specific — include file paths, command out
 
 Write only the summary body. Do not include any preamble or prefix."""
 
+        # Skip if still in cooldown from a recent failure
+        if self._last_summary_failure is not None:
+            import time as _time
+            if _time.monotonic() - self._last_summary_failure < self._summary_cooldown_s:
+                return None
+
         try:
             call_kwargs = {
                 "task": "compression",
@@ -502,25 +541,21 @@ Write only the summary body. Do not include any preamble or prefix."""
             if not isinstance(content, str):
                 content = str(content) if content else ""
             summary = content.strip()
+            # Clear failure state on success
+            self._last_summary_failure = None
             # Store for iterative updates on next compaction
             self._previous_summary = summary
-            self._summary_failure_cooldown_until = 0.0
             return self._with_summary_prefix(summary)
         except RuntimeError:
-            self._summary_failure_cooldown_until = time.monotonic() + _SUMMARY_FAILURE_COOLDOWN_SECONDS
             logging.warning("Context compression: no provider available for "
-                            "summary. Middle turns will be dropped without summary "
-                            "for %d seconds.",
-                            _SUMMARY_FAILURE_COOLDOWN_SECONDS)
+                            "summary. Middle turns will be dropped without summary.")
+            import time as _time
+            self._last_summary_failure = _time.monotonic()
             return None
         except Exception as e:
-            self._summary_failure_cooldown_until = time.monotonic() + _SUMMARY_FAILURE_COOLDOWN_SECONDS
-            logging.warning(
-                "Failed to generate context summary: %s. "
-                "Further summary attempts paused for %d seconds.",
-                e,
-                _SUMMARY_FAILURE_COOLDOWN_SECONDS,
-            )
+            logging.warning("Failed to generate context summary: %s", e)
+            import time as _time
+            self._last_summary_failure = _time.monotonic()
             return None
 
     @staticmethod

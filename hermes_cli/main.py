@@ -663,7 +663,7 @@ def cmd_chat(args):
 
     # Import and run the CLI
     from cli import main as cli_main
-    
+
     # Build kwargs from args
     kwargs = {
         "model": args.model,
@@ -996,6 +996,7 @@ def select_provider_and_model(args=None):
 
     extended_providers = [
         ("copilot-acp", "GitHub Copilot ACP (spawns `copilot --acp --stdio`)"),
+        ("gemini-oauth", "Google Gemini (OAuth — browser login, no API key needed)"),
         ("gemini", "Google AI Studio (Gemini models — OpenAI-compatible endpoint)"),
         ("zai", "Z.AI / GLM (Zhipu AI direct API)"),
         ("kimi-coding", "Kimi / Moonshot (Moonshot AI direct API)"),
@@ -1111,6 +1112,8 @@ def select_provider_and_model(args=None):
         _model_flow_anthropic(config, current_model)
     elif selected_provider == "kimi-coding":
         _model_flow_kimi(config, current_model)
+    elif selected_provider == "gemini-oauth":
+        _model_flow_gemini_oauth(config, current_model)
     elif selected_provider in ("gemini", "zai", "minimax", "minimax-cn", "kilocode", "opencode-zen", "opencode-go", "ai-gateway", "alibaba", "huggingface"):
         _model_flow_api_key_provider(config, selected_provider, current_model)
 
@@ -2323,6 +2326,89 @@ def _model_flow_kimi(config, current_model=""):
         print(f"Default model set to: {selected} (via {endpoint_label})")
     else:
         print("No change.")
+
+
+def _model_flow_gemini_oauth(config, current_model=""):
+    """Google Gemini via browser OAuth (PKCE) — no API key required."""
+    from hermes_cli.auth import (
+        get_gemini_oauth_auth_status,
+        login_gemini_oauth,
+        AuthError,
+        _prompt_model_selection,
+        _save_model_choice,
+        _update_config_for_provider,
+    )
+
+    DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
+    GEMINI_OAUTH_MODELS = [
+        "gemini-2.5-pro",
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
+        "gemini-2.0-flash",
+        "gemini-2.0-flash-lite",
+    ]
+
+    print()
+    print("  Google Gemini (OAuth)")
+    print("  ─────────────────────────────────────────────────────────")
+    print("  Browser-based sign-in — no API key needed.")
+    print("  Requires a Google account with Gemini API access.")
+    print()
+
+    # Show current status
+    status = get_gemini_oauth_auth_status()
+    if status.get("logged_in"):
+        email = status.get("email", "")
+        expiring = status.get("token_expiring", False)
+        if email:
+            print(f"  Currently signed in as: {email}")
+        else:
+            print("  Currently signed in.")
+        if expiring:
+            print("  ⚠  Access token is expiring — will be refreshed automatically.")
+        print()
+        try:
+            reuse = input("  Use existing login? [Y/n]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            reuse = "y"
+        if reuse not in ("n", "no"):
+            # Jump straight to model selection
+            selected = _prompt_model_selection(GEMINI_OAUTH_MODELS, current_model=current_model)
+            if selected:
+                _save_model_choice(selected)
+                _update_config_for_provider("gemini-oauth", DEFAULT_GEMINI_BASE_URL)
+                print(f"\n  Default model set to: {selected} (via Google Gemini OAuth)")
+            else:
+                print("  No change.")
+            return
+
+    # Not logged in (or user chose to re-login)
+    print("  Starting browser sign-in...")
+    print()
+
+    # Detect headless / SSH — fall back to manual URL
+    import os as _os
+    open_browser = not (
+        _os.environ.get("SSH_CLIENT") or _os.environ.get("SSH_TTY")
+    )
+
+    try:
+        login_gemini_oauth(open_browser=open_browser)
+    except AuthError as exc:
+        print(f"\n  Login failed: {exc}")
+        return
+    except SystemExit:
+        print("\n  Login cancelled.")
+        return
+
+    # Model selection after successful login
+    selected = _prompt_model_selection(GEMINI_OAUTH_MODELS, current_model=current_model)
+    if selected:
+        _save_model_choice(selected)
+        _update_config_for_provider("gemini-oauth", DEFAULT_GEMINI_BASE_URL)
+        print(f"\n  Default model set to: {selected} (via Google Gemini OAuth)")
+    else:
+        print("  No change.")
 
 
 def _model_flow_api_key_provider(config, provider_id, current_model=""):

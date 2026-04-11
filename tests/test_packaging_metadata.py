@@ -11,8 +11,8 @@ def test_faster_whisper_is_not_a_base_dependency():
 
     assert not any(dep.startswith("faster-whisper") for dep in deps)
 
-    voice_extra = data["project"]["optional-dependencies"]["voice"]
-    assert any(dep.startswith("faster-whisper") for dep in voice_extra)
+    stt_local_extra = data["project"]["optional-dependencies"]["stt-local"]
+    assert any(dep.startswith("faster-whisper") for dep in stt_local_extra)
 
 
 def test_manifest_includes_bundled_skills():

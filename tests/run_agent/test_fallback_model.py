@@ -207,13 +207,47 @@ class TestTryActivateFallback:
             api_key="custom-secret",
             base_url="http://localhost:8080/v1",
         )
+        with patch.dict(os.environ, {"MY_CUSTOM_KEY": "custom-secret"}, clear=False):
+            with patch(
+                "agent.auxiliary_client.resolve_provider_client",
+                return_value=(mock_client, "my-model"),
+            ) as resolve_mock:
+                assert agent._try_activate_fallback() is True
+                assert agent.client is mock_client
+                assert agent.model == "my-model"
+                resolve_mock.assert_called_once_with(
+                    "custom",
+                    model="my-model",
+                    raw_codex=True,
+                    explicit_base_url="http://localhost:8080/v1",
+                    explicit_api_key="custom-secret",
+                )
+
+    def test_custom_base_url_without_api_key_env_uses_no_explicit_key(self):
+        """Custom fallback should still pass the configured endpoint without an API key env var."""
+        agent = _make_agent(
+            fallback_model={
+                "provider": "custom",
+                "model": "gemma4:latest",
+                "base_url": "http://localhost:11434/v1",
+            },
+        )
+        mock_client = _mock_resolve(
+            api_key="no-key-required",
+            base_url="http://localhost:11434/v1",
+        )
         with patch(
             "agent.auxiliary_client.resolve_provider_client",
-            return_value=(mock_client, "my-model"),
-        ):
+            return_value=(mock_client, "gemma4:latest"),
+        ) as resolve_mock:
             assert agent._try_activate_fallback() is True
-            assert agent.client is mock_client
-            assert agent.model == "my-model"
+            resolve_mock.assert_called_once_with(
+                "custom",
+                model="gemma4:latest",
+                raw_codex=True,
+                explicit_base_url="http://localhost:11434/v1",
+                explicit_api_key=None,
+            )
 
     def test_prompt_caching_enabled_for_claude_on_openrouter(self):
         agent = _make_agent(

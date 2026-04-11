@@ -81,9 +81,16 @@ def apply_anthropic_cache_control(
 
     Places up to 4 cache_control breakpoints: system prompt + last 3 non-system messages.
 
+    When the system prompt contains DYNAMIC_BOUNDARY (the CC-style static/dynamic
+    split), the system message is expanded into two content blocks — the static
+    prefix gets cache_control and the dynamic suffix does not. This means memory
+    updates and timestamp changes don't invalidate the static prefix cache.
+
     Returns:
         Deep copy of messages with cache_control breakpoints injected.
     """
+    from agent.prompt_builder import DYNAMIC_BOUNDARY, split_static_dynamic
+
     messages = copy.deepcopy(api_messages)
     if not messages:
         return messages
@@ -95,7 +102,20 @@ def apply_anthropic_cache_control(
     breakpoints_used = 0
 
     if messages[0].get("role") == "system":
-        _apply_cache_marker(messages[0], marker, native_anthropic=native_anthropic)
+        sys_content = messages[0].get("content", "")
+
+        if isinstance(sys_content, str) and DYNAMIC_BOUNDARY in sys_content:
+            # Split into static (cached) + dynamic (not cached) content blocks
+            static_part, dynamic_part = split_static_dynamic(sys_content)
+            blocks: List[Dict[str, Any]] = [
+                {"type": "text", "text": static_part, "cache_control": marker},
+            ]
+            if dynamic_part:
+                blocks.append({"type": "text", "text": dynamic_part})
+            messages[0]["content"] = blocks
+        else:
+            # No boundary — cache the whole system prompt as before
+            _apply_cache_marker(messages[0], marker, native_anthropic=native_anthropic)
         breakpoints_used += 1
 
     remaining = 4 - breakpoints_used

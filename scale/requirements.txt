@@ -1,0 +1,6 @@
+# Scale module dependencies (on top of base hermes)
+fastapi>=0.110.0
+uvicorn>=0.27.0
+asyncpg>=0.29.0
+redis>=5.0.0
+python-telegram-bot>=21.0

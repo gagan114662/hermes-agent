@@ -164,6 +164,17 @@ TOOLSETS = {
         "tools": ["skills_list", "skill_view", "skill_manage"],
         "includes": []
     },
+
+    "second-brain": {
+        "description": "Multi-vault domain knowledge system — scaffold dedicated second brain vaults, ingest source files into wiki pages, query accumulated knowledge, and audit wiki health",
+        "tools": [
+            "second_brain_scaffold", "second_brain_list",
+            "second_brain_ingest", "second_brain_ingest_all",
+            "second_brain_query", "second_brain_lint",
+            "read_file", "write_file", "search_files",
+        ],
+        "includes": []
+    },
     
     "browser": {
         "description": "Browser automation for web interaction (navigate, click, type, scroll, iframes, hold-click) with web search for finding URLs",

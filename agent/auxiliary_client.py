@@ -1584,6 +1584,7 @@ def get_async_text_auxiliary_client(task: str = ""):
 _VISION_AUTO_PROVIDER_ORDER = (
     "openrouter",
     "nous",
+    "openai-codex",
 )
 
 

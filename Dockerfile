@@ -1,4 +1,5 @@
-FROM debian:13.4
+# ── Stage 1: builder — compile Python extensions and Node deps ────────────────
+FROM debian:13.4 AS builder
 
 # Disable Python stdout buffering to ensure logs are printed immediately
 ENV PYTHONUNBUFFERED=1
@@ -9,8 +10,8 @@ RUN apt-get update && \
         build-essential nodejs npm python3 python3-pip ripgrep ffmpeg gcc python3-dev libffi-dev procps && \
     rm -rf /var/lib/apt/lists/*
 
-COPY . /opt/hermes
 WORKDIR /opt/hermes
+COPY . .
 
 # Install Python and Node dependencies in one layer, no cache
 RUN pip install --no-cache-dir uv --break-system-packages && \
@@ -25,5 +26,5 @@ WORKDIR /opt/hermes
 RUN chmod +x /opt/hermes/docker/entrypoint.sh
 
 ENV HERMES_HOME=/opt/data
-VOLUME [ "/opt/data" ]
-ENTRYPOINT [ "/opt/hermes/docker/entrypoint.sh" ]
+VOLUME ["/opt/data"]
+ENTRYPOINT ["/opt/hermes/docker/entrypoint.sh"]

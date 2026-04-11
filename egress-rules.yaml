@@ -1,0 +1,52 @@
+# Iron Proxy egress allowlist for Hermes Agent CI
+#
+# Controls outbound network access in GitHub Actions runners.
+# mode: warn   — log violations without blocking (safe default)
+# mode: block  — enforce the allowlist and fail the step on violation
+#
+# Promote to block mode once no new warnings appear for 2+ release cycles.
+#
+# Docs: https://github.com/marketplace/actions/iron-proxy
+
+version: 1
+mode: warn
+
+allowlist:
+  # Python packaging
+  - pypi.org
+  - files.pythonhosted.org
+  - bootstrap.pypa.io
+
+  # GitHub (code checkout, Actions, cache, releases)
+  - github.com
+  - api.github.com
+  - objects.githubusercontent.com
+  - raw.githubusercontent.com
+  - codeload.github.com
+  - uploads.github.com
+  - *.actions.githubusercontent.com
+  - ghcr.io
+
+  # Docker Hub (image pull/push)
+  - docker.io
+  - registry-1.docker.io
+  - production.cloudflare.docker.com
+  - auth.docker.io
+  - index.docker.io
+
+  # Node / npm (Playwright browser install, WhatsApp bridge deps)
+  - registry.npmjs.org
+  - nodejs.org
+
+  # Playwright browser binaries
+  - playwright.azureedge.net
+  - playwright.download.prss.microsoft.com
+
+  # uv / Astral (Python toolchain used in tests.yml)
+  - astral.sh
+  - github.com/astral-sh
+
+  # GitHub Actions runner infrastructure
+  - *.blob.core.windows.net
+  - *.azureedge.net
+  - api.nuget.org

@@ -135,6 +135,8 @@ class TestGatewayQuickCommands:
         runner._running_agents = {}
         runner._pending_messages = {}
         runner._is_user_authorized = MagicMock(return_value=True)
+        runner.rate_limiter = MagicMock()
+        from gateway.rate_limiter import RateResult; runner.rate_limiter.check.return_value = RateResult(limited=False, remaining=100, retry_after=0, user_key="")
 
         event = self._make_event("limits")
         result = await runner._handle_message(event)
@@ -148,6 +150,8 @@ class TestGatewayQuickCommands:
         runner._running_agents = {}
         runner._pending_messages = {}
         runner._is_user_authorized = MagicMock(return_value=True)
+        runner.rate_limiter = MagicMock()
+        from gateway.rate_limiter import RateResult; runner.rate_limiter.check.return_value = RateResult(limited=False, remaining=100, retry_after=0, user_key="")
 
         event = self._make_event("bad")
         result = await runner._handle_message(event)
@@ -163,6 +167,8 @@ class TestGatewayQuickCommands:
         runner._running_agents = {}
         runner._pending_messages = {}
         runner._is_user_authorized = MagicMock(return_value=True)
+        runner.rate_limiter = MagicMock()
+        from gateway.rate_limiter import RateResult; runner.rate_limiter.check.return_value = RateResult(limited=False, remaining=100, retry_after=0, user_key="")
 
         event = self._make_event("slow")
         with patch("asyncio.wait_for", side_effect=asyncio.TimeoutError):
@@ -182,6 +188,8 @@ class TestGatewayQuickCommands:
         runner._running_agents = {}
         runner._pending_messages = {}
         runner._is_user_authorized = MagicMock(return_value=True)
+        runner.rate_limiter = MagicMock()
+        from gateway.rate_limiter import RateResult; runner.rate_limiter.check.return_value = RateResult(limited=False, remaining=100, retry_after=0, user_key="")
 
         event = self._make_event("limits")
         result = await runner._handle_message(event)

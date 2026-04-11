@@ -8,10 +8,18 @@ end-to-end dispatch.  All external dependencies are mocked.
 import os
 import struct
 import subprocess
+import sys
 import wave
+from types import ModuleType
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+# Ensure faster_whisper is patchable even when not installed
+if "faster_whisper" not in sys.modules:
+    _stub = ModuleType("faster_whisper")
+    _stub.WhisperModel = MagicMock  # type: ignore[attr-defined]
+    sys.modules["faster_whisper"] = _stub
 
 
 # ============================================================================

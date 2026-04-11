@@ -143,6 +143,13 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         api_key_env_vars=("GOOGLE_API_KEY", "GEMINI_API_KEY"),
         base_url_env_var="GEMINI_BASE_URL",
     ),
+    "gemini-oauth": ProviderConfig(
+        id="gemini-oauth",
+        name="Google Gemini (OAuth)",
+        auth_type="oauth_google",
+        inference_base_url="https://generativelanguage.googleapis.com/v1beta/openai",
+        base_url_env_var="GEMINI_BASE_URL",
+    ),
     "zai": ProviderConfig(
         id="zai",
         name="Z.AI / GLM",
@@ -1213,6 +1220,119 @@ def get_qwen_auth_status() -> Dict[str, Any]:
             "auth_file": str(auth_path),
             "error": str(exc),
         }
+
+
+# =============================================================================
+# Gemini OAuth — Authorization Code + PKCE, tokens in ~/.hermes/gemini_oauth.json
+# =============================================================================
+
+def resolve_gemini_oauth_runtime_credentials(
+    *,
+    force_refresh: bool = False,
+    refresh_if_expiring: bool = True,
+) -> Dict[str, Any]:
+    """Return valid Gemini OAuth credentials, refreshing the token if needed.
+
+    Raises ``AuthError`` if no credentials are stored or the refresh fails.
+    """
+    try:
+        from agent.google_oauth import (
+            GeminiOAuthError,
+            get_valid_access_token,
+            load_credentials,
+            refresh_access_token,
+            _token_is_expiring,
+        )
+    except ImportError as exc:
+        raise AuthError(
+            f"Could not import agent.google_oauth: {exc}",
+            provider="gemini-oauth",
+            code="import_error",
+        ) from exc
+
+    creds = load_credentials()
+    if not creds:
+        raise AuthError(
+            "No Gemini OAuth credentials found. Run `hermes /model` and "
+            "choose 'Google Gemini (OAuth)' to sign in.",
+            provider="gemini-oauth",
+            code="gemini_oauth_not_logged_in",
+        )
+
+    try:
+        if force_refresh or (refresh_if_expiring and _token_is_expiring(creds)):
+            creds = refresh_access_token(creds)
+        access_token = creds.get("access_token", "")
+        if not access_token:
+            raise GeminiOAuthError("access_token missing after refresh.")
+    except GeminiOAuthError as exc:
+        raise AuthError(
+            str(exc),
+            provider="gemini-oauth",
+            code="gemini_oauth_refresh_failed",
+        ) from exc
+
+    base_url = (
+        os.environ.get("GEMINI_BASE_URL", "").strip().rstrip("/")
+        or "https://generativelanguage.googleapis.com/v1beta/openai"
+    )
+    return {
+        "provider": "gemini-oauth",
+        "base_url": base_url,
+        "api_key": access_token,
+        "email": creds.get("email", ""),
+        "expires_at": creds.get("expires_at"),
+        "source": "gemini-oauth",
+    }
+
+
+def get_gemini_oauth_auth_status() -> Dict[str, Any]:
+    """Return a display-friendly dict describing the current Gemini OAuth state."""
+    try:
+        from agent.google_oauth import get_auth_status
+        return get_auth_status()
+    except ImportError:
+        return {"logged_in": False, "error": "agent.google_oauth not available"}
+
+
+def login_gemini_oauth(
+    *,
+    client_id: str = "",
+    client_secret: str = "",
+    open_browser: bool = True,
+) -> None:
+    """Run the interactive PKCE browser flow and persist tokens.
+
+    Raises ``AuthError`` on failure.
+    """
+    try:
+        from agent.google_oauth import GeminiOAuthError, start_oauth_flow
+    except ImportError as exc:
+        raise AuthError(
+            f"Could not import agent.google_oauth: {exc}",
+            provider="gemini-oauth",
+            code="import_error",
+        ) from exc
+
+    try:
+        creds = start_oauth_flow(
+            client_id=client_id,
+            client_secret=client_secret,
+            open_browser=open_browser,
+        )
+    except GeminiOAuthError as exc:
+        raise AuthError(
+            str(exc),
+            provider="gemini-oauth",
+            code="gemini_oauth_login_failed",
+        ) from exc
+
+    email = creds.get("email", "")
+    print()
+    print("Gemini OAuth login successful!")
+    if email:
+        print(f"  Signed in as: {email}")
+    print(f"  Credentials saved to: {creds.get('_path', '~/.hermes/gemini_oauth.json')}")
 
 
 # =============================================================================

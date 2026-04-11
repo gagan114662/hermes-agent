@@ -583,6 +583,24 @@ def write_file_tool(path: str, content: str, task_id: str = "default") -> str:
         # Refresh the stored timestamp so consecutive writes by this
         # task don't trigger false staleness warnings.
         _update_read_timestamp(path, task_id)
+        # Record lineage (fire-and-forget; never raises)
+        try:
+            from agent.lineage import record_write as _record_write
+            _record_write(path, task_id=task_id)
+        except Exception:
+            pass
+        # Auto-register skill provenance when a SKILL.md is written
+        try:
+            _p = path if isinstance(path, str) else str(path)
+            if _p.endswith("SKILL.md"):
+                from pathlib import Path as _Path
+                _skill_dir = _Path(_p).parent
+                _skill_id = _skill_dir.name
+                if _skill_id:
+                    from agent.components_registry import try_auto_register as _tar
+                    _tar(_skill_id, skills_base_dir=str(_skill_dir.parent))
+        except Exception:
+            pass
         return json.dumps(result_dict, ensure_ascii=False)
     except Exception as e:
         if _is_expected_write_exception(e):

@@ -38,7 +38,8 @@ class TestHandleFunctionCall:
         assert isinstance(parsed, dict)
         assert "error" in parsed
         assert len(parsed["error"]) > 0
-        assert "error" in parsed["error"].lower() or "failed" in parsed["error"].lower()
+        # Schema validation now produces "Invalid arguments for …" style messages
+        assert any(kw in parsed["error"].lower() for kw in ("error", "failed", "invalid", "not of type"))
 
     def test_tool_hooks_receive_session_and_tool_call_ids(self):
         with (

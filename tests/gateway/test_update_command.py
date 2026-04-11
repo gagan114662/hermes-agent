@@ -34,6 +34,9 @@ def _make_runner():
     runner = object.__new__(GatewayRunner)
     runner.adapters = {}
     runner._voice_mode = {}
+    from gateway.rate_limiter import RateResult
+    runner.rate_limiter = MagicMock()
+    runner.rate_limiter.check.return_value = RateResult(limited=False, remaining=100, retry_after=0, user_key="")
     return runner
 
 
