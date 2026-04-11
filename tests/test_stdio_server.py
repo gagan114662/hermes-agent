@@ -56,6 +56,17 @@ def test_process_registry_removes_on_cleanup():
     assert registry.get("session-abc") is None
 
 
+def test_gateway_subprocess_flag_config_logic():
+    """_use_subprocess_agents flag logic: True only when agent.process_mode=subprocess."""
+    def _resolve_flag(config):
+        return (config.get("agent") or {}).get("process_mode") == "subprocess"
+
+    assert _resolve_flag({}) is False
+    assert _resolve_flag({"agent": {}}) is False
+    assert _resolve_flag({"agent": {"process_mode": "subprocess"}}) is True
+    assert _resolve_flag({"agent": {"process_mode": "in-process"}}) is False
+
+
 def test_pipe_mode_does_not_hang_on_pipe_input():
     """hermes CLI does not hang when given piped stdin — just needs to start."""
     result = subprocess.run(

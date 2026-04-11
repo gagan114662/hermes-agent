@@ -595,6 +595,17 @@ class GatewayRunner:
         # Per-session agent subprocess registry (Unix philosophy thin gateway)
         self._process_registry = ProcessRegistry(ttl_seconds=3600)
 
+        # Feature flag: route messages through per-session stdio subprocesses
+        # Enable via config.yaml:  agent: {process_mode: subprocess}
+        self._use_subprocess_agents = False
+        try:
+            _init_cfg = _load_gateway_config()
+            if (_init_cfg.get("agent") or {}).get("process_mode") == "subprocess":
+                self._use_subprocess_agents = True
+                logger.info("Agent process mode: subprocess (Unix thin-gateway)")
+        except Exception:
+            pass
+
         # Ensure tirith security scanner is available (downloads if needed)
         try:
             from tools.tirith_security import ensure_installed
@@ -7330,9 +7341,33 @@ class GatewayRunner:
         This is run in a thread pool to not block the event loop.
         Supports interruption via new messages.
         """
+        # Unix thin-gateway path: dispatch to per-session stdio subprocess
+        if self._use_subprocess_agents:
+            platform_str = source.platform.value if source.platform else "api"
+            try:
+                response_text = await self._dispatch_to_agent_process(
+                    session_id, message, platform_str
+                )
+                return {
+                    "final_response": response_text,
+                    "messages": [],
+                    "api_calls": 0,
+                    "tools": [],
+                    "history_offset": len(history),
+                    "last_prompt_tokens": 0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "session_id": session_id,
+                }
+            except Exception as e:
+                logger.warning(
+                    "Subprocess agent dispatch failed, falling back to in-process: %s", e
+                )
+                # Fall through to existing in-process agent path
+
         from run_agent import AIAgent
         import queue
-        
+
         user_config = _load_gateway_config()
         platform_key = _platform_config_key(source.platform)
 
