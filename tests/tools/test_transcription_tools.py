@@ -671,11 +671,15 @@ class TestValidateAudioFileEdgeCases:
         f = tmp_path / "test.ogg"
         f.write_bytes(b"data")
         from tools.transcription_tools import _validate_audio_file
+        from pathlib import Path
 
-        # In Python 3.12+, exists() and is_file() use os.stat() directly,
-        # not Path.stat(). Only the explicit stat() call in _validate_audio_file
-        # goes through Path.stat(). Raise OSError on any Path.stat() call.
-        with patch("pathlib.Path.stat", side_effect=OSError("disk error")):
+        # Python 3.11: exists()/is_file() call Path.stat() and re-raise non-ignorable
+        # OSErrors. Python 3.12+: exists()/is_file() use os.stat() directly, not
+        # Path.stat(). Mock exists/is_file directly so the file "passes" those checks,
+        # then fail on the explicit stat().st_size call for cross-version correctness.
+        with patch.object(Path, "exists", return_value=True), \
+             patch.object(Path, "is_file", return_value=True), \
+             patch("pathlib.Path.stat", side_effect=OSError("disk error")):
             result = _validate_audio_file(str(f))
         assert result is not None
         assert "Failed to access" in result["error"]
