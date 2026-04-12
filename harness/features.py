@@ -141,5 +141,9 @@ class FeatureTracker:
             "pct_complete": round(pct, 1),
         }
 
+    def get_all_features(self) -> list[Feature]:
+        """Return all features (complete and incomplete)."""
+        return list(self._features)
+
     def all_complete(self) -> bool:
         return all(f.passes for f in self._features)

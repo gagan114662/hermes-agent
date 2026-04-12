@@ -54,7 +54,7 @@ class ContextManager:
 
         tracker = FeatureTracker(features_file)
         session_history = self._parse_session_history(progress_file)
-        completed = [f for f in tracker._features if f.passes]
+        completed = [f for f in tracker.get_all_features() if f.passes]
         next_steps = tracker.get_incomplete_features(limit=3)
 
         return {

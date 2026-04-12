@@ -175,10 +175,14 @@ class SessionOrchestrator:
                 try:
                     self._command_guard.check(cmd)
                 except CommandBlocked as exc:
-                    if exc.requires_approval:
-                        if self._approval_gate.requires_approval(cmd):
-                            raise
-                    else:
+                    # Always re-raise hard blocks (requires_approval=False).
+                    # For soft blocks (requires_approval=True), consult the
+                    # ApprovalGate — if the command matches the gate's list,
+                    # raise; otherwise let it through (guard flagged it but
+                    # the gate doesn't require explicit human sign-off here).
+                    if not exc.requires_approval:
+                        raise
+                    if self._approval_gate.requires_approval(cmd):
                         raise
 
         init_kwargs: dict = dict(

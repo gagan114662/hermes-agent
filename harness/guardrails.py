@@ -99,8 +99,8 @@ class CostGuard:
         input_tok = usage.get("input_tokens", usage.get("prompt_tokens", 0))
         output_tok = usage.get("output_tokens", usage.get("completion_tokens", 0))
         cache_read = usage.get("cache_read_tokens", 0)
-        input_tok += cache_read
-        cost = (input_tok * input_price + output_tok * output_price) / 1_000_000
+        cache_read_price = input_price * 0.1  # cache reads are ~10% of input price
+        cost = (input_tok * input_price + cache_read * cache_read_price + output_tok * output_price) / 1_000_000
         self.record_session_cost(cost)
 
 
