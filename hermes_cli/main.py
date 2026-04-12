@@ -4293,6 +4293,37 @@ def cmd_logs(args):
     )
 
 
+def _cmd_harness_dispatch(args) -> None:
+    """Dispatch `hermes harness` subcommands."""
+    from harness.cli_commands import cmd_harness_run
+    if args.harness_command == "run":
+        sys.exit(cmd_harness_run(spec_file=args.spec_file))
+    else:
+        args._harness_parser.print_help()
+        sys.exit(1)
+
+
+def _cmd_employee_dispatch(args) -> None:
+    """Dispatch `hermes employee` subcommands."""
+    from harness.cli_commands import (
+        cmd_employee_create,
+        cmd_employee_start,
+        cmd_employee_status,
+    )
+    if args.employee_command == "create":
+        sys.exit(cmd_employee_create(name=args.name, role=args.role, goal=args.goal))
+    elif args.employee_command == "start":
+        sys.exit(cmd_employee_start(
+            name=args.name,
+            project_dir=getattr(args, "project_dir", None),
+        ))
+    elif args.employee_command == "status":
+        sys.exit(cmd_employee_status())
+    else:
+        args._employee_parser.print_help()
+        sys.exit(1)
+
+
 def main():
     """Main entry point for hermes CLI."""
     parser = argparse.ArgumentParser(
@@ -5752,6 +5783,33 @@ Examples:
         help="Show lines since TIME ago (e.g. 1h, 30m, 2d)",
     )
     logs_parser.set_defaults(func=cmd_logs)
+
+    # ── harness ──────────────────────────────────────────────────────
+    harness_parser = subparsers.add_parser(
+        "harness", help="Run an agent harness (multi-session task orchestration)"
+    )
+    harness_subparsers = harness_parser.add_subparsers(dest="harness_command")
+    harness_run = harness_subparsers.add_parser("run", help="Run a harness from a YAML/JSON spec file")
+    harness_run.add_argument("spec_file", help="Path to harness spec YAML/JSON")
+    harness_parser.set_defaults(func=_cmd_harness_dispatch, _harness_parser=harness_parser)
+
+    # ── employee ──────────────────────────────────────────────────────
+    employee_parser = subparsers.add_parser(
+        "employee", help="Manage AI employee personas"
+    )
+    emp_subparsers = employee_parser.add_subparsers(dest="employee_command")
+
+    emp_create = emp_subparsers.add_parser("create", help="Create a new AI employee")
+    emp_create.add_argument("name", help="Employee name (slug)")
+    emp_create.add_argument("role", help="Job role (e.g. 'backend engineer')")
+    emp_create.add_argument("goal", help="Goal description")
+
+    emp_start = emp_subparsers.add_parser("start", help="Start an employee's work shift")
+    emp_start.add_argument("name", help="Employee name")
+    emp_start.add_argument("--project-dir", dest="project_dir", help="Working directory")
+
+    emp_subparsers.add_parser("status", help="Show all employees and their status")
+    employee_parser.set_defaults(func=_cmd_employee_dispatch, _employee_parser=employee_parser)
 
     # =========================================================================
     # Parse and execute
