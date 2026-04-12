@@ -8,6 +8,8 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 
 @pytest.mark.asyncio
 async def test_stdio_server_responds_to_valid_message():
@@ -75,7 +77,7 @@ def test_pipe_mode_does_not_hang_on_pipe_input():
         input=b"hello world content",
         capture_output=True,
         timeout=10,
-        cwd="/Users/gaganarora/Desktop/my projects/hermes/hermes-agent",
+        cwd=_REPO_ROOT,
     )
     # --help always exits 0 regardless of stdin
     assert result.returncode == 0
