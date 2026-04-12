@@ -26,6 +26,17 @@ def _isolate_hermes_home(tmp_path, monkeypatch):
     (fake_home / "memories").mkdir()
     (fake_home / "skills").mkdir()
     monkeypatch.setenv("HERMES_HOME", str(fake_home))
+
+    # gateway/pairing.py sets PAIRING_DIR at module import time from the real
+    # ~/.hermes path. Patch it to the temp dir so tests don't read/write the
+    # developer's real pairing state (rate limits, approved users, etc.).
+    try:
+        import gateway.pairing as _pairing_mod
+        fake_pairing_dir = fake_home / "platforms" / "pairing"
+        fake_pairing_dir.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(_pairing_mod, "PAIRING_DIR", fake_pairing_dir)
+    except Exception:
+        pass
     # Reset plugin singleton so tests don't leak plugins from ~/.hermes/plugins/
     try:
         import hermes_cli.plugins as _plugins_mod
@@ -40,6 +51,22 @@ def _isolate_hermes_home(tmp_path, monkeypatch):
     monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
     # Avoid making real calls during tests if this key is set in the env files
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    # Prevent real gateway credentials from leaking into unit tests via
+    # load_hermes_dotenv() which fires at gateway/run.py module-import time.
+    # Clear all known Hermes env vars so tests don't see real machine config.
+    _hermes_env_vars = [
+        "API_SERVER_KEY", "API_SERVER_HOST", "API_SERVER_PORT",
+        "API_SERVER_CORS_ORIGINS", "API_SERVER_ENABLED", "API_SERVER_MODEL_NAME",
+        "HERMES_PROVIDER", "CLAUDE_CODE_OAUTH_TOKEN",
+        "TELEGRAM_BOT_TOKEN", "TELEGRAM_ALLOWED_USERS", "TELEGRAM_HOME_CHANNEL",
+        "DISCORD_BOT_TOKEN", "DISCORD_ALLOWED_USERS", "DISCORD_HOME_CHANNEL",
+        "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "SLACK_ALLOWED_USERS",
+        "GATEWAY_ALLOW_ALL_USERS", "GATEWAY_ALLOWED_USERS",
+        "DISCORD_ALLOW_ALL_USERS", "SLACK_ALLOW_ALL_USERS",
+        "HERMES_TIMEZONE", "HERMES_MANAGED", "HERMES_MAX_ITERATIONS",
+    ]
+    for _var in _hermes_env_vars:
+        monkeypatch.delenv(_var, raising=False)
 
 
 @pytest.fixture()

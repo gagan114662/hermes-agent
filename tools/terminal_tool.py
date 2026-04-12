@@ -1809,6 +1809,6 @@ registry.register(
     schema=TERMINAL_SCHEMA,
     handler=_handle_terminal,
     check_fn=check_terminal_requirements,
-    emoji="💻",
+    emoji="⚙️",
     max_result_size_chars=100_000,
 )
