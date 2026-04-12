@@ -1530,11 +1530,13 @@ class AIAgent:
         # ── Update context compressor ──
         if hasattr(self, "context_compressor") and self.context_compressor:
             from agent.model_metadata import get_model_context_length
+            _cfg_ctx_len = getattr(self, "_config_context_length", None)
             new_context_length = get_model_context_length(
                 self.model,
                 base_url=self.base_url,
                 api_key=self.api_key,
                 provider=self.provider,
+                config_context_length=_cfg_ctx_len,
             )
             self.context_compressor.model = self.model
             self.context_compressor.base_url = self.base_url
@@ -4540,6 +4542,7 @@ class AIAgent:
         *,
         status_code: Optional[int],
         has_retried_429: bool,
+        classified_reason=None,
         error_context: Optional[Dict[str, Any]] = None,
     ) -> tuple[bool, bool]:
         """Attempt credential recovery via pool rotation.
@@ -4549,15 +4552,23 @@ class AIAgent:
                 second consecutive 429 rotates to next credential (resets flag).
         On 402: immediately rotates (billing exhaustion won't resolve with retry).
         On 401: attempts token refresh before rotating.
+        classified_reason overrides status_code-based detection (e.g. billing
+        signals in non-402 HTTP responses such as 400).
         """
+        from agent.error_classifier import FailoverReason
         pool = self._credential_pool
         if pool is None or status_code is None:
             return False, has_retried_429
 
-        if status_code == 402:
-            next_entry = pool.mark_exhausted_and_rotate(status_code=402, error_context=error_context)
+        # Treat any billing reason as 402 regardless of HTTP status code
+        is_billing = (
+            status_code == 402
+            or classified_reason is FailoverReason.billing
+        )
+        if is_billing:
+            next_entry = pool.mark_exhausted_and_rotate(status_code=status_code, error_context=error_context)
             if next_entry is not None:
-                logger.info(f"Credential 402 (billing) — rotated to pool entry {getattr(next_entry, 'id', '?')}")
+                logger.info(f"Credential billing exhaustion — rotated to pool entry {getattr(next_entry, 'id', '?')}")
                 self._swap_credential(next_entry)
                 return True, False
             return False, has_retried_429
@@ -5762,11 +5773,12 @@ class AIAgent:
     def _anthropic_preserve_dots(self) -> bool:
         """True when using an anthropic-compatible endpoint that preserves dots in model names.
         Alibaba/DashScope keeps dots (e.g. qwen3.5-plus).
+        MiniMax keeps dots (e.g. MiniMax-M2.7).
         OpenCode Go keeps dots (e.g. minimax-m2.7)."""
-        if (getattr(self, "provider", "") or "").lower() in {"alibaba", "opencode-go"}:
+        if (getattr(self, "provider", "") or "").lower() in {"alibaba", "minimax", "minimax-cn", "opencode-go"}:
             return True
         base = (getattr(self, "base_url", "") or "").lower()
-        return "dashscope" in base or "aliyuncs" in base or "opencode.ai/zen/go" in base
+        return "dashscope" in base or "aliyuncs" in base or "minimax" in base or "opencode.ai/zen/go" in base
 
     def _is_qwen_portal(self) -> bool:
         """Return True when the base URL targets Qwen Portal."""
@@ -7464,6 +7476,11 @@ class AIAgent:
 
         Returns a dict with turn context (messages list, task_id, system prompt, etc.).
         Called at the start of run_conversation before entering the tool loop.
+
+        NOTE: _turns_since_memory and _iters_since_skill are NOT reset here.
+        They must only reset inside the conditional nudge-fire blocks in
+        run_conversation (after the >= interval guard) so they persist across
+        turns and correctly count up to the nudge threshold.
         """
         messages = list(conversation_history) if conversation_history else []
         effective_task_id = task_id or str(uuid.uuid4())
@@ -9804,10 +9821,14 @@ class AIAgent:
                         _truly_empty = not final_response.strip()
                         if _truly_empty and not _has_structured and self._empty_content_retries < 3:
                             self._empty_content_retries += 1
-                            self._vprint(
-                                f"{self.log_prefix}↻ Empty response (no content or reasoning) "
-                                f"— retrying ({self._empty_content_retries}/3)",
-                                force=True,
+                            logger.warning(
+                                "Empty response (no content or reasoning) — "
+                                "retry %d/3 (model=%s)",
+                                self._empty_content_retries, self.model,
+                            )
+                            self._emit_status(
+                                f"⚠️ Empty response from model — retrying "
+                                f"({self._empty_content_retries}/3)"
                             )
                             continue
 
@@ -9825,6 +9846,11 @@ class AIAgent:
                             self._vprint(f"{self.log_prefix}ℹ️  Reasoning-only response (no visible content). Reasoning: {reasoning_preview}")
                         else:
                             self._vprint(f"{self.log_prefix}ℹ️  Empty response (no content or reasoning) after 3 retries.")
+                            self._emit_status(
+                                "❌ Model returned no content after all retries"
+                                + (" and fallback attempts." if self._fallback_chain else
+                                   ". No fallback providers configured.")
+                            )
 
                         final_response = "(empty)"
                         break

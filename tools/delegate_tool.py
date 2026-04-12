@@ -533,13 +533,6 @@ def _run_single_child(
         if isinstance(saved_tool_names, list):
             model_tools._last_resolved_tool_names = list(saved_tool_names)
 
-        # Release credential lease if one was acquired
-        if _pool is not None and _leased_id is not None:
-            try:
-                _pool.release_lease(_leased_id)
-            except Exception as _lr:
-                logger.debug("Credential lease release failed: %s", _lr)
-
         # Unregister child from interrupt propagation
         if hasattr(parent_agent, '_active_children'):
             try:

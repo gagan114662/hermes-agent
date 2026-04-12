@@ -138,7 +138,7 @@ def get_skin_tool_prefix() -> str:
 
 
 _BUILTIN_TOOL_EMOJIS: dict = {
-    "terminal": "💻",
+    "terminal": "⚙️",
     "execute_code": "🐍",
     "read_file": "📄",
     "write_file": "✏️",

@@ -1180,6 +1180,12 @@ def _seed_from_env(provider: str, entries: List[PooledCredential]) -> Tuple[bool
 
     env_vars = list(pconfig.api_key_env_vars)
     if provider == "anthropic":
+        try:
+            from hermes_cli.auth import is_provider_explicitly_configured
+            if not is_provider_explicitly_configured("anthropic"):
+                return changed, active_sources
+        except ImportError:
+            pass
         env_vars = [
             "ANTHROPIC_TOKEN",
             "CLAUDE_CODE_OAUTH_TOKEN",

@@ -751,11 +751,11 @@ class GatewayRunner:
                 return
 
             from run_agent import AIAgent
-            model, runtime_kwargs = self._resolve_session_agent_runtime(
-                session_key=session_key,
-            )
+            runtime_kwargs = _resolve_runtime_agent_kwargs()
             if not runtime_kwargs.get("api_key"):
                 return
+
+            model = _resolve_gateway_model()
 
             tmp_agent = AIAgent(
                 **runtime_kwargs,
@@ -764,7 +764,7 @@ class GatewayRunner:
                 quiet_mode=True,
                 enabled_toolsets=["memory", "skills"],
                 session_id=old_session_id,
-                honcho_session_key=honcho_session_key,
+                honcho_session_key=session_key,
             )
             # Fully silence the flush agent — quiet_mode only suppresses init
             # messages; tool call output still leaks to the terminal through
@@ -1917,44 +1917,54 @@ class GatewayRunner:
         except Exception:
             pass
 
-        for session_key, agent in list(self._running_agents.items()):
-            if agent is _AGENT_PENDING_SENTINEL:
-                continue
-            try:
-                agent.interrupt("Gateway shutting down")
-                logger.debug("Interrupted running agent for session %s during shutdown", session_key[:20])
-            except Exception as e:
-                logger.debug("Failed interrupting agent during shutdown: %s", e)
-            try:
-                from hermes_cli.plugins import invoke_hook
-                _sid = getattr(agent, 'session_id', None)
-                if _sid:
-                    invoke_hook("on_session_finalize", session_id=_sid)
-            except Exception:
-                pass
+        # Drain active agents before interrupting — gives in-flight work a
+        # chance to finish within the configured timeout.
+        active_agents, timed_out = await self._drain_active_agents(
+            getattr(self, "_restart_drain_timeout", 0.0)
+        )
 
+        if timed_out:
+            self._interrupt_running_agents("Gateway shutting down")
+
+        self._finalize_shutdown_agents(active_agents)
+
+        # Tool cleanup
+        try:
+            from tools.terminal_tool import cleanup_all_environments
+            cleanup_all_environments()
+        except Exception:
+            pass
+        try:
+            from tools.browser_tool import cleanup_all_browsers
+            cleanup_all_browsers()
+        except Exception:
+            pass
+
+        # Disconnect all adapters
         for platform, adapter in list(self.adapters.items()):
             try:
-                from tools.terminal_tool import cleanup_all_environments
-                cleanup_all_environments()
-            except Exception:
-                pass
-            try:
-                from tools.browser_tool import cleanup_all_browsers
-                cleanup_all_browsers()
-            except Exception:
-                pass
+                await adapter.disconnect()
+            except Exception as e:
+                logger.debug("Error disconnecting adapter %s: %s", platform, e)
 
-            from gateway.status import remove_pid_file
-            remove_pid_file()
+        from gateway.status import remove_pid_file, write_runtime_status
+        remove_pid_file()
 
-            if self._restart_requested and self._restart_via_service:
-                self._exit_code = GATEWAY_SERVICE_RESTART_EXIT_CODE
-                self._exit_reason = self._exit_reason or "Gateway restart requested"
+        if self._restart_requested and self._restart_via_service:
+            self._exit_code = GATEWAY_SERVICE_RESTART_EXIT_CODE
+            self._exit_reason = self._exit_reason or "Gateway restart requested"
 
-            self._draining = False
-            self._update_runtime_status("stopped", self._exit_reason)
-            logger.info("Gateway stopped")
+        self._draining = False
+        self._update_runtime_status("stopped", self._exit_reason)
+
+        # Clear state
+        self.adapters.clear()
+        self._running_agents.clear()
+        self._pending_messages.clear()
+        self._pending_approvals.clear()
+        self._shutdown_event.set()
+
+        logger.info("Gateway stopped")
 
     async def wait_for_shutdown(self) -> None:
         """Wait for shutdown signal."""
@@ -3685,16 +3695,6 @@ class GatewayRunner:
         # Reset the session
         new_entry = self.session_store.reset_session(session_key)
         _new_session_id = new_entry.session_id if new_entry else None
-
-        # Fire plugin lifecycle hooks
-        try:
-            from hermes_cli.plugins import invoke_hook
-            if _old_session_id:
-                invoke_hook("on_session_finalize", session_id=_old_session_id, platform=_platform_str)
-            if _new_session_id:
-                invoke_hook("on_session_reset", session_id=_new_session_id, platform=_platform_str)
-        except Exception:
-            pass
 
         # Fire plugin lifecycle hooks
         try:
@@ -5672,7 +5672,7 @@ class GatewayRunner:
         # Flush memories for current session before switching
         try:
             _flush_task = asyncio.create_task(
-                self._async_flush_memories(current_entry.session_id)
+                self._async_flush_memories(current_entry.session_id, session_key)
             )
             self._background_tasks.add(_flush_task)
             _flush_task.add_done_callback(self._background_tasks.discard)

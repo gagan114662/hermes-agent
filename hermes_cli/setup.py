@@ -106,8 +106,8 @@ _DEFAULT_PROVIDER_MODELS = {
     ],
     "zai": ["glm-5", "glm-4.7", "glm-4.5", "glm-4.5-flash"],
     "kimi-coding": ["kimi-k2.5", "kimi-k2-thinking", "kimi-k2-turbo-preview"],
-    "minimax": ["MiniMax-M2.7", "MiniMax-M2.5", "MiniMax-M2.1", "MiniMax-M2"],
-    "minimax-cn": ["MiniMax-M2.7", "MiniMax-M2.5", "MiniMax-M2.1", "MiniMax-M2"],
+    "minimax": ["MiniMax-M1", "MiniMax-M1-40k", "MiniMax-M1-80k", "MiniMax-M1-128k", "MiniMax-M1-256k", "MiniMax-M2.5", "MiniMax-M2.7"],
+    "minimax-cn": ["MiniMax-M1", "MiniMax-M1-40k", "MiniMax-M1-80k", "MiniMax-M1-128k", "MiniMax-M1-256k", "MiniMax-M2.5", "MiniMax-M2.7"],
     "ai-gateway": ["anthropic/claude-opus-4.6", "anthropic/claude-sonnet-4.6", "openai/gpt-5", "google/gemini-3-flash"],
     "kilocode": ["anthropic/claude-opus-4.6", "anthropic/claude-sonnet-4.6", "openai/gpt-5.4", "google/gemini-3-pro-preview", "google/gemini-3-flash-preview"],
     "opencode-zen": ["gpt-5.4", "gpt-5.3-codex", "claude-sonnet-4-6", "gemini-3-flash", "glm-5", "kimi-k2.5", "minimax-m2.7"],
@@ -172,6 +172,147 @@ def _setup_copilot_reasoning_selection(
     elif effort_idx == len(efforts):
         _set_reasoning_effort(config, "none")
 
+
+def _setup_provider_model_selection(config, provider_id, current_model, prompt_choice, prompt_fn):
+    """Model selection for API-key providers with live /models detection.
+
+    Tries the provider's /models endpoint first.  Falls back to a
+    hardcoded default list with a warning if the endpoint is unreachable.
+    Always offers a 'Custom model' escape hatch.
+    """
+    from hermes_cli.auth import PROVIDER_REGISTRY, resolve_api_key_provider_credentials
+    from hermes_cli.config import get_env_value
+    from hermes_cli.models import (
+        copilot_model_api_mode,
+        fetch_api_models,
+        fetch_github_model_catalog,
+        normalize_copilot_model_id,
+        normalize_opencode_model_id,
+        opencode_model_api_mode,
+    )
+
+    pconfig = PROVIDER_REGISTRY[provider_id]
+    is_copilot_catalog_provider = provider_id in {"copilot", "copilot-acp"}
+
+    # Resolve API key and base URL for the probe
+    if is_copilot_catalog_provider:
+        api_key = ""
+        if provider_id == "copilot":
+            creds = resolve_api_key_provider_credentials(provider_id)
+            api_key = creds.get("api_key", "")
+            base_url = creds.get("base_url", "") or pconfig.inference_base_url
+        else:
+            try:
+                creds = resolve_api_key_provider_credentials("copilot")
+                api_key = creds.get("api_key", "")
+            except Exception:
+                pass
+            base_url = pconfig.inference_base_url
+        catalog = fetch_github_model_catalog(api_key)
+        current_model = normalize_copilot_model_id(
+            current_model,
+            catalog=catalog,
+            api_key=api_key,
+        ) or current_model
+    else:
+        api_key = ""
+        for ev in pconfig.api_key_env_vars:
+            api_key = get_env_value(ev) or os.getenv(ev, "")
+            if api_key:
+                break
+        base_url_env = pconfig.base_url_env_var or ""
+        base_url = (get_env_value(base_url_env) if base_url_env else "") or pconfig.inference_base_url
+        catalog = None
+
+    # Try live /models endpoint
+    if is_copilot_catalog_provider and catalog:
+        live_models = [item.get("id", "") for item in catalog if item.get("id")]
+    else:
+        live_models = fetch_api_models(api_key, base_url)
+
+    if live_models:
+        provider_models = live_models
+        print_info(f"Found {len(live_models)} model(s) from {pconfig.name} API")
+    else:
+        fallback_provider_id = "copilot" if provider_id == "copilot-acp" else provider_id
+        provider_models = _DEFAULT_PROVIDER_MODELS.get(fallback_provider_id, [])
+        if provider_models:
+            print_warning(
+                f"Could not auto-detect models from {pconfig.name} API — showing defaults.\n"
+                f"    Use \"Custom model\" if the model you expect isn't listed."
+            )
+
+    if provider_id in {"opencode-zen", "opencode-go"}:
+        provider_models = [normalize_opencode_model_id(provider_id, mid) for mid in provider_models]
+        current_model = normalize_opencode_model_id(provider_id, current_model)
+        provider_models = list(dict.fromkeys(mid for mid in provider_models if mid))
+
+    model_choices = list(provider_models)
+    model_choices.append("Custom model")
+    model_choices.append(f"Keep current ({current_model})")
+
+    keep_idx = len(model_choices) - 1
+    model_idx = prompt_choice("Select default model:", model_choices, keep_idx)
+
+    selected_model = current_model
+
+    if model_idx < len(provider_models):
+        selected_model = provider_models[model_idx]
+        if is_copilot_catalog_provider:
+            selected_model = normalize_copilot_model_id(
+                selected_model,
+                catalog=catalog,
+                api_key=api_key,
+            ) or selected_model
+        elif provider_id in {"opencode-zen", "opencode-go"}:
+            selected_model = normalize_opencode_model_id(provider_id, selected_model)
+        _set_default_model(config, selected_model)
+    elif model_idx == len(provider_models):
+        custom = prompt_fn("Enter model name")
+        if custom:
+            if is_copilot_catalog_provider:
+                selected_model = normalize_copilot_model_id(
+                    custom,
+                    catalog=catalog,
+                    api_key=api_key,
+                ) or custom
+            elif provider_id in {"opencode-zen", "opencode-go"}:
+                selected_model = normalize_opencode_model_id(provider_id, custom)
+            else:
+                selected_model = custom
+            _set_default_model(config, selected_model)
+    else:
+        # "Keep current" selected — validate it's compatible with the new
+        # provider.  OpenRouter-formatted names (containing "/") won't work
+        # on direct-API providers and would silently break the gateway.
+        if "/" in (current_model or "") and provider_models:
+            print_warning(
+                f"Current model \"{current_model}\" looks like an OpenRouter model "
+                f"and won't work with {pconfig.name}. "
+                f"Switching to {provider_models[0]}."
+            )
+            selected_model = provider_models[0]
+            _set_default_model(config, provider_models[0])
+
+    if provider_id == "copilot" and selected_model:
+        model_cfg = _model_config_dict(config)
+        model_cfg["api_mode"] = copilot_model_api_mode(
+            selected_model,
+            catalog=catalog,
+            api_key=api_key,
+        )
+        config["model"] = model_cfg
+        _setup_copilot_reasoning_selection(
+            config,
+            selected_model,
+            prompt_choice,
+            catalog=catalog,
+            api_key=api_key,
+        )
+    elif provider_id in {"opencode-zen", "opencode-go"} and selected_model:
+        model_cfg = _model_config_dict(config)
+        model_cfg["api_mode"] = opencode_model_api_mode(provider_id, selected_model)
+        config["model"] = model_cfg
 
 
 # Import config helpers

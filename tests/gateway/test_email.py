@@ -1013,8 +1013,9 @@ class TestSendEmailStandalone(unittest.TestCase):
         from tools.send_message_tool import _send_email
 
         with patch("smtplib.SMTP") as mock_smtp:
-            mock_server = MagicMock()
-            mock_smtp.return_value = mock_server
+            # MagicMock.__enter__ returns __enter__.return_value (not self),
+            # so grab the context-manager server mock via that path.
+            mock_server = mock_smtp.return_value.__enter__.return_value
 
             result = asyncio.run(
                 _send_email({"address": "hermes@test.com", "smtp_host": "smtp.test.com"}, "user@test.com", "Hello")

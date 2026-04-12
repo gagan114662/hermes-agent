@@ -48,7 +48,7 @@ class TestSSEAgentCancelOnDisconnect:
         adapter = _make_adapter()
 
         stream_q = queue.Queue()
-        stream_q.put("hello ")  # Some data already queued
+        stream_q.put("hello world!")  # 12 chars — enough to flush prefix buffer (threshold: 8)
 
         # Agent task that runs forever (simulates a long LLM call)
         agent_done = asyncio.Event()
@@ -203,7 +203,7 @@ class TestSSEAgentCancelOnDisconnect:
         adapter = _make_adapter()
 
         stream_q = queue.Queue()
-        stream_q.put("hello ")
+        stream_q.put("hello world!")  # 12 chars — enough to flush prefix buffer (threshold: 8)
 
         agent_done = asyncio.Event()
 

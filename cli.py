@@ -6317,6 +6317,11 @@ Then list:
                 approx_tokens,
                 new_tokens,
             )
+            icon = "🗜️" if summary["noop"] else "✅"
+            print(f"  {icon} {summary['headline']}")
+            print(f"     {summary['token_line']}")
+            if summary["note"]:
+                print(f"     {summary['note']}")
 
         except Exception as e:
             print(f"  ❌ Compression failed: {e}")

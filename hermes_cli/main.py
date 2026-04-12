@@ -1009,11 +1009,10 @@ def select_provider_and_model(args=None):
         ("alibaba", "Alibaba Cloud / DashScope Coding (Qwen + multi-provider)"),
     ]
 
-    def _named_custom_provider_map(cfg) -> dict[str, dict[str, str]]:
-        custom_providers_cfg = cfg.get("custom_providers") or []
-        custom_provider_map = {}
-        if not isinstance(custom_providers_cfg, list):
-            return custom_provider_map
+    # Add user-defined custom providers from config.yaml
+    custom_providers_cfg = config.get("custom_providers") or []
+    _custom_provider_map = {}  # key → {name, base_url, api_key}
+    if isinstance(custom_providers_cfg, list):
         for entry in custom_providers_cfg:
             if not isinstance(entry, dict):
                 continue
@@ -1027,6 +1026,27 @@ def select_provider_and_model(args=None):
             model_hint = f" — {saved_model}" if saved_model else ""
             top_providers.append((key, f"{name} ({short_url}){model_hint}"))
             _custom_provider_map[key] = {
+                "name": name,
+                "base_url": base_url,
+                "api_key": entry.get("api_key", ""),
+                "model": saved_model,
+            }
+
+    def _named_custom_provider_map(cfg) -> dict[str, dict[str, str]]:
+        """Re-parse custom_providers from the given config snapshot."""
+        custom_providers_cfg = cfg.get("custom_providers") or []
+        custom_provider_map = {}
+        if not isinstance(custom_providers_cfg, list):
+            return custom_provider_map
+        for entry in custom_providers_cfg:
+            if not isinstance(entry, dict):
+                continue
+            name = (entry.get("name") or "").strip()
+            base_url = (entry.get("base_url") or "").strip()
+            if not name or not base_url:
+                continue
+            key = "custom:" + name.lower().replace(" ", "-")
+            custom_provider_map[key] = {
                 "name": name,
                 "base_url": base_url,
                 "api_key": entry.get("api_key", ""),

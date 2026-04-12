@@ -298,6 +298,7 @@ def _derive_chat_session_id(
     the same Hermes session (and therefore the same Docker container sandbox
     directory) across turns.
     """
+    import hashlib
     seed = f"{system_prompt or ''}\n{first_user_message}"
     digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
     return f"api-{digest}"
@@ -616,7 +617,14 @@ class APIServerAdapter(BasePlatformAdapter):
                 logger.warning("Failed to load session history for %s: %s", session_id, e)
                 history = []
         else:
-            session_id = str(uuid.uuid4())
+            # Derive a stable session ID from the system prompt + first user
+            # message so the same conversation produces the same session across
+            # all turns (OpenAI-compatible frontends resend full history each turn).
+            first_user_msg = next(
+                (m["content"] for m in conversation_messages if m.get("role") == "user"),
+                user_message,
+            )
+            session_id = _derive_chat_session_id(system_prompt, first_user_msg)
             # history already set from request body above
 
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:29]}"
@@ -821,6 +829,15 @@ class APIServerAdapter(BasePlatformAdapter):
                         }
                         await response.write(f"data: {json.dumps(chunk)}\n\n".encode())
 
+            async def _write_delta(delta) -> None:
+                """Route a queue item to either tool-progress or content writer."""
+                if isinstance(delta, tuple) and len(delta) == 2 and delta[0] == "__tool_progress__":
+                    await response.write(
+                        f"event: hermes.tool.progress\ndata: {json.dumps(delta[1])}\n\n".encode()
+                    )
+                else:
+                    await _write_content(delta)
+
             loop = asyncio.get_event_loop()
             while True:
                 try:
@@ -833,7 +850,7 @@ class APIServerAdapter(BasePlatformAdapter):
                                 delta = stream_q.get_nowait()
                                 if delta is None:
                                     break
-                                await _write_content(delta)
+                                await _write_delta(delta)
                             except _q.Empty:
                                 break
                         await _flush_prefix()
@@ -844,7 +861,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     await _flush_prefix()
                     break
 
-                await _write_content(delta)
+                await _write_delta(delta)
 
             # Get usage from completed agent
             usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}

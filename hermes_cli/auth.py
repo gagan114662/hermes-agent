@@ -2462,6 +2462,29 @@ def get_external_process_provider_status(provider_id: str) -> Dict[str, Any]:
     }
 
 
+def detect_external_credentials() -> List[Dict[str, Any]]:
+    """Scan for credentials from other CLI tools that Hermes can reuse.
+
+    Returns a list of dicts, each with:
+      - provider: str   -- Hermes provider id (e.g. "openai-codex")
+      - path: str       -- filesystem path where creds were found
+      - label: str      -- human-friendly description for the setup UI
+    """
+    found: List[Dict[str, Any]] = []
+
+    # Codex CLI: ~/.codex/auth.json (importable, not shared)
+    cli_tokens = _import_codex_cli_tokens()
+    if cli_tokens:
+        codex_path = Path.home() / ".codex" / "auth.json"
+        found.append({
+            "provider": "openai-codex",
+            "path": str(codex_path),
+            "label": f"Codex CLI credentials found ({codex_path}) — run `hermes auth` to create a separate session",
+        })
+
+    return found
+
+
 def get_auth_status(provider_id: Optional[str] = None) -> Dict[str, Any]:
     """Generic auth status dispatcher."""
     target = provider_id or get_active_provider()
