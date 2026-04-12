@@ -36,7 +36,12 @@ import threading
 import uuid
 from typing import Dict, Any, Optional, Union
 from urllib.parse import urlencode
-import fal_client
+# fal_client is optional — import it if available so tests can patch it,
+# but don't fail if the SDK is not installed.
+try:
+    import fal_client
+except ImportError:
+    fal_client = None  # type: ignore[assignment]
 from tools.debug_helpers import DebugSession
 from tools.managed_tool_gateway import resolve_managed_tool_gateway
 from tools.tool_backend_helpers import managed_nous_tools_enabled
@@ -105,6 +110,8 @@ class _ManagedFalSyncClient:
     """Small per-instance wrapper around fal_client.SyncClient for managed queue hosts."""
 
     def __init__(self, *, key: str, queue_run_origin: str):
+        if fal_client is None:
+            raise ImportError("fal_client SDK is not installed. Install with: pip install 'fal-client>=0.13.1'")
         sync_client_class = getattr(fal_client, "SyncClient", None)
         if sync_client_class is None:
             raise RuntimeError("fal_client.SyncClient is required for managed FAL gateway mode")
@@ -205,6 +212,8 @@ def _submit_fal_request(model: str, arguments: Dict[str, Any]):
     request_headers = {"x-idempotency-key": str(uuid.uuid4())}
     managed_gateway = _resolve_managed_fal_gateway()
     if managed_gateway is None:
+        if fal_client is None:
+            raise ImportError("fal_client SDK is not installed. Install with: pip install 'fal-client>=0.13.1'")
         return fal_client.submit(model, arguments=arguments, headers=request_headers)
 
     managed_client = _get_managed_fal_client(managed_gateway)
