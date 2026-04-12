@@ -2017,6 +2017,15 @@ class APIServerAdapter(BasePlatformAdapter):
             logger.warning("[%s] aiohttp not installed", self.name)
             return False
 
+        # Bind guard: refuse to bind to network-accessible address without API key
+        if is_network_accessible(self._host) and not self._api_key:
+            logger.error(
+                "[%s] Refusing to bind to network-accessible address %s without API_SERVER_KEY. "
+                "Set an API key in config.yaml (platforms.api_server.key) or via API_SERVER_KEY environment variable.",
+                self.name, self._host,
+            )
+            return False
+
         try:
             mws = [mw for mw in (cors_middleware, body_limit_middleware, security_headers_middleware) if mw is not None]
             self._app = web.Application(middlewares=mws)

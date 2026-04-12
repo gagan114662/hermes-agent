@@ -204,45 +204,6 @@ class ContextCompressor(ContextEngine):
             (1 - tokens_after/tokens_before) * 100 if tokens_before > 0 else 0
         )
 
-        # CC-style armed/urgent states
-        self.arm_threshold: float = 0.65     # warn at 65% — context getting large
-        self.urgent_threshold: float = 0.80  # force compress at 80% — don't wait
-        self.armed: bool = False
-        self.collapse_commits: list = []      # history of CollapseCommit
-
-    def check_arm_state(self, current_tokens: int) -> bool:
-        """Check if context should be armed (65% threshold). Returns True if newly armed."""
-        ratio = current_tokens / self.context_length
-        if ratio >= self.arm_threshold and not self.armed:
-            self.armed = True
-            logger.warning(
-                "[context-collapse] Context at %.0f%% (%d/%d tokens) — armed for compression",
-                ratio * 100, current_tokens, self.context_length
-            )
-            return True
-        elif ratio < self.arm_threshold and self.armed:
-            self.armed = False
-        return False
-
-    def should_force_compress(self, current_tokens: int) -> bool:
-        """Return True if context is at urgent threshold (80%) — compress immediately."""
-        return current_tokens / self.context_length >= self.urgent_threshold
-
-    def _record_commit(self, tokens_before: int, tokens_after: int, summary_length: int) -> None:
-        """Record a compression event."""
-        self.collapse_commits.append(CollapseCommit(
-            timestamp=time.time(),
-            tokens_before=tokens_before,
-            tokens_after=tokens_after,
-            summary_length=summary_length,
-        ))
-        logger.info(
-            "[context-collapse] Commit #%d: %d→%d tokens saved (%.0f%%)",
-            len(self.collapse_commits),
-            tokens_before, tokens_after,
-            (1 - tokens_after/tokens_before) * 100 if tokens_before > 0 else 0
-        )
-
     def update_from_response(self, usage: Dict[str, Any]):
         """Update tracked token usage from API response."""
         self.last_prompt_tokens = usage.get("prompt_tokens", 0)
