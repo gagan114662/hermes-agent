@@ -26,6 +26,21 @@ def _isolate_hermes_home(tmp_path, monkeypatch):
     (fake_home / "memories").mkdir()
     (fake_home / "skills").mkdir()
     monkeypatch.setenv("HERMES_HOME", str(fake_home))
+    # Redirect CODEX_HOME so _import_codex_cli_tokens() doesn't read
+    # the developer's real ~/.codex/auth.json and pollute tests with live
+    # OAuth tokens.
+    monkeypatch.setenv("CODEX_HOME", str(fake_home / "codex"))
+
+    # gateway/pairing.py sets PAIRING_DIR at module import time from the real
+    # ~/.hermes path. Patch it to the temp dir so tests don't read/write the
+    # developer's real pairing state (rate limits, approved users, etc.).
+    try:
+        import gateway.pairing as _pairing_mod
+        fake_pairing_dir = fake_home / "platforms" / "pairing"
+        fake_pairing_dir.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(_pairing_mod, "PAIRING_DIR", fake_pairing_dir)
+    except Exception:
+        pass
     # Reset plugin singleton so tests don't leak plugins from ~/.hermes/plugins/
     try:
         import hermes_cli.plugins as _plugins_mod
@@ -38,6 +53,48 @@ def _isolate_hermes_home(tmp_path, monkeypatch):
     monkeypatch.delenv("HERMES_SESSION_CHAT_ID", raising=False)
     monkeypatch.delenv("HERMES_SESSION_CHAT_NAME", raising=False)
     monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
+    # Avoid making real calls during tests if this key is set in the env files
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    # Prevent real gateway credentials from leaking into unit tests via
+    # load_hermes_dotenv() which fires at gateway/run.py module-import time.
+    # Clear all known Hermes env vars so tests don't see real machine config.
+    _hermes_env_vars = [
+        "API_SERVER_KEY", "API_SERVER_HOST", "API_SERVER_PORT",
+        "API_SERVER_CORS_ORIGINS", "API_SERVER_ENABLED", "API_SERVER_MODEL_NAME",
+        "HERMES_PROVIDER", "CLAUDE_CODE_OAUTH_TOKEN",
+        "TELEGRAM_BOT_TOKEN", "TELEGRAM_ALLOWED_USERS", "TELEGRAM_HOME_CHANNEL",
+        "DISCORD_BOT_TOKEN", "DISCORD_ALLOWED_USERS", "DISCORD_HOME_CHANNEL",
+        "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "SLACK_ALLOWED_USERS",
+        "GATEWAY_ALLOW_ALL_USERS", "GATEWAY_ALLOWED_USERS",
+        "DISCORD_ALLOW_ALL_USERS", "SLACK_ALLOW_ALL_USERS",
+        "HERMES_TIMEZONE", "HERMES_MANAGED", "HERMES_MAX_ITERATIONS",
+        # Provider API keys — prevent real credentials from leaking via env
+        # into tests that check is_provider_explicitly_configured() or
+        # resolve_provider("auto"). All provider env vars must be cleared so
+        # tests that monkeypatch a specific provider don't see a different one.
+        "ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN",
+        "GOOGLE_API_KEY", "GEMINI_API_KEY",
+        "GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY",
+        "KIMI_API_KEY",
+        "MINIMAX_API_KEY", "MINIMAX_CN_API_KEY",
+        "DASHSCOPE_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "XAI_API_KEY",
+        "AI_GATEWAY_API_KEY",
+        "OPENCODE_ZEN_API_KEY", "OPENCODE_GO_API_KEY",
+        "KILOCODE_API_KEY",
+        "HF_TOKEN",
+        "XIAOMI_API_KEY",
+        # GitHub tokens are commonly present for repo/tool access but should
+        # not hijack inference auto-selection.
+        "GITHUB_TOKEN", "GH_TOKEN", "COPILOT_GITHUB_TOKEN",
+        # Telephony credentials — prevent real phone numbers from leaking
+        # into tests that mock Twilio/Bland/VAPI state.
+        "TWILIO_PHONE_NUMBER", "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN",
+        "BLAND_API_KEY", "VAPI_API_KEY", "VAPI_PHONE_NUMBER_ID",
+    ]
+    for _var in _hermes_env_vars:
+        monkeypatch.delenv(_var, raising=False)
 
 
 @pytest.fixture()

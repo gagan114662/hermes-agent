@@ -186,19 +186,10 @@ def _send_via_smtp(
 
         msg.attach(MIMEText(body, "plain", "utf-8"))
 
-        server = smtplib.SMTP(smtp_host, smtp_port, timeout=30)
-        try:
+        with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as server:
             server.starttls(context=ssl.create_default_context())
             server.login(address, password)
             server.send_message(msg)
-        finally:
-            try:
-                server.quit()
-            except Exception:
-                try:
-                    server.close()
-                except Exception:
-                    pass
 
         logger.info("Email sent via SMTP to %s", to)
         return {"success": True, "message_id": msg_id, "provider": "smtp"}

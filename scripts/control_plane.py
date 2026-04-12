@@ -9,11 +9,14 @@ Env vars:
     CONTROL_PLANE_PORT      — Port to bind (default 8080)
 """
 import asyncio
+import hashlib
+import hmac
 import ipaddress
 import json
 import logging
 import os
 import sqlite3
+import time
 import urllib.parse
 import urllib.request
 from contextlib import asynccontextmanager
@@ -300,6 +303,45 @@ async def customer_ready(request: Request) -> dict:
     return {"ok": True}
 
 
+@app.post("/stripe-webhook")
+async def stripe_webhook(request: Request):
+    """Receive Stripe webhook events and process payments."""
+    secret = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
+    if not secret:
+        raise HTTPException(status_code=500, detail="STRIPE_WEBHOOK_SECRET not configured")
+
+    sig_header = request.headers.get("stripe-signature", "")
+    raw_body = await request.body()
+
+    # Parse timestamp and signature from Stripe-Signature header
+    # Format: t=TIMESTAMP,v1=SIGNATURE
+    parts = dict(item.split("=", 1) for item in sig_header.split(",") if "=" in item)
+    timestamp = parts.get("t", "")
+    v1_sig = parts.get("v1", "")
+
+    if not timestamp or not v1_sig:
+        raise HTTPException(status_code=400, detail="Invalid stripe-signature header")
+
+    # Verify signature
+    signed_payload = f"{timestamp}.{raw_body.decode()}"
+    expected = hmac.new(secret.encode(), signed_payload.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, v1_sig):
+        raise HTTPException(status_code=400, detail="Invalid signature")
+
+    try:
+        event = json.loads(raw_body)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    customer = parse_checkout_session(event)
+    if customer:
+        logger.info("Stripe checkout completed: %s (%s)", customer["name"], customer["email"])
+        asyncio.create_task(_notify_customer(customer))
+        asyncio.create_task(_notify_owner(customer))
+
+    return {"ok": True}
+
+
 @app.post("/admin")
 async def admin(request: Request) -> dict:
     body = await request.json()
@@ -326,6 +368,26 @@ async def admin(request: Request) -> dict:
         return {"result": f"{count} active customers — ${count * 299}/mo MRR"}
     conn.close()
     return {"result": f"Unknown command: {command}"}
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def parse_checkout_session(event: dict):
+    """Parse a Stripe event and return a customer dict for checkout.session.completed."""
+    if event.get("type") != "checkout.session.completed":
+        return None
+    obj = event.get("data", {}).get("object", {})
+    details = obj.get("customer_details", {})
+    return {
+        "email": obj.get("customer_email") or details.get("email", ""),
+        "name": details.get("name", ""),
+        "phone": details.get("phone", ""),
+        "telegram_id": obj.get("metadata", {}).get("telegram_id", ""),
+        "stripe_session_id": obj.get("id", ""),
+        "amount": obj.get("amount_total", 0),
+    }
 
 
 # ---------------------------------------------------------------------------

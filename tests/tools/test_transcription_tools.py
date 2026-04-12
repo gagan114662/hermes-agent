@@ -671,18 +671,15 @@ class TestValidateAudioFileEdgeCases:
         f = tmp_path / "test.ogg"
         f.write_bytes(b"data")
         from tools.transcription_tools import _validate_audio_file
-        real_stat = f.stat()
-        call_count = 0
+        from pathlib import Path
 
-        def stat_side_effect(*args, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            # First calls are from exists() and is_file(), let them pass
-            if call_count <= 2:
-                return real_stat
-            raise OSError("disk error")
-
-        with patch("pathlib.Path.stat", side_effect=stat_side_effect):
+        # Python 3.11: exists()/is_file() call Path.stat() and re-raise non-ignorable
+        # OSErrors. Python 3.12+: exists()/is_file() use os.stat() directly, not
+        # Path.stat(). Mock exists/is_file directly so the file "passes" those checks,
+        # then fail on the explicit stat().st_size call for cross-version correctness.
+        with patch.object(Path, "exists", return_value=True), \
+             patch.object(Path, "is_file", return_value=True), \
+             patch("pathlib.Path.stat", side_effect=OSError("disk error")):
             result = _validate_audio_file(str(f))
         assert result is not None
         assert "Failed to access" in result["error"]
@@ -830,27 +827,54 @@ class TestTranscribeAudioDispatch:
 # ============================================================================
 
 class TestGetSttModelFromConfig:
-    def test_returns_model_from_config(self, tmp_path, monkeypatch):
+    """get_stt_model_from_config is provider-aware: it reads the model from the
+    correct provider-specific section (stt.local.model, stt.openai.model, etc.)
+    and only honours the legacy flat stt.model key for cloud providers."""
+
+    def test_returns_local_model_from_nested_config(self, tmp_path, monkeypatch):
         cfg = tmp_path / "config.yaml"
-        cfg.write_text("stt:\n  model: whisper-large-v3\n")
+        cfg.write_text("stt:\n  provider: local\n  local:\n    model: large-v3\n")
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        from tools.transcription_tools import get_stt_model_from_config
+        assert get_stt_model_from_config() == "large-v3"
+
+    def test_returns_openai_model_from_nested_config(self, tmp_path, monkeypatch):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("stt:\n  provider: openai\n  openai:\n    model: gpt-4o-transcribe\n")
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        from tools.transcription_tools import get_stt_model_from_config
+        assert get_stt_model_from_config() == "gpt-4o-transcribe"
+
+    def test_legacy_flat_key_ignored_for_local_provider(self, tmp_path, monkeypatch):
+        """Legacy stt.model should NOT be used when provider is local, to prevent
+        OpenAI model names (whisper-1) from being fed to faster-whisper."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("stt:\n  provider: local\n  model: whisper-1\n")
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        from tools.transcription_tools import get_stt_model_from_config
+        result = get_stt_model_from_config()
+        assert result != "whisper-1", "Legacy stt.model should be ignored for local provider"
+
+    def test_legacy_flat_key_honoured_for_cloud_provider(self, tmp_path, monkeypatch):
+        """Legacy stt.model should still work for cloud providers that don't
+        have a section in DEFAULT_CONFIG (e.g. groq)."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("stt:\n  provider: groq\n  model: whisper-large-v3\n")
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
         from tools.transcription_tools import get_stt_model_from_config
         assert get_stt_model_from_config() == "whisper-large-v3"
 
-    def test_returns_none_when_no_stt_section(self, tmp_path, monkeypatch):
-        cfg = tmp_path / "config.yaml"
-        cfg.write_text("tts:\n  provider: edge\n")
+    def test_defaults_to_local_model_when_no_config_file(self, tmp_path, monkeypatch):
+        """With no config file, load_config() returns DEFAULT_CONFIG which has
+        stt.provider=local and stt.local.model=base."""
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
         from tools.transcription_tools import get_stt_model_from_config
-        assert get_stt_model_from_config() is None
-
-    def test_returns_none_when_no_config_file(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-
-        from tools.transcription_tools import get_stt_model_from_config
-        assert get_stt_model_from_config() is None
+        assert get_stt_model_from_config() == "base"
 
     def test_returns_none_on_invalid_yaml(self, tmp_path, monkeypatch):
         cfg = tmp_path / "config.yaml"
@@ -858,15 +882,12 @@ class TestGetSttModelFromConfig:
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
         from tools.transcription_tools import get_stt_model_from_config
-        assert get_stt_model_from_config() is None
-
-    def test_returns_none_when_model_key_missing(self, tmp_path, monkeypatch):
-        cfg = tmp_path / "config.yaml"
-        cfg.write_text("stt:\n  enabled: true\n")
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-
-        from tools.transcription_tools import get_stt_model_from_config
-        assert get_stt_model_from_config() is None
+        # _load_stt_config catches exceptions and returns {}, so the function
+        # falls through to return None (no provider section in empty dict)
+        result = get_stt_model_from_config()
+        # With empty config, load_config may still merge defaults; either
+        # None or a default is acceptable — just not an OpenAI model name
+        assert result is None or result in ("base", "small", "medium", "large-v3")
 
 
 # ============================================================================

@@ -987,10 +987,60 @@ def _prune_orphaned_branches(repo_root: str) -> None:
 # - Dim: #B8860B (muted text)
 
 # ANSI building blocks for conversation display
-_GOLD = "\033[1;38;2;255;215;0m"  # True-color #FFD700 bold — matches Rich Panel gold
+_ACCENT_ANSI_DEFAULT = "\033[1;38;2;255;215;0m"  # True-color #FFD700 bold — fallback
 _BOLD = "\033[1m"
 _DIM = "\033[2m"
 _RST = "\033[0m"
+_GOLD = "\033[1;38;2;255;215;0m"
+
+
+def _hex_to_ansi_bold(hex_color: str) -> str:
+    """Convert a hex color like '#268bd2' to a bold true-color ANSI escape."""
+    try:
+        r = int(hex_color[1:3], 16)
+        g = int(hex_color[3:5], 16)
+        b = int(hex_color[5:7], 16)
+        return f"\033[1;38;2;{r};{g};{b}m"
+    except (ValueError, IndexError):
+        return _ACCENT_ANSI_DEFAULT
+
+
+class _SkinAwareAnsi:
+    """Lazy ANSI escape that resolves from the skin engine on first use.
+
+    Acts as a string in f-strings and concatenation.  Call ``.reset()`` to
+    force re-resolution after a ``/skin`` switch.
+    """
+
+    def __init__(self, skin_key: str, fallback_hex: str = "#FFD700"):
+        self._skin_key = skin_key
+        self._fallback_hex = fallback_hex
+        self._cached: str | None = None
+
+    def __str__(self) -> str:
+        if self._cached is None:
+            try:
+                from hermes_cli.skin_engine import get_active_skin
+                self._cached = _hex_to_ansi_bold(
+                    get_active_skin().get_color(self._skin_key, self._fallback_hex)
+                )
+            except Exception:
+                self._cached = _hex_to_ansi_bold(self._fallback_hex)
+        return self._cached
+
+    def __add__(self, other: str) -> str:
+        return str(self) + other
+
+    def __radd__(self, other: str) -> str:
+        return other + str(self)
+
+    def reset(self) -> None:
+        """Clear cache so the next access re-reads the skin."""
+        self._cached = None
+
+
+_ACCENT = _SkinAwareAnsi("response_border", "#FFD700")
+
 
 def _accent_hex() -> str:
     """Return the active skin accent color for legacy CLI output lines."""
@@ -1719,6 +1769,7 @@ class HermesCLI:
         self._secret_state = None
         self._secret_deadline = 0
         self._spinner_text: str = ""  # thinking spinner text for TUI
+        self._tool_start_time: float = 0.0  # monotonic timestamp when current tool started (for live elapsed)
         self._command_running = False
         self._command_status = ""
         self._attached_images: list[Path] = []
@@ -2130,6 +2181,7 @@ class HermesCLI:
         if not text:
             self._flush_reasoning_preview(force=True)
         self._spinner_text = text or ""
+        self._tool_start_time = 0.0  # clear tool timer when switching to thinking
         self._invalidate()
 
     # ── Streaming display ────────────────────────────────────────────────
@@ -2464,7 +2516,7 @@ class HermesCLI:
                 self._stream_text_ansi = ""
             w = shutil.get_terminal_size().columns
             fill = w - 2 - len(label)
-            _cprint(f"\n{_GOLD}╭─{label}{'─' * max(fill - 1, 0)}╮{_RST}")
+            _cprint(f"\n{_ACCENT}╭─{label}{'─' * max(fill - 1, 0)}╮{_RST}")
 
         self._stream_buf += text
 
@@ -2495,7 +2547,7 @@ class HermesCLI:
         # Close the response box
         if self._stream_box_opened:
             w = shutil.get_terminal_size().columns
-            _cprint(f"{_GOLD}╰{'─' * (w - 2)}╯{_RST}")
+            _cprint(f"{_ACCENT}╰{'─' * (w - 2)}╯{_RST}")
 
     def _reset_stream_state(self) -> None:
         """Reset streaming state before each agent invocation."""
@@ -2647,10 +2699,7 @@ class HermesCLI:
     def _resolve_turn_agent_config(self, user_message: str) -> dict:
         """Resolve model/runtime overrides for a single user turn."""
         from agent.smart_model_routing import resolve_turn_route
-        try:
-            from hermes_cli.models import resolve_fast_mode_overrides
-        except ImportError:
-            resolve_fast_mode_overrides = lambda model: None  # noqa: E731
+        from hermes_cli.models import resolve_fast_mode_overrides
 
         route = resolve_turn_route(
             user_message,
@@ -2933,15 +2982,17 @@ class HermesCLI:
             title_part = ""
             if session_meta.get("title"):
                 title_part = f' "{session_meta["title"]}"'
+            accent_color = _accent_hex()
             self.console.print(
-                f"[#DAA520]↻ Resumed session [bold]{self.session_id}[/bold]"
+                f"[{accent_color}]↻ Resumed session [bold]{self.session_id}[/bold]"
                 f"{title_part} "
                 f"({msg_count} user message{'s' if msg_count != 1 else ''}, "
                 f"{len(restored)} total messages)[/]"
             )
         else:
+            accent_color = _accent_hex()
             self.console.print(
-                f"[#DAA520]Session {self.session_id} found but has no "
+                f"[{accent_color}]Session {self.session_id} found but has no "
                 f"messages. Starting fresh.[/]"
             )
             return False
@@ -3410,18 +3461,26 @@ class HermesCLI:
         else:
             api_indicator = "[red bold]●[/]"
 
-        # Build status line with proper markup
+        # Build status line with proper markup — skin-aware colors
+        try:
+            from hermes_cli.skin_engine import get_active_skin
+            skin = get_active_skin()
+            separator_color = skin.get_color("banner_dim", "#B8860B")
+            accent_color = skin.get_color("ui_accent", "#FFBF00")
+            label_color = skin.get_color("ui_label", "#4dd0e1")
+        except Exception:
+            separator_color, accent_color, label_color = "#B8860B", "#FFBF00", "cyan"
         toolsets_info = ""
         if self.enabled_toolsets and "all" not in self.enabled_toolsets:
-            toolsets_info = f" [dim #B8860B]·[/] [#CD7F32]toolsets: {', '.join(self.enabled_toolsets)}[/]"
+            toolsets_info = f" [dim {separator_color}]·[/] [{label_color}]toolsets: {', '.join(self.enabled_toolsets)}[/]"
 
-        provider_info = f" [dim #B8860B]·[/] [dim]provider: {self.provider}[/]"
+        provider_info = f" [dim {separator_color}]·[/] [dim]provider: {self.provider}[/]"
         if self._provider_source:
-            provider_info += f" [dim #B8860B]·[/] [dim]auth: {self._provider_source}[/]"
+            provider_info += f" [dim {separator_color}]·[/] [dim]auth: {self._provider_source}[/]"
 
         self.console.print(
-            f"  {api_indicator} [#FFBF00]{model_short}[/] "
-            f"[dim #B8860B]·[/] [bold cyan]{tool_count} tools[/]"
+            f"  {api_indicator} [{accent_color}]{model_short}[/] "
+            f"[dim {separator_color}]·[/] [bold {label_color}]{tool_count} tools[/]"
             f"{toolsets_info}{provider_info}"
         )
 
@@ -3612,7 +3671,7 @@ class HermesCLI:
         # TUI event loop (known pitfall).
         verb = "Disabling" if subcommand == "disable" else "Enabling"
         label = ", ".join(names)
-        _cprint(f"{_GOLD}{verb} {label}...{_RST}")
+        _cprint(f"{_ACCENT}{verb} {label}...{_RST}")
 
         tools_disable_enable_command(
             Namespace(tools_action=subcommand, names=names, platform="cli"))
@@ -4942,20 +5001,28 @@ class HermesCLI:
             self._handle_personality_command(cmd_original)
         elif canonical == "plan":
             self._handle_plan_command(cmd_original)
+        elif canonical == "agents":
+            self._handle_agents_command(cmd_original)
+        elif canonical == "explore":
+            self._handle_builtin_agent_command(cmd_original, agent_type="explore")
+        elif canonical == "verify":
+            self._handle_builtin_agent_command(cmd_original, agent_type="verify")
+        elif canonical == "research":
+            self._handle_builtin_agent_command(cmd_original, agent_type="researcher")
+        elif canonical == "graph":
+            self._handle_graph_command(cmd_original)
+        elif canonical == "selfheal":
+            self._handle_heal_command(cmd_original)
+        elif canonical == "memdir":
+            self._handle_memdir_command(cmd_original)
+        elif canonical == "learn":
+            self._handle_learn_command(cmd_original)
         elif canonical == "skillnew":
             self._handle_skillnew_command(cmd_original)
         elif canonical == "skillcheck":
             self._handle_skillcheck_command(cmd_original)
         elif canonical == "skilltest":
             self._handle_skilltest_command(cmd_original)
-        elif canonical == "specnew":
-            self._handle_specnew_command(cmd_original)
-        elif canonical == "speclist":
-            self._handle_speclist_command(cmd_original)
-        elif canonical == "specexec":
-            self._handle_specexec_command(cmd_original)
-        elif canonical == "revengineer":
-            self._handle_revengineer_command(cmd_original)
         elif canonical == "retry":
             retry_msg = self.retry_last()
             if retry_msg and hasattr(self, '_pending_input'):
@@ -5109,7 +5176,7 @@ class HermesCLI:
             elif base_cmd in _skill_commands:
                 user_instruction = cmd_original[len(base_cmd):].strip()
                 msg = build_skill_invocation_message(
-                    base_cmd, user_instruction, task_id=self.session_id
+                    base_cmd, user_instruction, task_id=getattr(self, "session_id", None)
                 )
                 if msg:
                     skill_name = _skill_commands[base_cmd]["name"]
@@ -5147,17 +5214,17 @@ class HermesCLI:
                     if full_name == typed_base:
                         # Already an exact token — no expansion possible; fall through
                         _cprint(f"\033[1;31mUnknown command: {cmd_lower}{_RST}")
-                        _cprint(f"{_DIM}{_GOLD}Type /help for available commands{_RST}")
+                        _cprint(f"{_DIM}{_ACCENT}Type /help for available commands{_RST}")
                     else:
                         remainder = cmd_original.strip()[len(typed_base):]
                         full_cmd = full_name + remainder
                         return self.process_command(full_cmd)
                 elif len(matches) > 1:
-                    _cprint(f"{_GOLD}Ambiguous command: {cmd_lower}{_RST}")
+                    _cprint(f"{_ACCENT}Ambiguous command: {cmd_lower}{_RST}")
                     _cprint(f"{_DIM}Did you mean: {', '.join(sorted(matches))}?{_RST}")
                 else:
                     _cprint(f"\033[1;31mUnknown command: {cmd_lower}{_RST}")
-                    _cprint(f"{_DIM}{_GOLD}Type /help for available commands{_RST}")
+                    _cprint(f"{_DIM}{_ACCENT}Type /help for available commands{_RST}")
         
         return True
     
@@ -5505,324 +5572,6 @@ Then list:
         else:
             _cprint(f"  [bold red]{label} agent unavailable: input queue not initialized[/]")
 
-    # ------------------------------------------------------------------
-    # /specnew, /speclist, /specexec — HermesSpec SuperSpec commands
-    # ------------------------------------------------------------------
-
-    def _handle_specnew_command(self, cmd: str):
-        """Handle /specnew <description> — generate a HermesSpec via spec-writer agent.
-
-        The spec-writer agent produces a structured YAML/Markdown spec covering:
-        architecture, data models, workflows, security, and a machine-readable
-        tasks list. The spec is saved to ~/.hermes/specs/<slug>.md.
-
-        Usage:
-            /specnew a CRM tool for tracking sales prospects
-            /specnew REST API for user authentication with JWT
-        """
-        parts = cmd.strip().split(maxsplit=1)
-        description = parts[1].strip() if len(parts) > 1 else ""
-
-        if not description:
-            _cprint("  Usage: /specnew <description of what to build>")
-            _cprint("  Example: /specnew a CRM tool for tracking sales prospects")
-            _cprint("  Produces: ~/.hermes/specs/<name>.md — structured spec with tasks")
-            return
-
-        _cprint(f"  📋 Generating HermesSpec for: \"{description[:70]}{'...' if len(description) > 70 else ''}\"")
-        _cprint("  spec-writer agent will produce architecture, data models, workflows, and tasks.")
-
-        # Try to get specs dir path for context
-        try:
-            from agent.spec_engine import ensure_specs_dir
-            specs_dir = ensure_specs_dir()
-            save_hint = f"\n\nWhen the spec is complete, save it to: {specs_dir}/<slug>.md"
-        except Exception:
-            save_hint = "\n\nSave the spec to ~/.hermes/specs/<slug>.md when complete."
-
-        goal = f"""\
-Generate a complete HermesSpec for the following:
-
-DESCRIPTION: {description}
-
-Rules:
-1. Produce the FULL spec in HermesSpec 1.0 format (YAML frontmatter + all Markdown sections).
-2. Fill in every section: Overview, Architecture, Data Models, Workflows, Security, Tasks.
-3. The Tasks section MUST contain a YAML block with 3-6 concrete, self-contained agent tasks.
-4. The second-to-last task must use agent_type: spec-test-writer.
-5. Output ONLY the spec — no commentary before or after.
-6. After generating the spec content, use write_file to save it to:
-   {specs_dir if 'specs_dir' in dir() else '~/.hermes/specs/'}/<slug>.md
-   where <slug> is the kebab-case name from the frontmatter.
-{save_hint}
-
-Then confirm: "Spec saved to ~/.hermes/specs/<slug>.md — run /specexec <slug> to execute."
-"""
-
-        msg = (
-            f"Generate a HermesSpec for: {description}\n\n"
-            f"Use delegate_task with agent_type='spec-writer':\n\n"
-            f'delegate_task(goal="""{goal}""", agent_type="spec-writer")'
-        )
-
-        if hasattr(self, '_pending_input'):
-            self._pending_input.put(msg)
-        else:
-            _cprint("  [bold red]specnew unavailable: input queue not initialized[/]")
-
-    def _handle_speclist_command(self, cmd: str):
-        """Handle /speclist — list all HermesSpecs in ~/.hermes/specs/."""
-        try:
-            from agent.spec_engine import list_specs, get_specs_dir
-            specs = list_specs()
-            specs_dir = get_specs_dir()
-        except Exception as e:
-            _cprint(f"  [speclist] Error loading specs: {e}")
-            return
-
-        if not specs:
-            _cprint(f"  No specs found in {specs_dir}")
-            _cprint("  Run /specnew <description> to create your first spec.")
-            return
-
-        _cprint(f"  📋 [bold]HermesSpecs[/bold] in {specs_dir}\n")
-        status_colors = {
-            "draft": "yellow",
-            "approved": "cyan",
-            "executing": "blue",
-            "complete": "green",
-        }
-        for spec in specs:
-            total = len(spec.tasks)
-            done = len(spec.completed_tasks)
-            color = status_colors.get(spec.status, "white")
-            bar = f"{done}/{total} tasks" if total else "no tasks"
-            stack = ", ".join(spec.tech_stack) if spec.tech_stack else "—"
-            _cprint(
-                f"  [{color}]{spec.status:10s}[/{color}]  [bold]{spec.name}[/bold]  "
-                f"({bar})  stack: {stack}"
-            )
-            _cprint(f"            {spec.path.name}")
-
-        _cprint(f"\n  Total: {len(specs)} spec(s)")
-        _cprint("  Run /specexec <name> to execute a spec's pending tasks.")
-
-    def _handle_specexec_command(self, cmd: str):
-        """Handle /specexec <name> — execute pending tasks from a HermesSpec.
-
-        Reads the spec, extracts pending tasks, and dispatches each one via
-        delegate_task with the appropriate agent_type. Tasks run in dependency
-        order. After all tasks complete the spec status is updated to 'complete'.
-        """
-        parts = cmd.strip().split(maxsplit=1)
-        spec_name = parts[1].strip() if len(parts) > 1 else ""
-
-        if not spec_name:
-            _cprint("  Usage: /specexec <spec-name>")
-            _cprint("  Example: /specexec crm-tool")
-            _cprint("  Tip: run /speclist to see available specs")
-            return
-
-        try:
-            from agent.spec_engine import load_spec, find_spec, get_specs_dir
-            spec = load_spec(spec_name)
-        except Exception as e:
-            _cprint(f"  [specexec] Error loading spec engine: {e}")
-            return
-
-        if not spec:
-            _cprint(f"  [specexec] Spec '{spec_name}' not found.")
-            _cprint("  Run /speclist to see available specs, or /specnew to create one.")
-            return
-
-        pending = spec.pending_tasks
-        if not pending:
-            _cprint(f"  [specexec] No pending tasks in spec '{spec.name}'.")
-            _cprint(f"  Status: {spec.status}  |  Total tasks: {len(spec.tasks)}")
-            return
-
-        _cprint(f"  🚀 Executing spec '[bold]{spec.name}[/bold]' — {len(pending)} pending task(s)")
-
-        # Build a comprehensive multi-task execution goal
-        tasks_summary = "\n".join(
-            f"  {t.get('id','?')}. [{t.get('agent_type','general')}] {t.get('title','?')}"
-            for t in pending
-        )
-        _cprint(f"\n  Tasks to execute:\n{tasks_summary}\n")
-
-        # Build the full spec context for the executing agent
-        spec_snippet = spec.raw[:2000] + ("\n...[truncated]" if len(spec.raw) > 2000 else "")
-
-        tasks_yaml_lines = []
-        for t in pending:
-            tasks_yaml_lines.append(
-                f"Task {t.get('id','?')}: {t.get('title','?')}\n"
-                f"  agent_type: {t.get('agent_type','general')}\n"
-                f"  goal: {t.get('goal','Execute this task per the spec.')}\n"
-                f"  files: {t.get('files', [])}\n"
-                f"  depends_on: {t.get('depends_on', [])}"
-            )
-        tasks_detail = "\n\n".join(tasks_yaml_lines)
-
-        goal = f"""\
-Execute all pending tasks from the HermesSpec '{spec.name}'.
-
-## Spec Overview
-{spec.overview[:500] if spec.overview else '(See full spec below)'}
-
-## Full Spec (for reference)
-{spec_snippet}
-
-## Pending Tasks (execute in order)
-
-{tasks_detail}
-
-## Instructions
-1. Execute each task in order, respecting depends_on (earlier IDs must complete first).
-2. For each task, use delegate_task with the specified agent_type and goal.
-3. After each task succeeds, note the completion.
-4. After ALL tasks complete, update the spec file at {spec.path} — change its top-level
-   status from 'draft'/'approved' to 'executing', then to 'complete' when all tasks are done.
-5. End with a summary: which tasks passed, which failed, and overall VERDICT.
-"""
-
-        msg = (
-            f"Execute HermesSpec '{spec.name}' — {len(pending)} pending tasks.\n\n"
-            f"Orchestrate the tasks using delegate_task for each:\n\n"
-            f"{goal}"
-        )
-
-        if hasattr(self, '_pending_input'):
-            self._pending_input.put(msg)
-        else:
-            _cprint("  [bold red]specexec unavailable: input queue not initialized[/]")
-
-    # ------------------------------------------------------------------
-    # /revengineer — reverse-engineer any codebase into context + spec
-    # ------------------------------------------------------------------
-
-    def _handle_revengineer_command(self, cmd: str):
-        """Handle /revengineer <path|github-url> — scan a codebase and bootstrap Hermes context.
-
-        Scans the codebase at the given path (or clones a GitHub URL), then dispatches
-        the reverse-engineer agent which produces three outputs:
-          - ~/.hermes/context/<repo>.md   — auto-injected into every future agent
-          - ~/.hermes/skills/<pattern>/SKILL.md — one per discovered skill pattern
-          - ~/.hermes/specs/<repo>.md     — reverse-engineered HermesSpec
-
-        Usage:
-            /revengineer .
-            /revengineer ~/projects/my-app
-            /revengineer https://github.com/owner/repo
-        """
-        parts = cmd.strip().split(maxsplit=1)
-        target = parts[1].strip() if len(parts) > 1 else ""
-
-        if not target:
-            _cprint("  Usage: /revengineer <path|github-url>")
-            _cprint("  Examples:")
-            _cprint("    /revengineer .")
-            _cprint("    /revengineer ~/projects/my-app")
-            _cprint("    /revengineer https://github.com/owner/repo")
-            return
-
-        _cprint(f"  🔍 Scanning codebase: [bold]{target}[/bold]")
-        _cprint("  Building directory tree, reading key files, detecting tech stack…")
-
-        try:
-            from agent.reverse_engineer import build_revengineer_context
-            root, context = build_revengineer_context(target)
-        except FileNotFoundError as e:
-            _cprint(f"  [bold red]Error:[/bold red] {e}")
-            return
-        except NotADirectoryError as e:
-            _cprint(f"  [bold red]Error:[/bold red] {e}")
-            return
-        except Exception as e:
-            _cprint(f"  [bold red]Scan failed:[/bold red] {e}")
-            return
-
-        repo_name = root.name
-
-        # Build context/specs dirs for the agent's save instructions
-        try:
-            from agent.context_library import ensure_context_dir
-            context_dir = ensure_context_dir()
-        except Exception:
-            context_dir = Path("~/.hermes/context").expanduser()
-
-        try:
-            from agent.spec_engine import ensure_specs_dir
-            specs_dir = ensure_specs_dir()
-        except Exception:
-            specs_dir = Path("~/.hermes/specs").expanduser()
-
-        try:
-            from agent.skill_utils import get_all_skills_dirs
-            skills_dirs = get_all_skills_dirs()
-            skills_dir = skills_dirs[0] if skills_dirs else Path("~/.hermes/skills").expanduser()
-        except Exception:
-            skills_dir = Path("~/.hermes/skills").expanduser()
-
-        _cprint(f"  ✅ Scan complete — dispatching reverse-engineer agent for [bold]{repo_name}[/bold]")
-
-        goal = f"""\
-Reverse-engineer the following codebase and produce three outputs.
-
-## Codebase Scan
-
-{context}
-
-## Required outputs
-
-### 1. Context file
-Write the context file to: {context_dir}/{repo_name}.md
-
-Use write_file to save it. This file will be auto-injected into every future
-Hermes agent working on this codebase.
-
-### 2. Skill patterns
-List any repeatable, parameterizable behaviors as SKILL CANDIDATES.
-For each recommended skill, write a starter SKILL.md to:
-  {skills_dir}/<skill-name>/SKILL.md
-
-### 3. HermesSpec
-Write a draft HermesSpec to: {specs_dir}/{repo_name}.md
-
-Use write_file to save it.
-
-## Output format
-Wrap each section with delimiters:
-  === CONTEXT FILE: {repo_name}.md ===
-  ...
-  === END CONTEXT FILE ===
-
-  === SKILL CANDIDATES ===
-  ...
-  === END SKILL CANDIDATES ===
-
-  === HERMESSPEC: {repo_name}.md ===
-  ...
-  === END HERMESSPEC ===
-
-After saving all three files, confirm:
-  "Reverse engineering complete for {repo_name}:
-   - Context: {context_dir}/{repo_name}.md
-   - Spec: {specs_dir}/{repo_name}.md
-   - Skills: <N> candidates found, <M> written"
-"""
-
-        msg = (
-            f"Reverse-engineer the codebase at {root}\n\n"
-            f"Use delegate_task with agent_type='reverse-engineer':\n\n"
-            f"delegate_task(goal=\"\"\"{ goal }\"\"\", agent_type=\"reverse-engineer\")"
-        )
-
-        if hasattr(self, '_pending_input'):
-            self._pending_input.put(msg)
-        else:
-            _cprint("  [bold red]revengineer unavailable: input queue not initialized[/]")
-
     def _handle_background_command(self, cmd: str):
         """Handle /background <prompt> — run a prompt in a separate background session.
 
@@ -6096,10 +5845,20 @@ After saving all three files, confirm:
         if not candidates:
             return False
 
+        # Dedicated profile dir so debug Chrome won't collide with normal Chrome
+        data_dir = str(_hermes_home / "chrome-debug")
+        os.makedirs(data_dir, exist_ok=True)
+
         chrome = candidates[0]
         try:
             _sp.Popen(
-                [chrome, f"--remote-debugging-port={port}"],
+                [
+                    chrome,
+                    f"--remote-debugging-port={port}",
+                    f"--user-data-dir={data_dir}",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                ],
                 stdout=_sp.DEVNULL,
                 stderr=_sp.DEVNULL,
                 start_new_session=True,  # detach from terminal
@@ -6321,6 +6080,7 @@ After saving all three files, confirm:
             return
 
         set_active_skin(new_skin)
+        _ACCENT.reset()  # Re-resolve ANSI color for the new skin
         if save_config_value("display.skin", new_skin):
             print(f"  Skin set to: {new_skin} (saved)")
         else:
@@ -6389,8 +6149,8 @@ After saving all three files, confirm:
             else:
                 level = rc.get("effort", "medium")
             display_state = "on ✓" if self.show_reasoning else "off"
-            _cprint(f"  {_GOLD}Reasoning effort:  {level}{_RST}")
-            _cprint(f"  {_GOLD}Reasoning display: {display_state}{_RST}")
+            _cprint(f"  {_ACCENT}Reasoning effort:  {level}{_RST}")
+            _cprint(f"  {_ACCENT}Reasoning display: {display_state}{_RST}")
             _cprint(f"  {_DIM}Usage: /reasoning <none|minimal|low|medium|high|xhigh|show|hide>{_RST}")
             return
 
@@ -6402,7 +6162,7 @@ After saving all three files, confirm:
             if self.agent:
                 self.agent.reasoning_callback = self._current_reasoning_callback()
             save_config_value("display.show_reasoning", True)
-            _cprint(f"  {_GOLD}✓ Reasoning display: ON (saved){_RST}")
+            _cprint(f"  {_ACCENT}✓ Reasoning display: ON (saved){_RST}")
             _cprint(f"  {_DIM}  Model thinking will be shown during and after each response.{_RST}")
             return
         if arg in ("hide", "off"):
@@ -6410,7 +6170,7 @@ After saving all three files, confirm:
             if self.agent:
                 self.agent.reasoning_callback = self._current_reasoning_callback()
             save_config_value("display.show_reasoning", False)
-            _cprint(f"  {_GOLD}✓ Reasoning display: OFF (saved){_RST}")
+            _cprint(f"  {_ACCENT}✓ Reasoning display: OFF (saved){_RST}")
             return
 
         # Effort level change
@@ -6425,9 +6185,52 @@ After saving all three files, confirm:
         self.agent = None  # Force agent re-init with new reasoning config
 
         if save_config_value("agent.reasoning_effort", arg):
-            _cprint(f"  {_GOLD}✓ Reasoning effort set to '{arg}' (saved to config){_RST}")
+            _cprint(f"  {_ACCENT}✓ Reasoning effort set to '{arg}' (saved to config){_RST}")
         else:
-            _cprint(f"  {_GOLD}✓ Reasoning effort set to '{arg}' (session only){_RST}")
+            _cprint(f"  {_ACCENT}✓ Reasoning effort set to '{arg}' (session only){_RST}")
+
+    def _handle_fast_command(self, cmd: str):
+        """Handle /fast — toggle fast mode (OpenAI Priority Processing / Anthropic Fast Mode)."""
+        if not self._fast_command_available():
+            _cprint("  (._.) /fast is only available for models that support fast mode (OpenAI Priority Processing or Anthropic Fast Mode).")
+            return
+
+        # Determine the branding for the current model
+        try:
+            from hermes_cli.models import _is_anthropic_fast_model
+            agent = getattr(self, "agent", None)
+            model = getattr(agent, "model", None) or getattr(self, "model", None)
+            feature_name = "Anthropic Fast Mode" if _is_anthropic_fast_model(model) else "Priority Processing"
+        except Exception:
+            feature_name = "Fast mode"
+
+        parts = cmd.strip().split(maxsplit=1)
+        if len(parts) < 2 or parts[1].strip().lower() == "status":
+            status = "fast" if self.service_tier == "priority" else "normal"
+            _cprint(f"  {_ACCENT}{feature_name}: {status}{_RST}")
+            _cprint(f"  {_DIM}Usage: /fast [normal|fast|status]{_RST}")
+            return
+
+        arg = parts[1].strip().lower()
+
+        if arg in {"fast", "on"}:
+            self.service_tier = "priority"
+            saved_value = "fast"
+            label = "FAST"
+        elif arg in {"normal", "off"}:
+            self.service_tier = None
+            saved_value = "normal"
+            label = "NORMAL"
+        else:
+            _cprint(f"  {_DIM}(._.) Unknown argument: {arg}{_RST}")
+            _cprint(f"  {_DIM}Usage: /fast [normal|fast|status]{_RST}")
+            return
+
+        self.agent = None  # Force agent re-init with new service-tier config
+        if save_config_value("agent.service_tier", saved_value):
+            _cprint(f"  {_ACCENT}✓ {feature_name} set to {label} (saved to config){_RST}")
+        else:
+            _cprint(f"  {_ACCENT}✓ {feature_name} set to {label} (session only){_RST}")
 
     def _handle_fast_command(self, cmd: str):
         """Handle /fast — toggle fast mode (OpenAI Priority Processing / Anthropic Fast Mode)."""
@@ -6496,21 +6299,29 @@ After saving all three files, confirm:
         original_count = len(self.conversation_history)
         try:
             from agent.model_metadata import estimate_messages_tokens_rough
-            approx_tokens = estimate_messages_tokens_rough(self.conversation_history)
+            from agent.manual_compression_feedback import summarize_manual_compression
+            original_history = list(self.conversation_history)
+            approx_tokens = estimate_messages_tokens_rough(original_history)
             print(f"🗜️  Compressing {original_count} messages (~{approx_tokens:,} tokens)...")
 
-            compressed, _new_system = self.agent._compress_context(
-                self.conversation_history,
+            compressed, _ = self.agent._compress_context(
+                original_history,
                 self.agent._cached_system_prompt or "",
                 approx_tokens=approx_tokens,
             )
             self.conversation_history = compressed
-            new_count = len(self.conversation_history)
             new_tokens = estimate_messages_tokens_rough(self.conversation_history)
-            print(
-                f"  ✅ Compressed: {original_count} → {new_count} messages "
-                f"(~{approx_tokens:,} → ~{new_tokens:,} tokens)"
+            summary = summarize_manual_compression(
+                original_history,
+                self.conversation_history,
+                approx_tokens,
+                new_tokens,
             )
+            icon = "🗜️" if summary["noop"] else "✅"
+            print(f"  {icon} {summary['headline']}")
+            print(f"     {summary['token_line']}")
+            if summary["note"]:
+                print(f"     {summary['note']}")
 
         except Exception as e:
             print(f"  ❌ Compression failed: {e}")
@@ -6530,7 +6341,7 @@ After saving all three files, confirm:
 
         # ── Rate limits (shown first when available) ────────────────
         rl_state = getattr(agent, "get_rate_limit_state", lambda: None)()
-        if rl_state and rl_state.has_data:
+        if rl_state and getattr(rl_state, "has_data", False):
             from agent.rate_limit_tracker import format_rate_limit_display
             print()
             print(format_rate_limit_display(rl_state))
@@ -7165,6 +6976,10 @@ After saving all three files, confirm:
         Updates the TUI spinner widget so the user can see what the agent
         is doing during tool execution (fills the gap between thinking
         spinner and next response).  Also plays audio cue in voice mode.
+
+        On tool.started, records a monotonic timestamp so get_spinner_text()
+        can show a live elapsed timer (the TUI poll loop already invalidates
+        every ~0.15s, so the counter updates automatically).
         """
         # Only act on tool.started; ignore tool.completed, reasoning.available, etc.
         if event_type != "tool.started":
@@ -7178,6 +6993,7 @@ After saving all three files, confirm:
             if _pl > 0 and len(label) > _pl:
                 label = label[:_pl - 3] + "..."
             self._spinner_text = f"{emoji} {label}"
+            self._tool_start_time = _time.monotonic()
             self._invalidate()
 
         if not self._voice_mode:
@@ -7309,7 +7125,7 @@ After saving all three files, confirm:
             _recording_hint = "Termux:API capture | Ctrl+B to stop"
         else:
             _recording_hint = "Ctrl+B to stop"
-        _cprint(f"\n{_GOLD}● Recording...{_RST} {_DIM}({_recording_hint}){_RST}")
+        _cprint(f"\n{_ACCENT}● Recording...{_RST} {_DIM}({_recording_hint}){_RST}")
 
         # Periodically refresh prompt to update audio level indicator
         def _refresh_level():
@@ -7372,8 +7188,7 @@ After saving all three files, confirm:
 
             if result.get("success") and result.get("transcript", "").strip():
                 transcript = result["transcript"].strip()
-                if hasattr(self, '_attached_images'):
-                    self._attached_images.clear()
+                self._attached_images.clear()
                 if hasattr(self, '_app') and self._app:
                     self._app.invalidate()
                 self._pending_input.put(transcript)
@@ -7510,14 +7325,14 @@ After saving all three files, confirm:
         # Environment detection -- warn and block in incompatible environments
         env_check = detect_audio_environment()
         if not env_check["available"]:
-            _cprint(f"\n{_GOLD}Voice mode unavailable in this environment:{_RST}")
+            _cprint(f"\n{_ACCENT}Voice mode unavailable in this environment:{_RST}")
             for warning in env_check["warnings"]:
                 _cprint(f"  {_DIM}{warning}{_RST}")
             return
 
         reqs = check_voice_requirements()
         if not reqs["available"]:
-            _cprint(f"\n{_GOLD}Voice mode requirements not met:{_RST}")
+            _cprint(f"\n{_ACCENT}Voice mode requirements not met:{_RST}")
             for line in reqs["details"].split("\n"):
                 _cprint(f"  {_DIM}{line}{_RST}")
             if reqs["missing_packages"]:
@@ -7555,7 +7370,7 @@ After saving all three files, confirm:
         except Exception:
             _ptt_key = "c-b"
         _ptt_display = _ptt_key.replace("c-", "Ctrl+").upper()
-        _cprint(f"\n{_GOLD}Voice mode enabled{tts_status}{_RST}")
+        _cprint(f"\n{_ACCENT}Voice mode enabled{tts_status}{_RST}")
         _cprint(f"  {_DIM}{_ptt_display} to start/stop recording{_RST}")
         _cprint(f"  {_DIM}/voice tts  to toggle speech output{_RST}")
         _cprint(f"  {_DIM}/voice off  to disable voice mode{_RST}")
@@ -7607,7 +7422,7 @@ After saving all three files, confirm:
             if not check_tts_requirements():
                 _cprint(f"{_DIM}Warning: No TTS provider available. Install edge-tts or set API keys.{_RST}")
 
-        _cprint(f"{_GOLD}Voice TTS {status}.{_RST}")
+        _cprint(f"{_ACCENT}Voice TTS {status}.{_RST}")
 
     def _show_voice_status(self):
         """Show current voice mode status."""
@@ -8092,7 +7907,7 @@ After saving all three files, confirm:
                         w = self.console.width
                         label = " ⚕ Hermes "
                         fill = w - 2 - len(label)
-                        _cprint(f"\n{_GOLD}╭─{label}{'─' * max(fill - 1, 0)}╮{_RST}")
+                        _cprint(f"\n{_ACCENT}╭─{label}{'─' * max(fill - 1, 0)}╮{_RST}")
                     _cprint(sentence.rstrip())
 
                 tts_thread = threading.Thread(
@@ -8308,7 +8123,7 @@ After saving all three files, confirm:
                 if use_streaming_tts and _streaming_box_opened and not is_error_response:
                     # Text was already printed sentence-by-sentence; just close the box
                     w = shutil.get_terminal_size().columns
-                    _cprint(f"\n{_GOLD}╰{'─' * (w - 2)}╯{_RST}")
+                    _cprint(f"\n{_ACCENT}╰{'─' * (w - 2)}╯{_RST}")
                 elif already_streamed:
                     # Response was already streamed token-by-token with box framing;
                     # _flush_stream() already closed the box. Skip Rich Panel.
@@ -9034,7 +8849,7 @@ After saving all three files, confirm:
             agent_name = get_active_skin().get_branding("agent_name", "Hermes Agent")
             msg = f"\n{agent_name} has been suspended. Run `fg` to bring {agent_name} back."
             def _suspend():
-                os.write(1, msg.encode())
+                os.write(1, msg.encode("utf-8", errors="replace"))
                 os.kill(0, _sig.SIGTSTP)
             run_in_terminal(_suspend)
 
@@ -9394,6 +9209,17 @@ After saving all three files, confirm:
             txt = cli_ref._spinner_text
             if not txt:
                 return []
+            # Append live elapsed timer when a tool is running
+            t0 = cli_ref._tool_start_time
+            if t0 > 0:
+                import time as _time
+                elapsed = _time.monotonic() - t0
+                if elapsed >= 60:
+                    _m, _s = int(elapsed // 60), int(elapsed % 60)
+                    elapsed_str = f"{_m}m {_s}s"
+                else:
+                    elapsed_str = f"{elapsed:.1f}s"
+                return [('class:hint', f'  {txt}  ({elapsed_str})')]
             return [('class:hint', f'  {txt}')]
 
         def get_spinner_height():
@@ -9928,6 +9754,7 @@ After saving all three files, confirm:
                     finally:
                         self._agent_running = False
                         self._spinner_text = ""
+                        self._tool_start_time = 0.0
 
                         app.invalidate()  # Refresh status line
 

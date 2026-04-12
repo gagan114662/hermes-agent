@@ -454,10 +454,10 @@ def handle_function_call(
                 pass
             return json.dumps({"error": f"{function_name} must be handled by the agent loop"})
 
-        # Pre-tool hook
+        # Pre-tool hook: plugins can suppress or stop the tool call.
         try:
-            from hermes_cli.plugins import invoke_hook
-            invoke_hook(
+            from hermes_cli.plugins import invoke_hook, HookResult
+            pre_results = invoke_hook(
                 "pre_tool_call",
                 tool_name=function_name,
                 args=function_args,
@@ -465,6 +465,20 @@ def handle_function_call(
                 session_id=session_id or "",
                 tool_call_id=tool_call_id or "",
             )
+            for hr in (pre_results or []):
+                if not isinstance(hr, HookResult):
+                    continue
+                if hr.action == "suppress":
+                    msg = hr.message or f"Tool '{function_name}' was suppressed by a plugin."
+                    logger.info("pre_tool_call hook suppressed '%s': %s", function_name, msg)
+                    return json.dumps({"suppressed": True, "message": msg})
+                if hr.action == "stop":
+                    msg = hr.message or f"Agent stopped by plugin before '{function_name}'."
+                    logger.warning("pre_tool_call hook stopped agent at '%s': %s", function_name, msg)
+                    return json.dumps({"error": msg, "stop": True})
+                if hr.updated_args is not None:
+                    function_args = hr.updated_args
+                    break
         except Exception:
             pass
 
@@ -519,14 +533,6 @@ def handle_function_call(
             from hermes_cli.plugins import invoke_hook
             invoke_hook("on_tool_error", tool_name=function_name, args=function_args,
                         error=str(e), task_id=task_id or "")
-        except Exception:
-            pass
-        try:
-            if _tel_span is not None:
-                _tel_span.set_attribute("success", False)
-                _tel_span.set_attribute("error_type", type(e).__name__)
-            if _tel_ctx is not None:
-                _tel_ctx.__exit__(None, None, None)
         except Exception:
             pass
         return json.dumps({"error": error_msg}, ensure_ascii=False)

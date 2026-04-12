@@ -67,3 +67,12 @@ mini-swe-agent/
 .direnv/
 result
 .gstack/
+
+# Test artifacts
+.hypothesis/
+.coverage
+coverage.xml
+htmlcov/
+
+# Claude Code local config
+.claude/

@@ -26,9 +26,11 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 def _get_hermes_home() -> Path:
-    return Path(os.environ.get("HOME", str(Path.home()))) / ".hermes"
-
-_HERMES_HOME = _get_hermes_home()
+    """Return the Hermes home directory, respecting HERMES_HOME env var."""
+    return Path(
+        os.environ.get("HERMES_HOME")
+        or (Path(os.environ.get("HOME", str(Path.home()))) / ".hermes")
+    )
 
 # ---------------------------------------------------------------------------
 # ICP — what Hermes is selling (drives prospecting search queries)
@@ -134,7 +136,7 @@ def _notify_if_actions(actions: list) -> None:
 
 def _load_prospects() -> list:
     """Load all prospects from ~/.hermes/prospects.json."""
-    path = _HERMES_HOME / "prospects.json"
+    path = _get_hermes_home() / "prospects.json"
     if not path.exists():
         return []
     try:
@@ -218,7 +220,7 @@ def _send_followup(prospect: dict) -> bool:
 
 def _list_overdue_invoices() -> list:
     """Invoices overdue >30 days from ~/.hermes/invoices.json."""
-    path = _HERMES_HOME / "invoices.json"
+    path = _get_hermes_home() / "invoices.json"
     if not path.exists():
         return []
     try:
@@ -246,7 +248,7 @@ def run_inbox_queue() -> list:
     """Check agent mailbox for messages needing a response > 2 hours old."""
     actions = []
     try:
-        mailbox_root = _HERMES_HOME / "mailbox"
+        mailbox_root = _get_hermes_home() / "mailbox"
         if not mailbox_root.exists():
             return actions
 
@@ -296,20 +298,20 @@ def _process_mailbox_msg(msg: dict, msg_file: Path, folder: str, cutoff, actions
 
 
 def run_leads_queue() -> list:
-    """Follow up with stale prospects."""
+    """Follow up on stale prospects; optionally run growth engine if available."""
     actions = []
     try:
-        prospects = _list_stale_prospects()
-        logger.info("Leads queue: %d stale prospects", len(prospects))
-        for prospect in prospects:
-            name = prospect.get("name", "Unknown")
+        stale = _list_stale_prospects()
+        logger.info("Leads queue: %d stale prospect(s)", len(stale))
+        for prospect in stale:
             try:
                 _send_followup(prospect)
+                name = prospect.get("name", "prospect")
                 action = f"Followed up with {name}"
                 log_action(action, queue="leads")
                 actions.append(action)
-            except Exception as _fe:
-                logger.warning("Follow-up to %s failed: %s", name, _fe)
+            except Exception as e:
+                logger.warning("Follow-up to %s failed: %s", prospect.get("name", "?"), e)
     except Exception as e:
         logger.warning("Leads queue error: %s", e)
     return actions

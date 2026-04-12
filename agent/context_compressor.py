@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from agent.auxiliary_client import call_llm
+from agent.context_engine import ContextEngine
 from agent.model_metadata import (
     get_model_context_length,
     estimate_messages_tokens_rough,
@@ -63,8 +64,8 @@ _PRUNED_TOOL_PLACEHOLDER = "[Old tool output cleared to save context space]"
 _CHARS_PER_TOKEN = 4
 
 
-class ContextCompressor:
-    """Compresses conversation context when approaching the model's context limit.
+class ContextCompressor(ContextEngine):
+    """Default context engine — compresses conversation context via lossy summarization.
 
     Algorithm:
       1. Prune old tool results (cheap, no LLM call)
@@ -73,6 +74,33 @@ class ContextCompressor:
       4. Summarize middle turns with structured LLM prompt
       5. On subsequent compactions, iteratively update the previous summary
     """
+
+    @property
+    def name(self) -> str:
+        return "compressor"
+
+    def on_session_reset(self) -> None:
+        """Reset all per-session state for /new or /reset."""
+        super().on_session_reset()
+        self._context_probed = False
+        self._context_probe_persistable = False
+        self._previous_summary = None
+
+    def update_model(
+        self,
+        model: str,
+        context_length: int,
+        base_url: str = "",
+        api_key: str = "",
+        provider: str = "",
+    ) -> None:
+        """Update model info after a model switch or fallback activation."""
+        self.model = model
+        self.base_url = base_url
+        self.api_key = api_key
+        self.provider = provider
+        self.context_length = context_length
+        self.threshold_tokens = int(context_length * self.threshold_percent)
 
     def __init__(
         self,
@@ -127,7 +155,6 @@ class ContextCompressor:
 
         self.last_prompt_tokens = 0
         self.last_completion_tokens = 0
-        self.last_total_tokens = 0
 
         self.summary_model = summary_model_override or ""
 
@@ -181,7 +208,6 @@ class ContextCompressor:
         """Update tracked token usage from API response."""
         self.last_prompt_tokens = usage.get("prompt_tokens", 0)
         self.last_completion_tokens = usage.get("completion_tokens", 0)
-        self.last_total_tokens = usage.get("total_tokens", 0)
 
     def should_compress(self, prompt_tokens: int = None) -> bool:
         """Check if context exceeds the compression threshold."""
@@ -756,33 +782,43 @@ Write only the summary body. Do not include any preamble or prefix."""
                 )
             compressed.append(msg)
 
-        _merge_summary_into_tail = False
-        if summary:
-            last_head_role = messages[compress_start - 1].get("role", "user") if compress_start > 0 else "user"
-            first_tail_role = messages[compress_end].get("role", "user") if compress_end < n_messages else "user"
-            # Pick a role that avoids consecutive same-role with both neighbors.
-            # Priority: avoid colliding with head (already committed), then tail.
-            if last_head_role in ("assistant", "tool"):
-                summary_role = "user"
-            else:
-                summary_role = "assistant"
-            # If the chosen role collides with the tail AND flipping wouldn't
-            # collide with the head, flip it.
-            if summary_role == first_tail_role:
-                flipped = "assistant" if summary_role == "user" else "user"
-                if flipped != last_head_role:
-                    summary_role = flipped
-                else:
-                    # Both roles would create consecutive same-role messages
-                    # (e.g. head=assistant, tail=user — neither role works).
-                    # Merge the summary into the first tail message instead
-                    # of inserting a standalone message that breaks alternation.
-                    _merge_summary_into_tail = True
-            if not _merge_summary_into_tail:
-                compressed.append({"role": summary_role, "content": summary})
-        else:
+        # If LLM summary failed, insert a static fallback so the model
+        # knows context was lost rather than silently dropping everything.
+        if not summary:
             if not self.quiet_mode:
-                logger.warning("No summary model available — middle turns dropped without summary")
+                logger.warning("Summary generation failed — inserting static fallback context marker")
+            n_dropped = compress_end - compress_start
+            summary = (
+                f"{SUMMARY_PREFIX}\n"
+                f"Summary generation was unavailable. {n_dropped} conversation turns were "
+                f"removed to free context space but could not be summarized. The removed "
+                f"turns contained earlier work in this session. Continue based on the "
+                f"recent messages below and the current state of any files or resources."
+            )
+
+        _merge_summary_into_tail = False
+        last_head_role = messages[compress_start - 1].get("role", "user") if compress_start > 0 else "user"
+        first_tail_role = messages[compress_end].get("role", "user") if compress_end < n_messages else "user"
+        # Pick a role that avoids consecutive same-role with both neighbors.
+        # Priority: avoid colliding with head (already committed), then tail.
+        if last_head_role in ("assistant", "tool"):
+            summary_role = "user"
+        else:
+            summary_role = "assistant"
+        # If the chosen role collides with the tail AND flipping wouldn't
+        # collide with the head, flip it.
+        if summary_role == first_tail_role:
+            flipped = "assistant" if summary_role == "user" else "user"
+            if flipped != last_head_role:
+                summary_role = flipped
+            else:
+                # Both roles would create consecutive same-role messages
+                # (e.g. head=assistant, tail=user — neither role works).
+                # Merge the summary into the first tail message instead
+                # of inserting a standalone message that breaks alternation.
+                _merge_summary_into_tail = True
+        if not _merge_summary_into_tail:
+            compressed.append({"role": summary_role, "content": summary})
 
         for i in range(compress_end, n_messages):
             msg = messages[i].copy()

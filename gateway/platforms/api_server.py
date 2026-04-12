@@ -24,6 +24,8 @@ import hmac
 import json
 import logging
 import os
+import socket as _socket
+import re
 import sqlite3
 import time
 import uuid
@@ -40,6 +42,7 @@ from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import (
     BasePlatformAdapter,
     SendResult,
+    is_network_accessible,
 )
 
 logger = logging.getLogger(__name__)
@@ -282,6 +285,25 @@ def _make_request_fingerprint(body: Dict[str, Any], keys: List[str]) -> str:
     return sha256(repr(subset).encode("utf-8")).hexdigest()
 
 
+def _derive_chat_session_id(
+    system_prompt: Optional[str],
+    first_user_message: str,
+) -> str:
+    """Derive a stable session ID from the conversation's first user message.
+
+    OpenAI-compatible frontends (Open WebUI, LibreChat, etc.) send the full
+    conversation history with every request.  The system prompt and first user
+    message are constant across all turns of the same conversation, so hashing
+    them produces a deterministic session ID that lets the API server reuse
+    the same Hermes session (and therefore the same Docker container sandbox
+    directory) across turns.
+    """
+    import hashlib
+    seed = f"{system_prompt or ''}\n{first_user_message}"
+    digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
+    return f"api-{digest}"
+
+
 class APIServerAdapter(BasePlatformAdapter):
     """
     OpenAI-compatible HTTP API server adapter.
@@ -298,6 +320,9 @@ class APIServerAdapter(BasePlatformAdapter):
         self._api_key: str = extra.get("key", os.getenv("API_SERVER_KEY", ""))
         self._cors_origins: tuple[str, ...] = self._parse_cors_origins(
             extra.get("cors_origins", os.getenv("API_SERVER_CORS_ORIGINS", "")),
+        )
+        self._model_name: str = self._resolve_model_name(
+            extra.get("model_name", os.getenv("API_SERVER_MODEL_NAME", "")),
         )
         self._app: Optional["web.Application"] = None
         self._runner: Optional["web.AppRunner"] = None
@@ -330,6 +355,26 @@ class APIServerAdapter(BasePlatformAdapter):
             items = [str(value)]
 
         return tuple(str(item).strip() for item in items if str(item).strip())
+
+    @staticmethod
+    def _resolve_model_name(explicit: str) -> str:
+        """Derive the advertised model name for /v1/models.
+
+        Priority:
+        1. Explicit override (config extra or API_SERVER_MODEL_NAME env var)
+        2. Active profile name (so each profile advertises a distinct model)
+        3. Fallback: "hermes-agent"
+        """
+        if explicit and explicit.strip():
+            return explicit.strip()
+        try:
+            from hermes_cli.profiles import get_active_profile_name
+            profile = get_active_profile_name()
+            if profile and profile not in ("default", "custom"):
+                return profile
+        except Exception:
+            pass
+        return "hermes-agent"
 
     def _cors_headers_for_origin(self, origin: str) -> Optional[Dict[str, str]]:
         """Return CORS headers for an allowed browser origin."""
@@ -370,7 +415,8 @@ class APIServerAdapter(BasePlatformAdapter):
         Validate Bearer token from Authorization header.
 
         Returns None if auth is OK, or a 401 web.Response on failure.
-        If no API key is configured, all requests are allowed.
+        If no API key is configured, all requests are allowed (only when API
+        server is local).
         """
         if not self._api_key:
             return None  # No key configured — allow all (local-only use)
@@ -475,12 +521,12 @@ class APIServerAdapter(BasePlatformAdapter):
             "object": "list",
             "data": [
                 {
-                    "id": "hermes-agent",
+                    "id": self._model_name,
                     "object": "model",
                     "created": int(time.time()),
                     "owned_by": "hermes",
                     "permission": [],
-                    "root": "hermes-agent",
+                    "root": self._model_name,
                     "parent": None,
                 }
             ],
@@ -571,11 +617,18 @@ class APIServerAdapter(BasePlatformAdapter):
                 logger.warning("Failed to load session history for %s: %s", session_id, e)
                 history = []
         else:
-            session_id = str(uuid.uuid4())
+            # Derive a stable session ID from the system prompt + first user
+            # message so the same conversation produces the same session across
+            # all turns (OpenAI-compatible frontends resend full history each turn).
+            first_user_msg = next(
+                (m["content"] for m in conversation_messages if m.get("role") == "user"),
+                user_message,
+            )
+            session_id = _derive_chat_session_id(system_prompt, first_user_msg)
             # history already set from request body above
 
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:29]}"
-        model_name = body.get("model", "hermes-agent")
+        model_name = body.get("model", self._model_name)
         created = int(time.time())
 
         if _span is not None:
@@ -608,11 +661,15 @@ class APIServerAdapter(BasePlatformAdapter):
                 if event_type != "tool.started":
                     return  # Only show tool start events in chat stream
                 if name.startswith("_"):
-                    return  # Skip internal events (_thinking)
+                    return
                 from agent.display import get_tool_emoji
                 emoji = get_tool_emoji(name)
                 label = preview or name
-                _stream_q.put(f"\n`{emoji} {label}`\n")
+                _stream_q.put(("__tool_progress__", {
+                    "tool": name,
+                    "emoji": emoji,
+                    "label": label,
+                }))
 
             # Start agent in background.  agent_ref is a mutable container
             # so the SSE writer can interrupt the agent on client disconnect.
@@ -723,7 +780,64 @@ class APIServerAdapter(BasePlatformAdapter):
             }
             await response.write(f"data: {json.dumps(role_chunk)}\n\n".encode())
 
-            # Stream content chunks as they arrive from the agent
+            # Stream content chunks as they arrive from the agent.
+            # Prefix stripping: buffer the first few chars to remove the
+            # "On it." artifact emitted by some fine-tuned models (e.g. Nemotron).
+            import re as _re
+            _ON_IT_RE = _re.compile(r'^[Oo]n\s+it[.!?]?\s*')
+            _pfx_buf = []   # accumulated prefix chunks
+            _pfx_done = [False]  # True once prefix has been flushed
+
+            async def _write_content(text: str) -> None:
+                """Write a content delta, stripping leading 'On it.' once."""
+                if not text:
+                    return
+                if _pfx_done[0]:
+                    chunk = {
+                        "id": completion_id, "object": "chat.completion.chunk",
+                        "created": created, "model": model,
+                        "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}],
+                    }
+                    await response.write(f"data: {json.dumps(chunk)}\n\n".encode())
+                    return
+                _pfx_buf.append(text)
+                accumulated = "".join(_pfx_buf)
+                if len(accumulated) >= 8:
+                    _pfx_done[0] = True
+                    cleaned = _ON_IT_RE.sub("", accumulated)
+                    if cleaned:
+                        chunk = {
+                            "id": completion_id, "object": "chat.completion.chunk",
+                            "created": created, "model": model,
+                            "choices": [{"index": 0, "delta": {"content": cleaned}, "finish_reason": None}],
+                        }
+                        await response.write(f"data: {json.dumps(chunk)}\n\n".encode())
+
+            async def _flush_prefix() -> None:
+                """Flush the prefix buffer (called when stream ends before 8 chars)."""
+                if _pfx_done[0]:
+                    return
+                _pfx_done[0] = True
+                accumulated = "".join(_pfx_buf)
+                if accumulated:
+                    cleaned = _ON_IT_RE.sub("", accumulated)
+                    if cleaned:
+                        chunk = {
+                            "id": completion_id, "object": "chat.completion.chunk",
+                            "created": created, "model": model,
+                            "choices": [{"index": 0, "delta": {"content": cleaned}, "finish_reason": None}],
+                        }
+                        await response.write(f"data: {json.dumps(chunk)}\n\n".encode())
+
+            async def _write_delta(delta) -> None:
+                """Route a queue item to either tool-progress or content writer."""
+                if isinstance(delta, tuple) and len(delta) == 2 and delta[0] == "__tool_progress__":
+                    await response.write(
+                        f"event: hermes.tool.progress\ndata: {json.dumps(delta[1])}\n\n".encode()
+                    )
+                else:
+                    await _write_content(delta)
+
             loop = asyncio.get_event_loop()
             while True:
                 try:
@@ -736,26 +850,18 @@ class APIServerAdapter(BasePlatformAdapter):
                                 delta = stream_q.get_nowait()
                                 if delta is None:
                                     break
-                                content_chunk = {
-                                    "id": completion_id, "object": "chat.completion.chunk",
-                                    "created": created, "model": model,
-                                    "choices": [{"index": 0, "delta": {"content": delta}, "finish_reason": None}],
-                                }
-                                await response.write(f"data: {json.dumps(content_chunk)}\n\n".encode())
+                                await _write_delta(delta)
                             except _q.Empty:
                                 break
+                        await _flush_prefix()
                         break
                     continue
 
                 if delta is None:  # End of stream sentinel
+                    await _flush_prefix()
                     break
 
-                content_chunk = {
-                    "id": completion_id, "object": "chat.completion.chunk",
-                    "created": created, "model": model,
-                    "choices": [{"index": 0, "delta": {"content": delta}, "finish_reason": None}],
-                }
-                await response.write(f"data: {json.dumps(content_chunk)}\n\n".encode())
+                await _write_delta(delta)
 
             # Get usage from completed agent
             usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
@@ -962,7 +1068,7 @@ class APIServerAdapter(BasePlatformAdapter):
             "object": "response",
             "status": "completed",
             "created_at": created_at,
-            "model": body.get("model", "hermes-agent"),
+            "model": body.get("model", self._model_name),
             "output": output_items,
             "usage": {
                 "input_tokens": usage.get("input_tokens", 0),
@@ -1357,6 +1463,7 @@ class APIServerAdapter(BasePlatformAdapter):
             result = agent.run_conversation(
                 user_message=user_message,
                 conversation_history=conversation_history,
+                task_id="default",
             )
             usage = {
                 "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
@@ -1365,7 +1472,9 @@ class APIServerAdapter(BasePlatformAdapter):
             }
             return result, usage
 
-        return await loop.run_in_executor(None, _run)
+        import contextvars as _cv
+        _api_ctx = _cv.copy_context()
+        return await loop.run_in_executor(None, lambda: _api_ctx.run(_run))
 
     # ------------------------------------------------------------------
     # /v1/runs — structured event streaming
@@ -1633,6 +1742,272 @@ class APIServerAdapter(BasePlatformAdapter):
                 self._run_streams_created.pop(run_id, None)
 
     # ------------------------------------------------------------------
+    # /v1/runs — structured event streaming
+    # ------------------------------------------------------------------
+
+    _MAX_CONCURRENT_RUNS = 10  # Prevent unbounded resource allocation
+    _RUN_STREAM_TTL = 300  # seconds before orphaned runs are swept
+
+    def _make_run_event_callback(self, run_id: str, loop: "asyncio.AbstractEventLoop"):
+        """Return a tool_progress_callback that pushes structured events to the run's SSE queue."""
+        def _push(event: Dict[str, Any]) -> None:
+            q = self._run_streams.get(run_id)
+            if q is None:
+                return
+            try:
+                loop.call_soon_threadsafe(q.put_nowait, event)
+            except Exception:
+                pass
+
+        def _callback(event_type: str, tool_name: str = None, preview: str = None, args=None, **kwargs):
+            ts = time.time()
+            if event_type == "tool.started":
+                _push({
+                    "event": "tool.started",
+                    "run_id": run_id,
+                    "timestamp": ts,
+                    "tool": tool_name,
+                    "preview": preview,
+                })
+            elif event_type == "tool.completed":
+                _push({
+                    "event": "tool.completed",
+                    "run_id": run_id,
+                    "timestamp": ts,
+                    "tool": tool_name,
+                    "duration": round(kwargs.get("duration", 0), 3),
+                    "error": kwargs.get("is_error", False),
+                })
+            elif event_type == "reasoning.available":
+                _push({
+                    "event": "reasoning.available",
+                    "run_id": run_id,
+                    "timestamp": ts,
+                    "text": preview or "",
+                })
+            # _thinking and subagent_progress are intentionally not forwarded
+
+        return _callback
+
+    async def _handle_runs(self, request: "web.Request") -> "web.Response":
+        """POST /v1/runs — start an agent run, return run_id immediately."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+
+        # Enforce concurrency limit
+        if len(self._run_streams) >= self._MAX_CONCURRENT_RUNS:
+            return web.json_response(
+                _openai_error(f"Too many concurrent runs (max {self._MAX_CONCURRENT_RUNS})", code="rate_limit_exceeded"),
+                status=429,
+            )
+
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response(_openai_error("Invalid JSON"), status=400)
+
+        raw_input = body.get("input")
+        if not raw_input:
+            return web.json_response(_openai_error("Missing 'input' field"), status=400)
+
+        user_message = raw_input if isinstance(raw_input, str) else (raw_input[-1].get("content", "") if isinstance(raw_input, list) else "")
+        if not user_message:
+            return web.json_response(_openai_error("No user message found in input"), status=400)
+
+        run_id = f"run_{uuid.uuid4().hex}"
+        loop = asyncio.get_running_loop()
+        q: "asyncio.Queue[Optional[Dict]]" = asyncio.Queue()
+        self._run_streams[run_id] = q
+        self._run_streams_created[run_id] = time.time()
+
+        event_cb = self._make_run_event_callback(run_id, loop)
+
+        # Also wire stream_delta_callback so message.delta events flow through
+        def _text_cb(delta: Optional[str]) -> None:
+            if delta is None:
+                return
+            try:
+                loop.call_soon_threadsafe(q.put_nowait, {
+                    "event": "message.delta",
+                    "run_id": run_id,
+                    "timestamp": time.time(),
+                    "delta": delta,
+                })
+            except Exception:
+                pass
+
+        instructions = body.get("instructions")
+        previous_response_id = body.get("previous_response_id")
+
+        # Accept explicit conversation_history from the request body.
+        # Precedence: explicit conversation_history > previous_response_id.
+        conversation_history: List[Dict[str, str]] = []
+        raw_history = body.get("conversation_history")
+        if raw_history:
+            if not isinstance(raw_history, list):
+                return web.json_response(
+                    _openai_error("'conversation_history' must be an array of message objects"),
+                    status=400,
+                )
+            for i, entry in enumerate(raw_history):
+                if not isinstance(entry, dict) or "role" not in entry or "content" not in entry:
+                    return web.json_response(
+                        _openai_error(f"conversation_history[{i}] must have 'role' and 'content' fields"),
+                        status=400,
+                    )
+                conversation_history.append({"role": str(entry["role"]), "content": str(entry["content"])})
+            if previous_response_id:
+                logger.debug("Both conversation_history and previous_response_id provided; using conversation_history")
+
+        if not conversation_history and previous_response_id:
+            stored = self._response_store.get(previous_response_id)
+            if stored:
+                conversation_history = list(stored.get("conversation_history", []))
+                if instructions is None:
+                    instructions = stored.get("instructions")
+
+        # When input is a multi-message array, extract all but the last
+        # message as conversation history (the last becomes user_message).
+        # Only fires when no explicit history was provided.
+        if not conversation_history and isinstance(raw_input, list) and len(raw_input) > 1:
+            for msg in raw_input[:-1]:
+                if isinstance(msg, dict) and msg.get("role") and msg.get("content"):
+                    content = msg["content"]
+                    if isinstance(content, list):
+                        # Flatten multi-part content blocks to text
+                        content = " ".join(
+                            part.get("text", "") for part in content
+                            if isinstance(part, dict) and part.get("type") == "text"
+                        )
+                    conversation_history.append({"role": msg["role"], "content": str(content)})
+
+        session_id = body.get("session_id") or run_id
+        ephemeral_system_prompt = instructions
+
+        async def _run_and_close():
+            try:
+                agent = self._create_agent(
+                    ephemeral_system_prompt=ephemeral_system_prompt,
+                    session_id=session_id,
+                    stream_delta_callback=_text_cb,
+                    tool_progress_callback=event_cb,
+                )
+                def _run_sync():
+                    r = agent.run_conversation(
+                        user_message=user_message,
+                        conversation_history=conversation_history,
+                        task_id="default",
+                    )
+                    u = {
+                        "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
+                        "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
+                        "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
+                    }
+                    return r, u
+
+                result, usage = await asyncio.get_running_loop().run_in_executor(None, _run_sync)
+                final_response = result.get("final_response", "") if isinstance(result, dict) else ""
+                q.put_nowait({
+                    "event": "run.completed",
+                    "run_id": run_id,
+                    "timestamp": time.time(),
+                    "output": final_response,
+                    "usage": usage,
+                })
+            except Exception as exc:
+                logger.exception("[api_server] run %s failed", run_id)
+                try:
+                    q.put_nowait({
+                        "event": "run.failed",
+                        "run_id": run_id,
+                        "timestamp": time.time(),
+                        "error": str(exc),
+                    })
+                except Exception:
+                    pass
+            finally:
+                # Sentinel: signal SSE stream to close
+                try:
+                    q.put_nowait(None)
+                except Exception:
+                    pass
+
+        task = asyncio.create_task(_run_and_close())
+        try:
+            self._background_tasks.add(task)
+        except TypeError:
+            pass
+        if hasattr(task, "add_done_callback"):
+            task.add_done_callback(self._background_tasks.discard)
+
+        return web.json_response({"run_id": run_id, "status": "started"}, status=202)
+
+    async def _handle_run_events(self, request: "web.Request") -> "web.StreamResponse":
+        """GET /v1/runs/{run_id}/events — SSE stream of structured agent lifecycle events."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+
+        run_id = request.match_info["run_id"]
+
+        # Allow subscribing slightly before the run is registered (race condition window)
+        for _ in range(20):
+            if run_id in self._run_streams:
+                break
+            await asyncio.sleep(0.05)
+        else:
+            return web.json_response(_openai_error(f"Run not found: {run_id}", code="run_not_found"), status=404)
+
+        q = self._run_streams[run_id]
+
+        response = web.StreamResponse(
+            status=200,
+            headers={
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+        await response.prepare(request)
+
+        try:
+            while True:
+                try:
+                    event = await asyncio.wait_for(q.get(), timeout=30.0)
+                except asyncio.TimeoutError:
+                    await response.write(b": keepalive\n\n")
+                    continue
+                if event is None:
+                    # Run finished — send final SSE comment and close
+                    await response.write(b": stream closed\n\n")
+                    break
+                payload = f"data: {json.dumps(event)}\n\n"
+                await response.write(payload.encode())
+        except Exception as exc:
+            logger.debug("[api_server] SSE stream error for run %s: %s", run_id, exc)
+        finally:
+            self._run_streams.pop(run_id, None)
+            self._run_streams_created.pop(run_id, None)
+
+        return response
+
+    async def _sweep_orphaned_runs(self) -> None:
+        """Periodically clean up run streams that were never consumed."""
+        while True:
+            await asyncio.sleep(60)
+            now = time.time()
+            stale = [
+                run_id
+                for run_id, created_at in list(self._run_streams_created.items())
+                if now - created_at > self._RUN_STREAM_TTL
+            ]
+            for run_id in stale:
+                logger.debug("[api_server] sweeping orphaned run %s", run_id)
+                self._run_streams.pop(run_id, None)
+                self._run_streams_created.pop(run_id, None)
+
+    # ------------------------------------------------------------------
     # BasePlatformAdapter interface
     # ------------------------------------------------------------------
 
@@ -1640,6 +2015,15 @@ class APIServerAdapter(BasePlatformAdapter):
         """Start the aiohttp web server."""
         if not AIOHTTP_AVAILABLE:
             logger.warning("[%s] aiohttp not installed", self.name)
+            return False
+
+        # Bind guard: refuse to bind to network-accessible address without API key
+        if is_network_accessible(self._host) and not self._api_key:
+            logger.error(
+                "[%s] Refusing to bind to network-accessible address %s without API_SERVER_KEY. "
+                "Set an API key in config.yaml (platforms.api_server.key) or via API_SERVER_KEY environment variable.",
+                self.name, self._host,
+            )
             return False
 
         try:
@@ -1675,7 +2059,6 @@ class APIServerAdapter(BasePlatformAdapter):
                 sweep_task.add_done_callback(self._background_tasks.discard)
 
             # Port conflict detection — fail fast if port is already in use
-            import socket as _socket
             try:
                 with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as _s:
                     _s.settimeout(1)
@@ -1691,9 +2074,17 @@ class APIServerAdapter(BasePlatformAdapter):
             await self._site.start()
 
             self._mark_connected()
+            if not self._api_key:
+                logger.warning(
+                    "[%s] ⚠️  No API key configured (API_SERVER_KEY / platforms.api_server.key). "
+                    "All requests will be accepted without authentication. "
+                    "Set an API key for production deployments to prevent "
+                    "unauthorized access to sessions, responses, and cron jobs.",
+                    self.name,
+                )
             logger.info(
-                "[%s] API server listening on http://%s:%d",
-                self.name, self._host, self._port,
+                "[%s] API server listening on http://%s:%d (model: %s)",
+                self.name, self._host, self._port, self._model_name,
             )
             return True
 

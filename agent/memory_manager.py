@@ -136,7 +136,7 @@ class MemoryManager:
 
     @property
     def provider_names(self) -> List[str]:
-        """Names of all registered providers."""
+        """Names of all registered providers in order."""
         return [p.name for p in self._providers]
 
     def get_provider(self, name: str) -> Optional[MemoryProvider]:

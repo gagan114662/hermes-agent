@@ -87,10 +87,6 @@ _HERMES_CORE_TOOLS = [
     "outreach_sequence", "email_finder",
     # Business wiki — self-updating knowledge base (Karpathy LLM-wiki pattern)
     "wiki_update", "wiki_query", "wiki_read", "wiki_list", "wiki_ingest",
-    # Second Brain — multi-vault domain knowledge system
-    "second_brain_scaffold", "second_brain_list",
-    "second_brain_ingest", "second_brain_ingest_all",
-    "second_brain_query", "second_brain_lint",
     # SDLC framework — professional systems builder
     "discovery_run", "discovery_read",
     "scope_create", "scope_check", "scope_read",
@@ -481,6 +477,12 @@ TOOLSETS = {
         "includes": []
     },
 
+    "hermes-weixin": {
+        "description": "Weixin bot toolset - personal WeChat messaging via iLink (full access)",
+        "tools": _HERMES_CORE_TOOLS,
+        "includes": []
+    },
+
     "hermes-wecom": {
         "description": "WeCom bot toolset - enterprise WeChat messaging (full access)",
         "tools": _HERMES_CORE_TOOLS,
@@ -502,7 +504,7 @@ TOOLSETS = {
     "hermes-gateway": {
         "description": "Gateway toolset - union of all messaging platform tools",
         "tools": [],
-        "includes": ["hermes-telegram", "hermes-discord", "hermes-whatsapp", "hermes-slack", "hermes-signal", "hermes-bluebubbles", "hermes-homeassistant", "hermes-email", "hermes-sms", "hermes-mattermost", "hermes-matrix", "hermes-dingtalk", "hermes-feishu", "hermes-wecom", "hermes-webhook"]
+        "includes": ["hermes-telegram", "hermes-discord", "hermes-whatsapp", "hermes-slack", "hermes-signal", "hermes-bluebubbles", "hermes-homeassistant", "hermes-email", "hermes-sms", "hermes-mattermost", "hermes-matrix", "hermes-dingtalk", "hermes-feishu", "hermes-wecom", "hermes-weixin", "hermes-webhook"]
     }
 }
 

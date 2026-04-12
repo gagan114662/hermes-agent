@@ -1,11 +1,10 @@
 # tests/test_stdio_server.py
 import asyncio
 import json
-import os
-import sys
-
 import pytest
 import subprocess
+import sys
+import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
@@ -60,18 +59,19 @@ def test_process_registry_removes_on_cleanup():
 
 
 def test_gateway_subprocess_flag_config_logic():
-    """Subprocess mode is opt-in; in-process is the default."""
+    """Subprocess mode is the default; in-process mode is the opt-out."""
     def _resolve_flag(config):
-        return (config.get("agent") or {}).get("process_mode") == "subprocess"
+        # True (subprocess) by default; False only when explicitly set to in-process
+        return (config.get("agent") or {}).get("process_mode") != "in-process"
 
-    assert _resolve_flag({}) is False                                           # default: in-process
-    assert _resolve_flag({"agent": {}}) is False                               # default: in-process
-    assert _resolve_flag({"agent": {"process_mode": "subprocess"}}) is True    # opt-in
-    assert _resolve_flag({"agent": {"process_mode": "in-process"}}) is False   # explicit in-process
+    assert _resolve_flag({}) is True                                           # default: subprocess
+    assert _resolve_flag({"agent": {}}) is True                               # default: subprocess
+    assert _resolve_flag({"agent": {"process_mode": "subprocess"}}) is True   # explicit subprocess
+    assert _resolve_flag({"agent": {"process_mode": "in-process"}}) is False  # opt-out
 
 
 def test_pipe_mode_does_not_hang_on_pipe_input():
-    """hermes CLI does not hang when given piped stdin."""
+    """hermes CLI does not hang when given piped stdin — just needs to start."""
     result = subprocess.run(
         [sys.executable, "hermes_cli/main.py", "--help"],
         input=b"hello world content",
@@ -79,4 +79,5 @@ def test_pipe_mode_does_not_hang_on_pipe_input():
         timeout=10,
         cwd=_REPO_ROOT,
     )
+    # --help always exits 0 regardless of stdin
     assert result.returncode == 0

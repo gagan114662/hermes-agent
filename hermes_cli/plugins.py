@@ -63,7 +63,40 @@ VALID_HOOKS: Set[str] = {
     "on_session_end",
     "on_session_finalize",
     "on_session_reset",
+    # New lifecycle hooks (B6)
+    "on_delegation_start",
+    "on_delegation_end",
+    "on_memory_write",
+    "on_tool_error",
+    "on_budget_warning",
+    "on_context_compress",
+    "on_file_changed",
+    # Stop-hook events (fired at conversation end)
+    "on_conversation_end",
+    "on_deal_stage_transition",
+    "on_contact_update",
 }
+
+
+@dataclass
+class HookResult:
+    """Structured return value from a hook callback.
+
+    Plugins return this from ``pre_tool_call`` to guard tool execution:
+
+    - ``action="continue"`` (default): proceed normally.
+    - ``action="suppress"``: skip the tool call; ``message`` is returned as
+      the tool result shown to the model.
+    - ``action="stop"``: abort the entire agent turn; ``message`` is shown
+      to the user.
+
+    Optionally set ``updated_args`` to replace the tool call arguments
+    before execution (useful for sanitising inputs).
+    """
+
+    action: str = "continue"   # "continue" | "suppress" | "stop"
+    message: Optional[str] = None
+    updated_args: Optional[Dict[str, Any]] = None
 
 ENTRY_POINTS_GROUP = "hermes_agent.plugins"
 
@@ -201,8 +234,7 @@ class PluginContext:
 
         The *setup_fn* receives an argparse subparser and should add any
         arguments/sub-subparsers.  If *handler_fn* is provided it is set
-        as the default dispatch function via ``set_defaults(func=...)``.
-        """
+        as the default dispatch function via ``set_defaults(func=...)``."""
         self._manager._cli_commands[name] = {
             "name": name,
             "help": help,
@@ -212,6 +244,38 @@ class PluginContext:
             "plugin": self.manifest.name,
         }
         logger.debug("Plugin %s registered CLI command: %s", self.manifest.name, name)
+
+    # -- context engine registration -----------------------------------------
+
+    def register_context_engine(self, engine) -> None:
+        """Register a context engine to replace the built-in ContextCompressor.
+
+        Only one context engine plugin is allowed. If a second plugin tries
+        to register one, it is rejected with a warning.
+
+        The engine must be an instance of ``agent.context_engine.ContextEngine``.
+        """
+        if self._manager._context_engine is not None:
+            logger.warning(
+                "Plugin '%s' tried to register a context engine, but one is "
+                "already registered. Only one context engine plugin is allowed.",
+                self.manifest.name,
+            )
+            return
+        # Defer the import to avoid circular deps at module level
+        from agent.context_engine import ContextEngine
+        if not isinstance(engine, ContextEngine):
+            logger.warning(
+                "Plugin '%s' tried to register a context engine that does not "
+                "inherit from ContextEngine. Ignoring.",
+                self.manifest.name,
+            )
+            return
+        self._manager._context_engine = engine
+        logger.info(
+            "Plugin '%s' registered context engine: %s",
+            self.manifest.name, engine.name,
+        )
 
     # -- hook registration --------------------------------------------------
 
@@ -245,9 +309,10 @@ class PluginManager:
         self._hooks: Dict[str, List[Callable]] = {}
         self._plugin_tool_names: Set[str] = set()
         self._cli_commands: Dict[str, dict] = {}
+        self._context_engine = None  # Set by a plugin via register_context_engine()
         self._discovered: bool = False
         self._cli_ref = None  # Set by CLI after plugin discovery
-        self._plugin_mtimes: Dict[str, float] = {}
+        self._plugin_mtimes: dict = {}  # plugin_id -> last known mtime
 
     # -----------------------------------------------------------------------
     # Public
@@ -467,24 +532,23 @@ class PluginManager:
     # -----------------------------------------------------------------------
 
     def _check_reload(self) -> None:
-        """Reload plugin modules whose source file mtime has changed."""
-        for name, loaded in list(self._plugins.items()):
-            if not loaded.enabled or loaded.module is None:
-                continue
-            module_file = getattr(loaded.module, "__file__", None)
-            if not module_file:
+        """Reload plugin modules whose source files have changed on disk."""
+        for plugin_id, loaded in list(self._plugins.items()):
+            module = loaded.module if isinstance(loaded, LoadedPlugin) else loaded.get("module") if isinstance(loaded, dict) else None
+            if module is None:
                 continue
             try:
-                current_mtime = os.path.getmtime(module_file)
-            except OSError:
-                continue
-            known_mtime = self._plugin_mtimes.get(name)
-            if known_mtime is not None and current_mtime != known_mtime:
-                try:
-                    importlib.reload(loaded.module)
-                    self._plugin_mtimes[name] = current_mtime
-                except Exception as exc:
-                    logger.warning("Hot reload of plugin '%s' failed: %s", name, exc)
+                source_file = getattr(module, "__file__", None)
+                if source_file is None:
+                    continue
+                current_mtime = os.path.getmtime(source_file)
+                last_mtime = self._plugin_mtimes.get(plugin_id, 0)
+                if current_mtime > last_mtime:
+                    importlib.reload(module)
+                    self._plugin_mtimes[plugin_id] = current_mtime
+                    logger.info("Hot-reloaded plugin %s (file changed)", plugin_id)
+            except Exception as e:
+                logger.warning("Failed to hot-reload plugin %s: %s", plugin_id, e)
 
     # -----------------------------------------------------------------------
     # Hook invocation
@@ -526,6 +590,46 @@ class PluginManager:
                     exc,
                 )
         return results
+
+    def invoke_pre_tool_hook(
+        self,
+        tool_name: str,
+        args: Dict[str, Any],
+        task_id: Optional[str] = None,
+    ) -> "HookResult":
+        """Invoke ``pre_tool_call`` hooks and return the winning HookResult.
+
+        Priority: first ``suppress`` or ``stop`` result wins.  If all
+        callbacks return ``continue`` (or nothing), returns a default
+        ``HookResult(action="continue")``.
+
+        The ``updated_args`` from the first callback that sets it are used
+        to replace the tool arguments before execution.
+        """
+        callbacks = self._hooks.get("pre_tool_call", [])
+        merged_args: Optional[Dict[str, Any]] = None
+        for cb in callbacks:
+            try:
+                ret = cb(tool_name=tool_name, args=args, task_id=task_id)
+                if isinstance(ret, HookResult):
+                    if ret.updated_args is not None and merged_args is None:
+                        merged_args = ret.updated_args
+                    if ret.action in ("suppress", "stop"):
+                        # Attach any arg override and return immediately
+                        if merged_args is not None and ret.updated_args is None:
+                            return HookResult(
+                                action=ret.action,
+                                message=ret.message,
+                                updated_args=merged_args,
+                            )
+                        return ret
+            except Exception as exc:
+                logger.warning(
+                    "pre_tool_call hook %s raised: %s",
+                    getattr(cb, "__name__", repr(cb)),
+                    exc,
+                )
+        return HookResult(action="continue", updated_args=merged_args)
 
     # -----------------------------------------------------------------------
     # Introspection
@@ -578,6 +682,21 @@ def invoke_hook(hook_name: str, **kwargs: Any) -> List[Any]:
     return get_plugin_manager().invoke_hook(hook_name, **kwargs)
 
 
+def invoke_pre_tool_hook(
+    tool_name: str,
+    args: Dict[str, Any],
+    task_id: Optional[str] = None,
+) -> "HookResult":
+    """Invoke pre_tool_call hooks and return a structured HookResult.
+
+    Use this instead of ``invoke_hook("pre_tool_call", ...)`` whenever
+    the caller needs to respect suppress/stop decisions from plugins.
+    """
+    return get_plugin_manager().invoke_pre_tool_hook(
+        tool_name=tool_name, args=args, task_id=task_id
+    )
+
+
 def emit_hook(event: str, **kwargs: Any) -> None:
     """Fire a hook event and ignore all return values. Never raises.
 
@@ -603,6 +722,11 @@ def get_plugin_cli_commands() -> Dict[str, dict]:
     suitable for wiring into argparse subparsers.
     """
     return dict(get_plugin_manager()._cli_commands)
+
+
+def get_plugin_context_engine():
+    """Return the plugin-registered context engine, or None."""
+    return get_plugin_manager()._context_engine
 
 
 def get_plugin_toolsets() -> List[tuple]:
