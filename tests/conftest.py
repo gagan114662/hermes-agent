@@ -64,6 +64,9 @@ def _isolate_hermes_home(tmp_path, monkeypatch):
         "GATEWAY_ALLOW_ALL_USERS", "GATEWAY_ALLOWED_USERS",
         "DISCORD_ALLOW_ALL_USERS", "SLACK_ALLOW_ALL_USERS",
         "HERMES_TIMEZONE", "HERMES_MANAGED", "HERMES_MAX_ITERATIONS",
+        # Provider API keys — prevent real credentials from leaking via env
+        # into tests that check is_provider_explicitly_configured().
+        "ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN",
     ]
     for _var in _hermes_env_vars:
         monkeypatch.delenv(_var, raising=False)
