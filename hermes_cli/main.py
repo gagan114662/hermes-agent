@@ -3931,11 +3931,10 @@ def cmd_update(args):
         # The code update (git pull) is shared across all profiles, so every
         # running gateway needs restarting to pick up the new code.
         try:
-            from hermes_cli.gateway import (
-                is_macos, is_linux, _ensure_user_systemd_env,
-                find_gateway_pids,
-                _get_service_pids,
-            )
+            import hermes_cli.gateway as _gateway_mod
+            _ensure_user_systemd_env = _gateway_mod._ensure_user_systemd_env
+            find_gateway_pids = _gateway_mod.find_gateway_pids
+            _get_service_pids = _gateway_mod._get_service_pids
             import signal as _signal
 
             restarted_services = []
@@ -3943,7 +3942,7 @@ def cmd_update(args):
 
             # --- Systemd services (Linux) ---
             # Discover all hermes-gateway* units (default + profiles)
-            if is_linux():
+            if _gateway_mod.supports_systemd_services():
                 try:
                     _ensure_user_systemd_env()
                 except Exception:
@@ -3981,7 +3980,7 @@ def cmd_update(args):
                         pass
 
             # --- Launchd services (macOS) ---
-            if is_macos():
+            if _gateway_mod.is_macos():
                 try:
                     from hermes_cli.gateway import launchd_restart, get_launchd_label, get_launchd_plist_path
                     plist_path = get_launchd_plist_path()

@@ -219,8 +219,9 @@ class HonchoMemoryProvider(MemoryProvider):
 
             # Override peer_name with gateway user_id for per-user memory scoping.
             # CLI sessions won't have user_id, so the config default is preserved.
+            # An explicit peer_name in config takes priority over user_id.
             _gw_user_id = kwargs.get("user_id")
-            if _gw_user_id:
+            if _gw_user_id and not cfg.peer_name:
                 cfg.peer_name = _gw_user_id
 
             self._config = cfg

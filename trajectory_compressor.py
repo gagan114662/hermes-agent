@@ -391,9 +391,8 @@ class TrajectoryCompressor:
     def _get_async_client(self):
         """Return an AsyncOpenAI client bound to the current event loop.
 
-        Created lazily so that each ``asyncio.run()`` call in
-        ``process_directory()`` gets a client tied to its own loop,
-        avoiding "Event loop is closed" errors on repeated calls.
+        Created lazily so each ``asyncio.run()`` call in ``process_directory()``
+        gets a client tied to its own loop (avoids "Event loop is closed" errors).
         """
         from openai import AsyncOpenAI
         from agent.auxiliary_client import _to_openai_base_url

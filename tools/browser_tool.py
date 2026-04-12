@@ -2281,10 +2281,14 @@ def cleanup_all_browsers() -> None:
 
     Useful for cleanup on shutdown.
     """
+    global _cached_agent_browser, _agent_browser_resolved
     with _cleanup_lock:
         task_ids = list(_active_sessions.keys())
     for task_id in task_ids:
         cleanup_browser(task_id)
+    # Reset agent-browser resolution cache so subsequent sessions re-probe.
+    _cached_agent_browser = None
+    _agent_browser_resolved = False
 
 
 # Auto-register with cleanup registry

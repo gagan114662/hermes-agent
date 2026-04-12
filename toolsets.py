@@ -113,6 +113,7 @@ TOOLSETS = {
             "calendar_list", "calendar_create",
             "sheets_get", "sheets_append",
         ],
+        "includes": [],
     },
     "reach": {
         "description": "Platform access tools: YouTube transcripts, Twitter/X search, Reddit, RSS feeds, and clean web reading via Jina",
@@ -122,6 +123,7 @@ TOOLSETS = {
             "reddit_read", "reddit_search",
             "rss_fetch", "jina_read",
         ],
+        "includes": [],
     },
     "web": {
         "description": "Web research and content extraction tools",

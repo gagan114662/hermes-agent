@@ -5547,6 +5547,9 @@ class AIAgent:
     _TRANSIENT_TRANSPORT_ERRORS = frozenset({
         "ReadTimeout", "ConnectTimeout", "PoolTimeout",
         "ConnectError", "RemoteProtocolError",
+        # OpenAI SDK wraps underlying httpx errors as APIConnectionError /
+        # APITimeoutError — treat them the same as their httpx counterparts.
+        "APIConnectionError", "APITimeoutError",
     })
 
     def _try_recover_primary_transport(
@@ -6022,9 +6025,12 @@ class AIAgent:
         if self.tools:
             api_kwargs["tools"] = self.tools
 
-        if self.max_tokens is not None:
-            if not self._is_qwen_portal():
-                api_kwargs.update(self._max_tokens_param(self.max_tokens))
+        if self._is_qwen_portal():
+            # Qwen portal reasoning models exhaust their output budget without
+            # an explicit cap.  Default to 65536 when the user hasn't set one.
+            api_kwargs["max_tokens"] = self.max_tokens if self.max_tokens is not None else 65536
+        elif self.max_tokens is not None:
+            api_kwargs.update(self._max_tokens_param(self.max_tokens))
         elif self._is_openrouter_url() and "claude" in (self.model or "").lower():
             # OpenRouter translates requests to Anthropic's Messages API,
             # which requires max_tokens as a mandatory field.  When we omit
@@ -6100,6 +6106,10 @@ class AIAgent:
         # https://docs.x.ai/developers/advanced-api-usage/prompt-caching
         if "x.ai" in self._base_url_lower and hasattr(self, "session_id") and self.session_id:
             api_kwargs["extra_headers"] = {"x-grok-conv-id": self.session_id}
+
+        # Apply any caller-supplied request overrides (e.g. service_tier).
+        if self.request_overrides:
+            api_kwargs.update(self.request_overrides)
 
         return api_kwargs
 
@@ -7112,7 +7122,7 @@ class AIAgent:
                         self._vprint(f"  {cute_msg}")
             elif self.quiet_mode:
                 spinner = None
-                if not self.tool_progress_callback:
+                if not self.tool_progress_callback and self._should_start_quiet_spinner():
                     face = random.choice(KawaiiSpinner.KAWAII_WAITING)
                     emoji = _get_tool_emoji(function_name)
                     preview = _build_tool_preview(function_name, function_args) or function_name
@@ -7135,7 +7145,7 @@ class AIAgent:
                     cute_msg = _get_cute_tool_message_impl(function_name, function_args, tool_duration, result=_spinner_result)
                     if spinner:
                         spinner.stop(cute_msg)
-                    else:
+                    elif not self.tool_progress_callback:
                         self._vprint(f"  {cute_msg}")
             else:
                 try:
@@ -9834,6 +9844,12 @@ class AIAgent:
 
                         # Exhausted prefill attempts, empty retries, or
                         # structured reasoning with no content —
+                        # Try fallback before giving up completely.
+                        if _truly_empty and not _has_structured:
+                            if self._try_activate_fallback():
+                                self._empty_content_retries = 0
+                                continue
+
                         # fall through to "(empty)" terminal.
                         _turn_exit_reason = "empty_response_exhausted"
                         reasoning_text = self._extract_reasoning(assistant_message)
