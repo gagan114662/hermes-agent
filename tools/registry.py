@@ -54,12 +54,12 @@ class ToolEntry:
     __slots__ = (
         "name", "toolset", "schema", "handler", "check_fn",
         "requires_env", "is_async", "description", "emoji",
-        "max_result_size_chars", "is_concurrency_safe",
+        "is_concurrency_safe", "max_result_size_chars",
     )
 
     def __init__(self, name, toolset, schema, handler, check_fn,
                  requires_env, is_async, description, emoji,
-                 max_result_size_chars=None, is_concurrency_safe=False):
+                 is_concurrency_safe=False, max_result_size_chars=None):
         self.name = name
         self.toolset = toolset
         self.schema = schema
@@ -69,8 +69,8 @@ class ToolEntry:
         self.is_async = is_async
         self.description = description
         self.emoji = emoji
-        self.max_result_size_chars = max_result_size_chars
         self.is_concurrency_safe = is_concurrency_safe
+        self.max_result_size_chars = max_result_size_chars
 
 
 class ToolRegistry:
@@ -95,8 +95,8 @@ class ToolRegistry:
         is_async: bool = False,
         description: str = "",
         emoji: str = "",
-        max_result_size_chars: int | float | None = None,
         is_concurrency_safe: bool = False,
+        max_result_size_chars: int = None,
     ):
         """Register a tool.  Called at module-import time by each tool file."""
         existing = self._tools.get(name)
@@ -116,11 +116,21 @@ class ToolRegistry:
             is_async=is_async,
             description=description or schema.get("description", ""),
             emoji=emoji,
-            max_result_size_chars=max_result_size_chars,
             is_concurrency_safe=is_concurrency_safe,
+            max_result_size_chars=max_result_size_chars,
         )
         if check_fn and toolset not in self._toolset_checks:
             self._toolset_checks[toolset] = check_fn
+
+    def get_max_result_size(self, name: str, default=None):
+        """Return per-tool max result size, or *default* (or global default)."""
+        entry = self._tools.get(name)
+        if entry and entry.max_result_size_chars is not None:
+            return entry.max_result_size_chars
+        if default is not None:
+            return default
+        from tools.budget_config import DEFAULT_RESULT_SIZE_CHARS
+        return DEFAULT_RESULT_SIZE_CHARS
 
     def deregister(self, name: str) -> None:
         """Remove a tool from the registry.
@@ -223,15 +233,17 @@ class ToolRegistry:
     # Query helpers  (replace redundant dicts in model_tools.py)
     # ------------------------------------------------------------------
 
-    def get_max_result_size(self, name: str, default: int | float | None = None) -> int | float:
-        """Return per-tool max result size, or *default* (or global default)."""
-        entry = self._tools.get(name)
-        if entry and entry.max_result_size_chars is not None:
-            return entry.max_result_size_chars
-        if default is not None:
-            return default
-        from tools.budget_config import DEFAULT_RESULT_SIZE_CHARS
-        return DEFAULT_RESULT_SIZE_CHARS
+    def get_concurrency_safe_tools(self) -> frozenset:
+        """Return frozenset of tool names that are safe to run concurrently.
+
+        Tools self-declare safety via ``is_concurrency_safe=True`` in
+        ``registry.register()``.  The caller is responsible for applying
+        any ``_NEVER_PARALLEL_TOOLS`` overrides on top of this set.
+        """
+        return frozenset(
+            name for name, entry in self._tools.items()
+            if entry.is_concurrency_safe
+        )
 
     def get_all_tool_names(self) -> List[str]:
         """Return sorted list of all registered tool names."""

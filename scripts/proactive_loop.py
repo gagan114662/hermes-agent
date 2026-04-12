@@ -25,10 +25,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def _get_hermes_home() -> Path:
-    return Path(os.environ.get("HOME", str(Path.home()))) / ".hermes"
-
-_HERMES_HOME = _get_hermes_home()
+_HERMES_HOME = Path(os.environ.get("HOME", str(Path.home()))) / ".hermes"
 
 # ---------------------------------------------------------------------------
 # ICP — what Hermes is selling (drives prospecting search queries)
@@ -50,7 +47,7 @@ PROSPECTING_QUERIES = [
 # ---------------------------------------------------------------------------
 
 def _log_path() -> Path:
-    return _get_hermes_home() / "action_log.json"
+    return _HERMES_HOME / "action_log.json"
 
 
 def log_action(action: str, queue: str = "general") -> None:
@@ -296,20 +293,14 @@ def _process_mailbox_msg(msg: dict, msg_file: Path, folder: str, cutoff, actions
 
 
 def run_leads_queue() -> list:
-    """Follow up with stale prospects."""
+    """Run growth engine: research prospects, do real work, send deliverables as pitch."""
     actions = []
     try:
-        prospects = _list_stale_prospects()
-        logger.info("Leads queue: %d stale prospects", len(prospects))
-        for prospect in prospects:
-            name = prospect.get("name", "Unknown")
-            try:
-                _send_followup(prospect)
-                action = f"Followed up with {name}"
-                log_action(action, queue="leads")
-                actions.append(action)
-            except Exception as _fe:
-                logger.warning("Follow-up to %s failed: %s", name, _fe)
+        from scripts.growth_engine import run_growth_pipeline
+        new_actions = run_growth_pipeline(limit=2)
+        for action in new_actions:
+            log_action(action, queue="leads")
+        actions.extend(new_actions)
     except Exception as e:
         logger.warning("Leads queue error: %s", e)
     return actions

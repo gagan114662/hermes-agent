@@ -289,82 +289,21 @@ def twitter_search_tool(query: str, limit: int = 10) -> str:
 # Reddit
 # ---------------------------------------------------------------------------
 
-# Public Redlib instances (Libreddit fork) — no auth needed, no datacenter blocks
-_REDLIB_HOSTS = [
-    "https://redlib.kylrth.com",
-    "https://redlib.perennialte.ch",
-    "https://rl.bloat.cat",
-]
-
-
-def _reddit_via_redlib(path: str) -> str:
-    """Fetch a Reddit path via Redlib (bypasses datacenter IP blocks)."""
-    for host in _REDLIB_HOSTS:
-        try:
-            resp = httpx.get(f"{host}{path}", timeout=12, follow_redirects=True)
-            if resp.status_code == 200 and len(resp.text) > 500:
-                return resp.text
-        except Exception:
-            continue
-    raise RuntimeError("All Redlib instances failed")
-
-
-def _parse_redlib_search(html: str, limit: int = 10) -> str:
-    """Extract post titles and links from Redlib search HTML."""
-    links = re.findall(r'href="(/r/[^"]+/comments/[^"]+?)"', html)
-    titles = re.findall(r'class="search-result-header"[^>]*>.*?<h[23][^>]*>([^<]+)</h[23]>', html, re.DOTALL)
-    # Deduplicate links (appear twice in HTML)
-    seen, unique = set(), []
-    for l in links:
-        if l not in seen:
-            seen.add(l)
-            unique.append(l)
-    lines = []
-    for i, link in enumerate(unique[:limit]):
-        title = titles[i].strip() if i < len(titles) else link.split("/")[-2].replace("_", " ")
-        lines.append(f"- **{title}**\n  https://reddit.com{link}")
-    return "\n".join(lines) if lines else "No results found."
-
-
-def _parse_redlib_post(html: str, comment_limit: int = 10) -> str:
-    """Extract post content and comments from Redlib post HTML."""
-    title_m = re.search(r'<title>([^<]+)</title>', html)
-    title = title_m.group(1).replace(" • r/", " | r/").replace(" - Redlib", "").strip() if title_m else ""
-    body_m = re.search(r'class="post-content"[^>]*>(.*?)</div>', html, re.DOTALL)
-    body = re.sub(r'<[^>]+>', '', body_m.group(1)).strip()[:1000] if body_m else ""
-    comment_bodies = re.findall(r'class="comment-content"[^>]*>.*?<p[^>]*>(.*?)</p>', html, re.DOTALL)
-    result = f"**{title}**\n"
-    if body:
-        result += f"\n{body}\n"
-    result += "\nTop comments:\n"
-    for cb in comment_bodies[:comment_limit]:
-        clean = re.sub(r'<[^>]+>', '', cb).strip()[:300]
-        if clean:
-            result += f"  {clean}\n"
-    return result
-
-
 def reddit_read_tool(url: str, comment_limit: int = 10) -> str:
     """Read a Reddit post and its top comments."""
-    clean_url = url.rstrip("/").removesuffix(".json")
-    json_url = clean_url + ".json"
-    if "?" not in json_url:
-        json_url += f"?limit={comment_limit}&sort=top"
+    if not url.endswith(".json"):
+        url = url.rstrip("/") + ".json"
+    if "?" not in url:
+        url += f"?limit={comment_limit}&sort=top"
 
     headers = {"User-Agent": "hermes-agent/1.0 (personal use)"}
     try:
-        resp = httpx.get(json_url, headers=headers, timeout=15, follow_redirects=True)
+        resp = httpx.get(url, headers=headers, timeout=15, follow_redirects=True)
         resp.raise_for_status()
         data = resp.json()
     except httpx.HTTPStatusError as e:
-        if e.response.status_code in (403, 429):
-            # Datacenter IP blocked — fall back to Redlib
-            try:
-                path = "/" + clean_url.split("reddit.com/", 1)[-1]
-                html = _reddit_via_redlib(path)
-                return _parse_redlib_post(html, comment_limit)
-            except Exception as re_err:
-                return f"Reddit blocked (403) and Redlib fallback failed: {re_err}"
+        if e.response.status_code == 403:
+            return "Error: Reddit blocked this request (403). Try setting HTTPS_PROXY in .env."
         return f"Error fetching Reddit post: {e}"
     except Exception as e:
         return f"Error: {e}"
@@ -407,10 +346,8 @@ def reddit_search_tool(query: str, subreddit: str = "", limit: int = 10) -> str:
     """Search Reddit. Optionally scope to a subreddit."""
     if subreddit:
         url = f"https://www.reddit.com/r/{subreddit}/search.json?q={query}&restrict_sr=1&sort=relevance&limit={limit}"
-        search_url = f"https://www.reddit.com/r/{subreddit}/search?q={query}&restrict_sr=1&sort=relevance"
     else:
         url = f"https://www.reddit.com/search.json?q={query}&sort=relevance&limit={limit}"
-        search_url = f"https://www.reddit.com/search?q={query}&sort=relevance"
 
     headers = {"User-Agent": "hermes-agent/1.0 (personal use)"}
     try:
@@ -418,17 +355,8 @@ def reddit_search_tool(query: str, subreddit: str = "", limit: int = 10) -> str:
         resp.raise_for_status()
         data = resp.json()
     except httpx.HTTPStatusError as e:
-        if e.response.status_code in (403, 429):
-            # Datacenter IP blocked — fall back to Redlib
-            try:
-                if subreddit:
-                    path = f"/r/{subreddit}/search?q={query}&restrict_sr=on&sort=relevance"
-                else:
-                    path = f"/search?q={query}&sort=relevance"
-                html = _reddit_via_redlib(path)
-                return _parse_redlib_search(html, limit)
-            except Exception as re_err:
-                return f"Reddit blocked (403) and Redlib fallback failed: {re_err}"
+        if e.response.status_code == 403:
+            return "Error: Reddit blocked this request (403). Try setting HTTPS_PROXY in .env."
         return f"Error: {e}"
     except Exception as e:
         return f"Error: {e}"

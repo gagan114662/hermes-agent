@@ -8,6 +8,7 @@ import tempfile
 from pathlib import Path
 
 from tools.environments.base import BaseEnvironment, _popen_bash
+from tools.environments.file_sync import FileSyncManager, iter_sync_files, quoted_rm_command
 
 logger = logging.getLogger(__name__)
 
@@ -44,8 +45,14 @@ class SSHEnvironment(BaseEnvironment):
         _ensure_ssh_available()
         self._establish_connection()
         self._remote_home = self._detect_remote_home()
-        self._last_sync_time: float = 0  # guarantees first _before_execute syncs
-        self._sync_skills_and_credentials()
+
+        self._ensure_remote_dirs()
+        self._sync_manager = FileSyncManager(
+            get_files_fn=lambda: iter_sync_files(f"{self._remote_home}/.hermes"),
+            upload_fn=self._scp_upload,
+            delete_fn=self._ssh_delete,
+        )
+        self._sync_manager.sync(force=True)
 
         self.init_session()
 
@@ -93,6 +100,19 @@ class SSHEnvironment(BaseEnvironment):
             return "/root"
         return f"/home/{self.user}"
 
+    # ------------------------------------------------------------------
+    # File sync (via FileSyncManager)
+    # ------------------------------------------------------------------
+
+    def _ensure_remote_dirs(self) -> None:
+        """Create base ~/.hermes directory tree on remote in one SSH call."""
+        base = f"{self._remote_home}/.hermes"
+        dirs = [base, f"{base}/skills", f"{base}/credentials", f"{base}/cache"]
+        mkdir_cmd = "mkdir -p " + " ".join(shlex.quote(d) for d in dirs)
+        cmd = self._build_ssh_command()
+        cmd.append(mkdir_cmd)
+        subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+
     def _sync_skills_and_credentials(self) -> None:
         """Rsync skills directory and credential files to the remote host."""
         try:
@@ -137,6 +157,39 @@ class SSHEnvironment(BaseEnvironment):
                     logger.debug("SSH: rsync skills dir failed: %s", result.stderr.strip())
         except Exception as e:
             logger.debug("SSH: could not sync skills/credentials: %s", e)
+
+    def _scp_upload(self, host_path: str, remote_path: str) -> None:
+        """Upload a single file via scp over ControlMaster."""
+        parent = str(Path(remote_path).parent)
+        mkdir_cmd = self._build_ssh_command()
+        mkdir_cmd.append(f"mkdir -p {shlex.quote(parent)}")
+        subprocess.run(mkdir_cmd, capture_output=True, text=True, timeout=10)
+
+        scp_cmd = ["scp", "-o", f"ControlPath={self.control_socket}"]
+        if self.port != 22:
+            scp_cmd.extend(["-P", str(self.port)])
+        if self.key_path:
+            scp_cmd.extend(["-i", self.key_path])
+        scp_cmd.extend([host_path, f"{self.user}@{self.host}:{remote_path}"])
+        result = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            raise RuntimeError(f"scp failed: {result.stderr.strip()}")
+
+    def _ssh_delete(self, remote_paths: list[str]) -> None:
+        """Batch-delete remote files in one SSH call."""
+        cmd = self._build_ssh_command()
+        cmd.append(quoted_rm_command(remote_paths))
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        if result.returncode != 0:
+            raise RuntimeError(f"remote rm failed: {result.stderr.strip()}")
+
+    def _before_execute(self) -> None:
+        """Sync files to remote via FileSyncManager (rate-limited internally)."""
+        self._sync_manager.sync()
+
+    # ------------------------------------------------------------------
+    # Execution
+    # ------------------------------------------------------------------
 
     def _run_bash(self, cmd_string: str, *, login: bool = False,
                   timeout: int = 120,
