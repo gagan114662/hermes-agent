@@ -834,7 +834,7 @@ class GatewayRunner:
                 quiet_mode=True,
                 enabled_toolsets=["memory", "skills"],
                 session_id=old_session_id,
-                honcho_session_key=honcho_session_key,
+                honcho_session_key=session_key,
             )
             # Fully silence the flush agent — quiet_mode only suppresses init
             # messages; tool call output still leaks to the terminal through
@@ -2134,29 +2134,6 @@ class GatewayRunner:
             await self._stop_task
             return
 
-        # Run registered cleanup functions (2s timeout)
-        try:
-            from agent.cleanup_registry import run_all_cleanups
-            run_all_cleanups(timeout=2.0)
-        except Exception:
-            pass
-
-        for session_key, agent in list(self._running_agents.items()):
-            if agent is _AGENT_PENDING_SENTINEL:
-                continue
-            try:
-                agent.interrupt("Gateway shutting down")
-                logger.debug("Interrupted running agent for session %s during shutdown", session_key[:20])
-            except Exception as e:
-                logger.debug("Failed interrupting agent during shutdown: %s", e)
-            try:
-                from hermes_cli.plugins import invoke_hook
-                _sid = getattr(agent, 'session_id', None)
-                if _sid:
-                    invoke_hook("on_session_finalize", session_id=_sid)
-            except Exception:
-                pass
-
         async def _stop_impl() -> None:
             logger.info(
                 "Stopping gateway%s...",
@@ -2164,6 +2141,13 @@ class GatewayRunner:
             )
             self._running = False
             self._draining = True
+
+            # Run registered cleanup functions (2s timeout)
+            try:
+                from agent.cleanup_registry import run_all_cleanups
+                run_all_cleanups(timeout=2.0)
+            except Exception:
+                pass
 
             timeout = self._restart_drain_timeout
             active_agents, timed_out = await self._drain_active_agents(timeout)
@@ -2210,6 +2194,7 @@ class GatewayRunner:
             self._running_agents.clear()
             self._pending_messages.clear()
             self._pending_approvals.clear()
+            self._shutdown_all_gateway_honcho()
             self._shutdown_event.set()
 
             # Global cleanup: kill any remaining tool subprocesses not tied
@@ -2242,20 +2227,6 @@ class GatewayRunner:
             except Exception:
                 pass
 
-        self.adapters.clear()
-        self._running_agents.clear()
-        self._pending_messages.clear()
-        self._pending_approvals.clear()
-        self._shutdown_all_gateway_honcho()
-        self._shutdown_event.set()
-        
-        from gateway.status import remove_pid_file, write_runtime_status
-        remove_pid_file()
-        try:
-            write_runtime_status(gateway_state="stopped", exit_reason=self._exit_reason)
-        except Exception:
-            pass
-        
             if self._restart_requested and self._restart_via_service:
                 self._exit_code = GATEWAY_SERVICE_RESTART_EXIT_CODE
                 self._exit_reason = self._exit_reason or "Gateway restart requested"
@@ -6788,105 +6759,123 @@ class GatewayRunner:
     async def _watch_update_progress(
         self,
         poll_interval: float = 2.0,
-        stream_interval: float = 5.0,
+        stream_interval: float = 4.0,
         timeout: float = 1800.0,
     ) -> None:
-        """Stream update output to the user and handle prompts."""
+        """Watch ``hermes update --gateway``, streaming output + forwarding prompts.
+
+        Polls ``.update_output.txt`` for new content and sends chunks to the
+        user periodically.  Detects ``.update_prompt.json`` (written by the
+        update process when it needs user input) and forwards the prompt to
+        the messenger.  The user's next message is intercepted by
+        ``_handle_message`` and written to ``.update_response``.
+        """
+        import json
+        import re as _re
+
         pending_path = _hermes_home / ".update_pending.json"
+        claimed_path = _hermes_home / ".update_pending.claimed.json"
         output_path = _hermes_home / ".update_output.txt"
         exit_code_path = _hermes_home / ".update_exit_code"
         prompt_path = _hermes_home / ".update_prompt.json"
 
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
-        last_sent_bytes = 0
-        last_stream_time = loop.time()
 
-        # Read pending info
-        try:
-            pending = json.loads(pending_path.read_text()) if pending_path.exists() else {}
-        except Exception:
-            pending = {}
-
-        platform_str = pending.get("platform", "")
-        chat_id = pending.get("chat_id", "")
-        session_key = pending.get("session_key", "")
-
-        try:
-            platform_enum = Platform(platform_str)
-        except Exception:
-            platform_enum = None
-
-        adapter = self.adapters.get(platform_enum) if platform_enum else None
-
-        async def _send(msg: str) -> None:
-            if adapter and chat_id:
+        # Resolve the adapter and chat_id for sending messages
+        adapter = None
+        chat_id = None
+        session_key = None
+        for path in (claimed_path, pending_path):
+            if path.exists():
                 try:
-                    await adapter.send(chat_id, msg)
-                except Exception as _e:
-                    logger.debug("_watch_update_progress send error: %s", _e)
-
-        while loop.time() < deadline:
-            # Handle prompt interception
-            if prompt_path.exists():
-                try:
-                    prompt_data = json.loads(prompt_path.read_text())
-                    prompt_text = prompt_data.get("prompt", "Update requires input:")
-                    if session_key:
-                        if not hasattr(self, '_update_prompt_pending'):
-                            self._update_prompt_pending = {}
-                        self._update_prompt_pending[session_key] = True
-                    await _send(f"🔔 {prompt_text}")
-                    # Wait for response
-                    response_path = _hermes_home / ".update_response"
-                    for _ in range(100):
-                        if response_path.exists():
-                            break
-                        await asyncio.sleep(0.5)
-                except Exception as _pe:
-                    logger.debug("Prompt handling error: %s", _pe)
-
-            # Stream new output periodically
-            now = loop.time()
-            if output_path.exists() and (now - last_stream_time) >= stream_interval:
-                try:
-                    content = output_path.read_bytes()
-                    new_content = content[last_sent_bytes:]
-                    if new_content:
-                        await _send(new_content.decode("utf-8", errors="replace").strip())
-                        last_sent_bytes = len(content)
-                        last_stream_time = now
+                    pending = json.loads(path.read_text())
+                    platform_str = pending.get("platform")
+                    chat_id = pending.get("chat_id")
+                    session_key = pending.get("session_key")
+                    if platform_str and chat_id:
+                        platform = Platform(platform_str)
+                        adapter = self.adapters.get(platform)
+                        # Fallback session key if not stored (old pending files)
+                        if not session_key:
+                            session_key = f"{platform_str}:{chat_id}"
+                    break
                 except Exception:
                     pass
 
+        if not adapter or not chat_id:
+            logger.warning("Update watcher: cannot resolve adapter/chat_id, falling back to completion-only")
+            # Fall back to old behavior: wait for exit code and send final notification
+            while (pending_path.exists() or claimed_path.exists()) and loop.time() < deadline:
+                if exit_code_path.exists():
+                    await self._send_update_notification()
+                    return
+                await asyncio.sleep(poll_interval)
+            if (pending_path.exists() or claimed_path.exists()) and not exit_code_path.exists():
+                exit_code_path.write_text("124")
+                await self._send_update_notification()
+            return
+
+        def _strip_ansi(text: str) -> str:
+            return _re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', text)
+
+        bytes_sent = 0
+        last_stream_time = loop.time()
+        buffer = ""
+
+        async def _flush_buffer() -> None:
+            """Send buffered output to the user."""
+            nonlocal buffer, last_stream_time
+            if not buffer.strip():
+                buffer = ""
+                return
+            # Chunk to fit message limits (Telegram: 4096, others: generous)
+            clean = _strip_ansi(buffer).strip()
+            buffer = ""
+            last_stream_time = loop.time()
+            if not clean:
+                return
+            # Split into chunks if too long
+            max_chunk = 3500
+            chunks = [clean[i:i + max_chunk] for i in range(0, len(clean), max_chunk)]
+            for chunk in chunks:
+                try:
+                    await adapter.send(chat_id, f"```\n{chunk}\n```")
+                except Exception as e:
+                    logger.debug("Update stream send failed: %s", e)
+
+        while loop.time() < deadline:
             # Check for completion
             if exit_code_path.exists():
-                try:
-                    exit_code = int(exit_code_path.read_text().strip())
-                except Exception:
-                    exit_code = 0
-
-                # Send final output if any
+                # Read any remaining output
                 if output_path.exists():
                     try:
-                        content = output_path.read_bytes()
-                        new_content = content[last_sent_bytes:]
-                        if new_content:
-                            await _send(new_content.decode("utf-8", errors="replace").strip())
-                    except Exception:
+                        content = output_path.read_text()
+                        if len(content) > bytes_sent:
+                            buffer += content[bytes_sent:]
+                            bytes_sent = len(content)
+                    except OSError:
                         pass
+                await _flush_buffer()
 
-                if exit_code == 0:
-                    await _send("✅ Update finished successfully!")
-                else:
-                    await _send(f"❌ Update failed (exit code {exit_code}).")
+                # Send final status
+                try:
+                    exit_code_raw = exit_code_path.read_text().strip() or "1"
+                    exit_code = int(exit_code_raw)
+                    if exit_code == 0:
+                        await adapter.send(chat_id, "✅ Hermes update finished.")
+                    else:
+                        await adapter.send(chat_id, "❌ Hermes update failed (exit code {}).".format(exit_code))
+                    logger.info("Update finished (exit=%s), notified %s", exit_code, session_key)
+                except Exception as e:
+                    logger.warning("Update final notification failed: %s", e)
 
                 # Cleanup
-                for path in (pending_path, output_path, exit_code_path):
-                    try:
-                        path.unlink(missing_ok=True)
-                    except Exception:
-                        pass
+                for p in (pending_path, claimed_path, output_path,
+                          exit_code_path, prompt_path):
+                    p.unlink(missing_ok=True)
+                (_hermes_home / ".update_response").unlink(missing_ok=True)
+                self._update_prompt_pending.pop(session_key, None)
                 return
 
             # Check for new output
@@ -6950,6 +6939,21 @@ class GatewayRunner:
                     logger.debug("Failed to read update prompt: %s", e)
 
             await asyncio.sleep(poll_interval)
+
+        # Timeout
+        if not exit_code_path.exists():
+            logger.warning("Update watcher timed out after %.0fs", timeout)
+            exit_code_path.write_text("124")
+            await _flush_buffer()
+            try:
+                await adapter.send(chat_id, "❌ Hermes update timed out after 30 minutes.")
+            except Exception:
+                pass
+            for p in (pending_path, claimed_path, output_path,
+                      exit_code_path, prompt_path):
+                p.unlink(missing_ok=True)
+            (_hermes_home / ".update_response").unlink(missing_ok=True)
+            self._update_prompt_pending.pop(session_key, None)
 
     async def _watch_for_update_completion(
         self,
@@ -8393,6 +8397,15 @@ class GatewayRunner:
         _notify_task = asyncio.create_task(_notify_long_running())
 
         try:
+            # Inactivity timeout — catches hung API calls or stuck tools.
+            # Config: agent.gateway_timeout in config.yaml, or
+            # HERMES_AGENT_TIMEOUT env var (env var takes precedence).
+            # Default 1800s (30 min inactivity).  0 = unlimited.
+            _agent_timeout_raw = float(os.getenv("HERMES_AGENT_TIMEOUT", 1800))
+            _agent_timeout = _agent_timeout_raw if _agent_timeout_raw > 0 else None
+            _agent_warning_raw = float(os.getenv("HERMES_AGENT_TIMEOUT_WARNING", 900))
+            _agent_warning = _agent_warning_raw if _agent_warning_raw > 0 else None
+            _warning_fired = False
             # Run in thread pool to not block
             loop = asyncio.get_event_loop()
             _executor_task = asyncio.ensure_future(

@@ -58,6 +58,7 @@ def _make_runner():
     runner._pending_model_notes = {}
     runner._session_db = None
     runner._agent_cache = {}
+    runner._agent_cache_last_access = {}
     runner._agent_cache_lock = threading.Lock()
     runner._session_model_overrides = {}
     runner.hooks = SimpleNamespace(loaded_hooks=False)

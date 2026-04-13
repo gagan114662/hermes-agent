@@ -12,6 +12,11 @@ from agent.context_compressor import ContextCompressor
 def _make_compressor():
     """Create a ContextCompressor with minimal state for testing."""
     compressor = ContextCompressor.__new__(ContextCompressor)
+    compressor.model = "claude-sonnet-4"
+    compressor.base_url = None
+    compressor.api_key = None
+    compressor.provider = None
+    compressor.api_mode = None
     compressor.protect_first_n = 2
     compressor.protect_last_n = 5
     compressor.tail_token_budget = 20000
@@ -23,8 +28,13 @@ def _make_compressor():
     compressor.compression_count = 0
     compressor.last_prompt_tokens = 0
     compressor._previous_summary = None
-    compressor._summary_failure_cooldown_until = 0.0
+    compressor._last_summary_failure = None
+    compressor._summary_cooldown_s = 60.0
     compressor.summary_model = None
+    compressor.collapse_commits = []
+    compressor.armed = False
+    compressor.arm_threshold = 0.65
+    compressor.urgent_threshold = 0.80
     return compressor
 
 

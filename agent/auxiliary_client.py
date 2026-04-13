@@ -1751,9 +1751,21 @@ def resolve_vision_provider_client(
     return requested, client, final_model
 
 
+def get_vision_auxiliary_client() -> Tuple[Optional[Any], Optional[str]]:
+    """Return (client, default_model_slug) for vision/multimodal auxiliary tasks."""
+    _, client, final_model = resolve_vision_provider_client(async_mode=False)
+    return client, final_model
+
+
+def get_async_vision_auxiliary_client():
+    """Return (async_client, model_slug) for async vision consumers."""
+    _, client, final_model = resolve_vision_provider_client(async_mode=True)
+    return client, final_model
+
+
 def get_auxiliary_extra_body() -> dict:
     """Return extra_body kwargs for auxiliary API calls.
-    
+
     Includes Nous Portal product tags when the auxiliary client is backed
     by Nous Portal. Returns empty dict otherwise.
     """
