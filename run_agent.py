@@ -2903,7 +2903,7 @@ class AIAgent:
         # Signal all tools to abort any in-flight operations immediately.
         # Scope the interrupt to this agent's execution thread so other
         # agents running in the same process (gateway) are not affected.
-        _set_interrupt(True, self._execution_thread_id)
+        _set_interrupt(True, getattr(self, "_execution_thread_id", None))
         # Propagate interrupt to any running child agents (subagent delegation)
         with self._active_children_lock:
             children_copy = list(self._active_children)
@@ -2914,12 +2914,12 @@ class AIAgent:
                 logger.debug("Failed to propagate interrupt to child agent: %s", e)
         if not self.quiet_mode:
             print("\n⚡ Interrupt requested" + (f": '{message[:40]}...'" if message and len(message) > 40 else f": '{message}'" if message else ""))
-    
+
     def clear_interrupt(self) -> None:
         """Clear any pending interrupt request and the per-thread tool interrupt signal."""
         self._interrupt_requested = False
         self._interrupt_message = None
-        _set_interrupt(False, self._execution_thread_id)
+        _set_interrupt(False, getattr(self, "_execution_thread_id", None))
 
     def _touch_activity(self, desc: str) -> None:
         """Update the last-activity timestamp and description (thread-safe)."""
@@ -4907,18 +4907,18 @@ class AIAgent:
                     except Exception:
                         pass
                     raise InterruptedError("Agent interrupted during API call")
-                if result["error"] is not None:
-                    raise result["error"]
-                response = result["response"]
-                try:
-                    if _span is not None:
-                        usage = getattr(response, "usage", None)
-                        if usage:
-                            _span.set_attribute("input_tokens", getattr(usage, "prompt_tokens", 0))
-                            _span.set_attribute("output_tokens", getattr(usage, "completion_tokens", 0))
-                except Exception:
-                    pass
-                return response
+            if result["error"] is not None:
+                raise result["error"]
+            response = result["response"]
+            try:
+                if _span is not None:
+                    usage = getattr(response, "usage", None)
+                    if usage:
+                        _span.set_attribute("input_tokens", getattr(usage, "prompt_tokens", 0))
+                        _span.set_attribute("output_tokens", getattr(usage, "completion_tokens", 0))
+            except Exception:
+                pass
+            return response
         except Exception as _exc:
             try:
                 if _span is not None:

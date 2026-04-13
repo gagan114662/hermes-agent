@@ -218,11 +218,12 @@ class HonchoMemoryProvider(MemoryProvider):
                 return
 
             # Override peer_name with gateway user_id for per-user memory scoping.
-            # Only when no explicit peerName was configured — an explicit peerName
-            # means the user chose their identity; a raw user_id (e.g. Telegram
-            # chat ID) should not silently replace it.
+            # Gateway contexts (platform != cli/terminal) always use user_id.
+            # Non-gateway contexts use user_id only when no peer_name is configured.
             _gw_user_id = kwargs.get("user_id")
-            if _gw_user_id and not cfg.peer_name:
+            _platform = kwargs.get("platform")
+            _is_gateway_platform = bool(_platform and _platform not in ("cli", "terminal"))
+            if _gw_user_id and (_is_gateway_platform or not cfg.peer_name):
                 cfg.peer_name = _gw_user_id
 
             self._config = cfg

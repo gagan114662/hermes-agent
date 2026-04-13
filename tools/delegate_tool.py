@@ -533,12 +533,6 @@ def _run_single_child(
         _heartbeat_stop.set()
         _heartbeat_thread.join(timeout=5)
 
-        if child_pool is not None and leased_cred_id is not None:
-            try:
-                child_pool.release_lease(leased_cred_id)
-            except Exception as exc:
-                logger.debug("Failed to release credential lease: %s", exc)
-
         # Restore the parent's tool names so the process-global is correct
         # for any subsequent execute_code calls or other consumers.
         import model_tools

@@ -959,6 +959,27 @@ class MatrixAdapter(BasePlatformAdapter):
                 sync_data = await client.sync(
                     since=next_batch, timeout=30000,
                 )
+                # nio returns SyncError on auth/permission failures.
+                # Import lazily so tests can mock sys.modules["nio"] before the check.
+                import sys as _sys
+                _nio_SyncError = getattr(_sys.modules.get("nio"), "SyncError", None)
+                if _nio_SyncError is not None and isinstance(sync_data, _nio_SyncError):
+                    if self._closing:
+                        return
+                    err_msg = str(getattr(sync_data, "message", sync_data)).lower()
+                    if "m_unknown_token" in err_msg or "m_forbidden" in err_msg or "401" in err_msg:
+                        logger.error(
+                            "Matrix: permanent auth error from sync: %s — stopping sync",
+                            getattr(sync_data, "message", sync_data),
+                        )
+                        return
+                    logger.warning(
+                        "Matrix: sync returned %s: %s — retrying in 5s",
+                        type(sync_data).__name__,
+                        getattr(sync_data, "message", sync_data),
+                    )
+                    await asyncio.sleep(5)
+                    continue
                 if isinstance(sync_data, dict):
                     # Update joined rooms from sync response.
                     rooms_join = sync_data.get("rooms", {}).get("join", {})
