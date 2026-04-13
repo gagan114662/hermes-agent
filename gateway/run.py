@@ -2154,6 +2154,9 @@ class GatewayRunner:
                 _sid = getattr(agent, 'session_id', None)
                 if _sid:
                     invoke_hook("on_session_finalize", session_id=_sid)
+            except Exception:
+                pass
+
         async def _stop_impl() -> None:
             logger.info(
                 "Stopping gateway%s...",
@@ -2253,7 +2256,6 @@ class GatewayRunner:
         except Exception:
             pass
         
-        logger.info("Gateway stopped")
             if self._restart_requested and self._restart_via_service:
                 self._exit_code = GATEWAY_SERVICE_RESTART_EXIT_CODE
                 self._exit_reason = self._exit_reason or "Gateway restart requested"
@@ -2559,6 +2561,35 @@ class GatewayRunner:
             logger.debug("Ignoring message with no user_id from %s", source.platform.value)
             return None
         elif not self._is_user_authorized(source):
+            logger.warning("Unauthorized user: %s (%s) on %s", source.user_id, source.user_name, source.platform.value)
+            # In DMs: offer pairing code. In groups: silently ignore.
+            if source.chat_type == "dm" and self._get_unauthorized_dm_behavior(source.platform) == "pair":
+                platform_name = source.platform.value if source.platform else "unknown"
+                if self.pairing_store._is_rate_limited(platform_name, source.user_id):
+                    return None
+                code = self.pairing_store.generate_code(
+                    platform_name, source.user_id, source.user_name or ""
+                )
+                if code:
+                    adapter = self.adapters.get(source.platform)
+                    if adapter:
+                        await adapter.send(
+                            source.chat_id,
+                            f"Hi~ I don't recognize you yet!\n\n"
+                            f"Here's your pairing code: `{code}`\n\n"
+                            f"Ask the bot owner to run:\n"
+                            f"`hermes pairing approve {platform_name} {code}`"
+                        )
+                else:
+                    adapter = self.adapters.get(source.platform)
+                    if adapter:
+                        await adapter.send(
+                            source.chat_id,
+                            "Too many pairing requests right now~ "
+                            "Please try again later!"
+                        )
+                    self.pairing_store._record_rate_limit(platform_name, source.user_id)
+            return None
         else:
             # Sweep _pending_approvals — evict entries older than 5 minutes
             import time as _time

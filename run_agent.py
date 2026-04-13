@@ -4786,90 +4786,25 @@ class AIAgent:
             result = {"response": None, "error": None}
             request_client_holder = {"client": None}
 
-        # ── Stale-call timeout (mirrors streaming stale detector) ────────
-        # Non-streaming calls return nothing until the full response is
-        # ready.  Without this, a hung provider can block for the full
-        # httpx timeout (default 1800s) with zero feedback.  The stale
-        # detector kills the connection early so the main retry loop can
-        # apply richer recovery (credential rotation, provider fallback).
-        _stale_base = float(os.getenv("HERMES_API_CALL_STALE_TIMEOUT", 300.0))
-        _base_url = getattr(self, "_base_url", None) or ""
-        if _stale_base == 300.0 and _base_url and is_local_endpoint(_base_url):
-            _stale_timeout = float("inf")
-        else:
-            _est_tokens = sum(len(str(v)) for v in api_kwargs.get("messages", [])) // 4
-            if _est_tokens > 100_000:
-                _stale_timeout = max(_stale_base, 600.0)
-            elif _est_tokens > 50_000:
-                _stale_timeout = max(_stale_base, 450.0)
+            # ── Stale-call timeout (mirrors streaming stale detector) ────────
+            # Non-streaming calls return nothing until the full response is
+            # ready.  Without this, a hung provider can block for the full
+            # httpx timeout (default 1800s) with zero feedback.  The stale
+            # detector kills the connection early so the main retry loop can
+            # apply richer recovery (credential rotation, provider fallback).
+            _stale_base = float(os.getenv("HERMES_API_CALL_STALE_TIMEOUT", 300.0))
+            _base_url = getattr(self, "_base_url", None) or ""
+            if _stale_base == 300.0 and _base_url and is_local_endpoint(_base_url):
+                _stale_timeout = float("inf")
             else:
-                _stale_timeout = _stale_base
+                _est_tokens = sum(len(str(v)) for v in api_kwargs.get("messages", [])) // 4
+                if _est_tokens > 100_000:
+                    _stale_timeout = max(_stale_base, 600.0)
+                elif _est_tokens > 50_000:
+                    _stale_timeout = max(_stale_base, 450.0)
+                else:
+                    _stale_timeout = _stale_base
 
-        _call_start = time.time()
-        self._touch_activity("waiting for non-streaming API response")
-
-        t = threading.Thread(target=_call, daemon=True)
-        t.start()
-        _poll_count = 0
-        while t.is_alive():
-            t.join(timeout=0.3)
-            _poll_count += 1
-
-            # Touch activity every ~30s so the gateway's inactivity
-            # monitor knows we're alive while waiting for the response.
-            if _poll_count % 100 == 0:  # 100 × 0.3s = 30s
-                _elapsed = time.time() - _call_start
-                self._touch_activity(
-                    f"waiting for non-streaming response ({int(_elapsed)}s elapsed)"
-                )
-
-            # Stale-call detector: kill the connection if no response
-            # arrives within the configured timeout.
-            _elapsed = time.time() - _call_start
-            if _elapsed > _stale_timeout:
-                _est_ctx = sum(len(str(v)) for v in api_kwargs.get("messages", [])) // 4
-                logger.warning(
-                    "Non-streaming API call stale for %.0fs (threshold %.0fs). "
-                    "model=%s context=~%s tokens. Killing connection.",
-                    _elapsed, _stale_timeout,
-                    api_kwargs.get("model", "unknown"), f"{_est_ctx:,}",
-                )
-                self._emit_status(
-                    f"⚠️ No response from provider for {int(_elapsed)}s "
-                    f"(non-streaming, model: {api_kwargs.get('model', 'unknown')}). "
-                    f"Aborting call."
-                )
-                try:
-                    if self.api_mode == "anthropic_messages":
-                        from agent.anthropic_adapter import build_anthropic_client
-
-                        self._anthropic_client.close()
-                        self._anthropic_client = build_anthropic_client(
-                            self._anthropic_api_key,
-                            getattr(self, "_anthropic_base_url", None),
-                        )
-                    else:
-                        rc = request_client_holder.get("client")
-                        if rc is not None:
-                            self._close_request_openai_client(rc, reason="stale_call_kill")
-                except Exception:
-                    pass
-                self._touch_activity(
-                    f"stale non-streaming call killed after {int(_elapsed)}s"
-                )
-                # Wait briefly for the thread to notice the closed connection.
-                t.join(timeout=2.0)
-                if result["error"] is None and result["response"] is None:
-                    result["error"] = TimeoutError(
-                        f"Non-streaming API call timed out after {int(_elapsed)}s "
-                        f"with no response (threshold: {int(_stale_timeout)}s)"
-                    )
-                break
-
-            if self._interrupt_requested:
-                # Force-close the in-flight worker-local HTTP connection to stop
-                # token generation without poisoning the shared client used to
-                # seed future retries.
             def _call():
                 try:
                     if self.api_mode == "codex_responses":
@@ -4891,10 +4826,67 @@ class AIAgent:
                     if request_client is not None:
                         self._close_request_openai_client(request_client, reason="request_complete")
 
+            _call_start = time.time()
+            self._touch_activity("waiting for non-streaming API response")
+
             t = threading.Thread(target=_call, daemon=True)
             t.start()
+            _poll_count = 0
             while t.is_alive():
                 t.join(timeout=0.3)
+                _poll_count += 1
+
+                # Touch activity every ~30s so the gateway's inactivity
+                # monitor knows we're alive while waiting for the response.
+                if _poll_count % 100 == 0:  # 100 × 0.3s = 30s
+                    _elapsed = time.time() - _call_start
+                    self._touch_activity(
+                        f"waiting for non-streaming response ({int(_elapsed)}s elapsed)"
+                    )
+
+                # Stale-call detector: kill the connection if no response
+                # arrives within the configured timeout.
+                _elapsed = time.time() - _call_start
+                if _elapsed > _stale_timeout:
+                    _est_ctx = sum(len(str(v)) for v in api_kwargs.get("messages", [])) // 4
+                    logger.warning(
+                        "Non-streaming API call stale for %.0fs (threshold %.0fs). "
+                        "model=%s context=~%s tokens. Killing connection.",
+                        _elapsed, _stale_timeout,
+                        api_kwargs.get("model", "unknown"), f"{_est_ctx:,}",
+                    )
+                    self._emit_status(
+                        f"⚠️ No response from provider for {int(_elapsed)}s "
+                        f"(non-streaming, model: {api_kwargs.get('model', 'unknown')}). "
+                        f"Aborting call."
+                    )
+                    try:
+                        if self.api_mode == "anthropic_messages":
+                            from agent.anthropic_adapter import build_anthropic_client
+
+                            self._anthropic_client.close()
+                            self._anthropic_client = build_anthropic_client(
+                                self._anthropic_api_key,
+                                getattr(self, "_anthropic_base_url", None),
+                            )
+                        else:
+                            rc = request_client_holder.get("client")
+                            if rc is not None:
+                                self._close_request_openai_client(rc, reason="stale_call_kill")
+                    except Exception:
+                        pass
+                    self._touch_activity(
+                        f"stale non-streaming call killed after {int(_elapsed)}s"
+                    )
+                    # Wait briefly for the thread to notice the closed connection.
+                    t.join(timeout=2.0)
+                    if result["error"] is None and result["response"] is None:
+                        result["error"] = TimeoutError(
+                            f"Non-streaming API call timed out after {int(_elapsed)}s "
+                            f"with no response (threshold: {int(_stale_timeout)}s)"
+                        )
+                    break
+
                 if self._interrupt_requested:
                     # Force-close the in-flight worker-local HTTP connection to stop
                     # token generation without poisoning the shared client used to
@@ -4915,18 +4907,18 @@ class AIAgent:
                     except Exception:
                         pass
                     raise InterruptedError("Agent interrupted during API call")
-            if result["error"] is not None:
-                raise result["error"]
-            response = result["response"]
-            try:
-                if _span is not None:
-                    usage = getattr(response, "usage", None)
-                    if usage:
-                        _span.set_attribute("input_tokens", getattr(usage, "prompt_tokens", 0))
-                        _span.set_attribute("output_tokens", getattr(usage, "completion_tokens", 0))
-            except Exception:
-                pass
-            return response
+                if result["error"] is not None:
+                    raise result["error"]
+                response = result["response"]
+                try:
+                    if _span is not None:
+                        usage = getattr(response, "usage", None)
+                        if usage:
+                            _span.set_attribute("input_tokens", getattr(usage, "prompt_tokens", 0))
+                            _span.set_attribute("output_tokens", getattr(usage, "completion_tokens", 0))
+                except Exception:
+                    pass
+                return response
         except Exception as _exc:
             try:
                 if _span is not None:
@@ -8173,7 +8165,6 @@ class AIAgent:
                     messages = apply_selective_result_clearing(messages, api_call_count)
             except Exception:
                 pass
-            if not self.iteration_budget.consume():
             # Grace call: the budget is exhausted but we gave the model one
             # more chance.  Consume the grace flag so the loop exits after
             # this iteration regardless of outcome.
