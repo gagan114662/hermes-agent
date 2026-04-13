@@ -431,12 +431,16 @@ def handle_function_call(
     # --- telemetry span setup (non-fatal) ---
     _tel_span = None
     _tel_ctx = None
+    _tel_start_time = None
     try:
+        import time as _time_mod
+        _tel_start_time = _time_mod.monotonic()
         from agent import telemetry as _tel
         _tel_ctx = _tel.span(
             "agent.tool_call",
             tool_name=function_name,
             session_id=session_id or "",
+            task_id=task_id or "",
         )
         _tel_span = _tel_ctx.__enter__()
     except Exception:
@@ -505,6 +509,9 @@ def handle_function_call(
         try:
             if _tel_span is not None:
                 _tel_span.set_attribute("success", True)
+                _tel_span.set_attribute("result_length", len(result) if result else 0)
+                if _tel_start_time is not None:
+                    _tel_span.set_attribute("duration_ms", round((_time_mod.monotonic() - _tel_start_time) * 1000, 1))
             if _tel_ctx is not None:
                 _tel_ctx.__exit__(None, None, None)
         except Exception:
@@ -525,6 +532,16 @@ def handle_function_call(
             if _tel_span is not None:
                 _tel_span.set_attribute("success", False)
                 _tel_span.set_attribute("error_type", type(e).__name__)
+                _tel_span.set_attribute("error_message", str(e)[:200])
+                if _tel_start_time is not None:
+                    _tel_span.set_attribute("duration_ms", round((_time_mod.monotonic() - _tel_start_time) * 1000, 1))
+                # record_exception + StatusCode.ERROR so Honeycomb error panels populate
+                try:
+                    from opentelemetry.trace import StatusCode
+                    _tel_span.record_exception(e)
+                    _tel_span.set_status(StatusCode.ERROR, str(e)[:200])
+                except Exception:
+                    pass
             if _tel_ctx is not None:
                 _tel_ctx.__exit__(None, None, None)
         except Exception:

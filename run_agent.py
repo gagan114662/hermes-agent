@@ -4355,6 +4355,15 @@ class AIAgent:
             try:
                 if _span is not None:
                     _span.set_attribute("error", type(_exc).__name__)
+                    _span.set_attribute("error_message", str(_exc)[:500])
+            except Exception:
+                pass
+            # Pass exception to end_span so it calls record_exception and sets
+            # StatusCode.ERROR — this populates Honeycomb's error detection panels
+            try:
+                if _span is not None:
+                    _tel.end_span(_span, error=_exc)
+                    _span = None  # prevent double-end in finally
             except Exception:
                 pass
             raise
