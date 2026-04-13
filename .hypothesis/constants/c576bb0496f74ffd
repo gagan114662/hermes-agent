@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/harness/guardrails.py
+# hypothesis_version: 6.151.12
+
+[0.0, 0.1, 0.25, 0.5, 1.25, 1.5, 3.0, 3.5, 5.0, 10.5, 15.0, 30.0, 60.0, 75.0, 1000000, '>\\s*/dev/sd[a-z]', 'SQL DROP DATABASE', 'SQL TRUNCATE TABLE', 'aws s3 rm', 'cache_read_tokens', 'chmod\\s+777\\s+/', 'claude-haiku', 'claude-opus', 'claude-sonnet', 'completion_tokens', 'drop\\s+database\\b', 'filesystem format', 'gcloud deploy', 'gemini-1.5-pro', 'git push', 'git\\s+push\\s+-f\\b', 'gpt-3.5', 'gpt-4', 'gpt-4o', 'input_tokens', 'kubectl delete', 'mkfs\\.', 'npm publish', 'output_tokens', 'prompt_tokens', 'rm\\s+-rf\\s+/', 'rm\\s+-rf\\s+~', 'terraform apply', 'terraform destroy', 'truncate\\s+table\\b', 'world-writable root']

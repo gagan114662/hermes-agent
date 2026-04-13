@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/tools/debug_helpers.py
+# hypothesis_version: 6.151.12
+
+['debug_enabled', 'enabled', 'end_time', 'false', 'log_path', 'logs', 'session_id', 'start_time', 'timestamp', 'tool_calls', 'tool_name', 'total_calls', 'true', 'utf-8', 'w']

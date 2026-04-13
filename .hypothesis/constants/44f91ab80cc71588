@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/gateway/hooks.py
+# hypothesis_version: 6.151.12
+
+['(builtin)', ':', 'HOOK.yaml', 'boot-md', 'description', 'events', 'gateway:startup', 'handle', 'handler.py', 'hooks', 'name', 'path', 'utf-8']

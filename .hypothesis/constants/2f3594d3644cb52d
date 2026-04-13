@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/tools/invoicing_tool.py
+# hypothesis_version: 6.151.12
+
+[100, '/', 'Authorization', 'Bank Transfer', 'CRATER_API_TOKEN', 'CRATER_BASE_URL', 'CRATER_COMPANY_ID', 'Content-Type', 'Crater invoice ID', 'Customer full name', 'DRAFT', 'Service', 'UNPAID', 'Unknown', 'amount', 'amount_cents', 'application/json', 'array', 'company-id', 'company_id', 'customer', 'customer_email', 'customer_id', 'customer_name', 'data', 'description', 'discount', 'due_date', 'email', 'estimate_create', 'estimate_date', 'estimate_number', 'expiry_date', 'id', 'integer', 'invoice_create', 'invoice_date', 'invoice_id', 'invoice_list', 'invoice_number', 'invoice_send', 'invoicing', 'items', 'limit', 'message', 'name', 'notes', 'object', 'parameters', 'payment_date', 'payment_method', 'payment_record', 'per_page', 'price', 'properties', 'quantity', 'required', 'search', 'status', 'string', 'tax', 'total', 'type', 'valid_days', '🧾']

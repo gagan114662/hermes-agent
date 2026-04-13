@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/agent/skill_commands.py
+# hypothesis_version: 6.151.12
+
+['#', '%Y-%m-%d_%H%M%S', '(not set)', '*', '-', '-{2,}', '.git', '.github', '.hermes', '.hub', '/', 'SKILL.md', '[^a-z0-9-]', '[^a-z0-9]+', ']', '_', 'assets', 'content', 'conversation-plan', 'description', 'gateway_setup_hint', 'linked_files', 'name', 'path', 'plans', 'raw_content', 'references', 'scripts', 'setup_needed', 'setup_note', 'setup_skipped', 'skill_dir', 'skill_md_path', 'success', 'templates', 'utf-8']

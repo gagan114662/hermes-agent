@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/hermes_constants.py
+# hypothesis_version: 6.151.12
+
+['.hermes', 'HERMES_HOME', 'PREFIX', 'TERMUX_VERSION', 'com.termux', 'effort', 'enabled', 'high', 'low', 'medium', 'minimal', 'none', 'optional-skills', 'xhigh', '~/']

@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/tools/skill_manager_tool.py
+# hypothesis_version: 6.151.12
+
+[0.0, 500, 1024, 100000, 1048576, '*', ', ', '---', '..', '...', '/', 'SKILL.md', '\\', '\\n---\\s*\\n', 'accepted', 'action', 'agent-created', 'assets', 'available_files', 'boolean', 'category', 'content', 'create', 'delete', 'description', 'edit', 'enum', 'error', 'file_content', 'file_path', 'file_preview', 'hint', 'message', 'name', 'new_string', 'object', 'old_string', 'parameters', 'patch', 'path', 'properties', 'quality_score', 'references', 'rejected', 'remove_file', 'replace_all', 'required', 'scripts', 'skill_manage', 'skill_md', 'skills', 'string', 'success', 'templates', 'type', 'utf-8', 'w', 'write_file', '📝']

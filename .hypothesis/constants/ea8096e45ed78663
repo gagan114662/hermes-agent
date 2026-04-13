@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/cron/jobs.py
+# hypothesis_version: 6.151.12
+
+[120, 384, 448, 1440, 7200, '%Y-%m-%d_%H-%M-%S', '+00:00', '.jobs_', '.output_', '.tmp', '/', 'T', 'Z', '^[\\d\\*\\-,/]+$', '^\\d{4}-\\d{2}-\\d{2}', 'base_url', 'completed', 'created_at', 'cron', 'cron job', 'd', 'deliver', 'display', 'enabled', 'error', 'every ', 'expr', 'h', 'id', 'interval', 'jobs', 'jobs.json', 'kind', 'last_delivery_error', 'last_error', 'last_run_at', 'last_status', 'local', 'm', 'minutes', 'model', 'name', 'next_run_at', 'ok', 'once', 'origin', 'output', 'paused', 'paused_at', 'paused_reason', 'prompt', 'provider', 'r', 'repeat', 'run_at', 'schedule', 'schedule_display', 'scheduled', 'script', 'skill', 'skills', 'state', 'times', 'updated_at', 'utf-8', 'w']

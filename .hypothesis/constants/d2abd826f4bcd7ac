@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/tools/patch_parser.py
+# hypothesis_version: 6.151.12
+
+[500, 2000, 10000, '*** Begin Patch', '*** End Patch', '***Begin Patch', '***End Patch', '+', '-', '; ', '@@', '@@\\s*(.+?)\\s*@@', 'PatchResult', '\\', '^\\s*\\d+\\|', '_check_lint', 'add', 'delete', 'move', 'not found', 'update', '|']

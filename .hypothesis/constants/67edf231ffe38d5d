@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/environments/tool_call_parsers/longcat_parser.py
+# hypothesis_version: 6.151.12
+
+['<longcat_tool_call>', 'arguments', 'function', 'longcat', 'name']

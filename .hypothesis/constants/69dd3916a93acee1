@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/hermes_logging.py
+# hypothesis_version: 6.151.12
+
+[1024, '%H:%M:%S', 'INFO', '_hermes_verbose', 'agent.log', 'asyncio', 'backup_count', 'baseFilename', 'charset_normalizer', 'config.yaml', 'errors.log', 'grpc', 'hpack', 'hpack.hpack', 'httpcore', 'httpx', 'level', 'logging', 'logs', 'markdown_it', 'max_size_mb', 'modal', 'openai', 'openai._base_client', 'r', 'rex-deploy', 'urllib3', 'utf-8', 'websockets']

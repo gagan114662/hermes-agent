@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/plugins/memory/honcho/session.py
+# hypothesis_version: 6.151.12
+
+[120, 400, 600, 800, 10000, 25000, ' …', '-', ':', '</context>', '</transcript>', '<context>', '?', 'MEMORY.md', 'SOUL.md', 'USER.md', '[^a-zA-Z0-9_-]', '_synced', 'agent_soul.md', 'ai', 'ai_card', 'ai_representation', 'assistant', 'async', 'card', 'content', 'count', 'created_at', 'default', 'directional', 'get_card', 'hermes-assistant', 'high', 'honcho-async-writer', 'key', 'local_jsonl', 'local_memory', 'low', 'manual', 'max', 'medium', 'message_count', 'minimal', 'original_file', 'peer_card', 'peer_representation', 'prior_history.txt', 'representation', 'role', 'session', 'session_id', 'source', 'target_peer', 'text/plain', 'timestamp', 'turn', 'unknown', 'updated_at', 'user', 'user_profile.md', 'utf-8']

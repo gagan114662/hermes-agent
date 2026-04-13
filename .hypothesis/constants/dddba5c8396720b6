@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/tools/tool_result_storage.py
+# hypothesis_version: 6.151.12
+
+[1024, '\n...', '/tmp/hermes-results', '</persisted-output>', '<persisted-output>', 'HERMES_PERSIST_EOF', 'content', 'inf', 'returncode', 'tool_call_id']

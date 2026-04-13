@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/hermes_cli/cron.py
+# hypothesis_version: 6.151.12
+
+['  No active jobs', '  Skills: none', '(unnamed)', ', ', '?', 'No scheduled jobs.', 'Paused', 'Removed', 'Resumed', 'Triggered', '[active]', '[completed]', '[disabled]', '[paused]', 'add', 'add_skills', 'all', 'clear_skills', 'completed', 'create', 'cron_command', 'delete', 'deliver', 'edit', 'enabled', 'id', 'job', 'last_delivery_error', 'last_run_at', 'last_status', 'list', 'local', 'name', 'next_run_at', 'ok', 'pause', 'paused', 'prompt', 'remove', 'remove_skills', 'removed_job', 'repeat', 'resume', 'rm', 'run', 'schedule', 'schedule_display', 'scheduled', 'script', 'skill', 'skills', 'state', 'status', 'success', 'tick', 'times', 'update', 'value', '∞']

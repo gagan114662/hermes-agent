@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/hermes_state.py
+# hypothesis_version: 6.151.12
+
+[0.02, 0.15, 1.0, 100, 200, 86400, 100000, ' AND ', '"', '""', '"[^"]*"', '"\\1"', '%', '(^|\\s)\\*', '*', ',', '...', '?', 'BEGIN IMMEDIATE', 'INTEGER DEFAULT 0', 'REAL', 'T', 'TEXT', '[+{}()\\"^]', '\\', '\\%', '\\*+', '\\1', '\\\\', '\\_', '\\s+', '^(.*?) #(\\d+)$', '^.* #(\\d+)$', '_', '_preview_raw', 'actual_cost_usd', 'assistant', 'billing_base_url', 'billing_mode', 'billing_provider', 'busy', 'cache_read_tokens', 'cache_write_tokens', 'content', 'context', 'cost_source', 'cost_status', 'estimated_cost_usd', 'id', 'locked', 'messages', 'messages_fts MATCH ?', 'preview', 'pricing_version', 'reasoning', 'reasoning_details', 'reasoning_tokens', 'role', 's.source = ?', 'session_id', 'state.db', 'title', 'tool_call_id', 'tool_calls', 'tool_name', 'unknown', 'version']

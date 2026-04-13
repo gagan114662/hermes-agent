@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/tools/twilio_tool.py
+# hypothesis_version: 6.151.12
+
+[1600, 'TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_PHONE_NUMBER', 'Twilio SMS error: %s', 'Twilio configured', 'WhatsApp configured', '^\\+[1-9]\\d{1,14}$', 'description', 'message', 'messaging', 'name', 'object', 'parameters', 'properties', 'required', 'sms_send', 'string', 'to', 'type', 'whatsapp:', 'whatsapp_send', '💚', '💬']

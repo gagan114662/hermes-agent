@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/tools/environments/ssh.py
+# hypothesis_version: 6.151.12
+
+[120, '--safe-links', '--timeout=30', '-O', '-az', '-c', '-e', '-i', '-l', '-o', '-p', '/', '/root', '/root/.hermes', 'BatchMode=yes', 'ConnectTimeout=10', 'ControlMaster=auto', 'ControlPersist=300', 'bash', 'container_path', 'echo $HOME', 'exit', 'hermes-ssh', 'host_path', 'root', 'rsync', 'ssh', '~']

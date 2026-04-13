@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/harness/config.py
+# hypothesis_version: 6.151.12
+
+[100.0, 7200, 'HarnessConfig', 'features_file', 'hermes_features.json', 'hermes_progress.md', 'init_script', 'progress_file', 'project_dir']

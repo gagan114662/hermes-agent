@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/gateway/delivery.py
+# hypothesis_version: 6.151.12
+
+[3800, 4000, '# Delivery Output', '%Y%m%d_%H%M%S', '---', ':', 'DeliveryTarget', 'cron', 'error', 'job_id', 'local', 'misc', 'origin', 'output', 'path', 'result', 'success', 'thread_id', 'timestamp', 'unknown']

@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/tools/crm_tool.py
+# hypothesis_version: 6.151.12
+
+['.hermes', 'Contact status', 'Deal status', 'Email address', 'Full name', 'Notes about the deal', 'added', 'at', 'call', 'channel', 'churned', 'contacts', 'created_at', 'crm', 'crm.json', 'crm_deal', 'crm_find', 'crm_log', 'crm_save', 'customer', 'deals', 'default', 'description', 'dm', 'email', 'enum', 'interactions', 'lead', 'lost', 'meeting', 'name', 'none', 'notes', 'number', 'object', 'open', 'parameters', 'phone', 'properties', 'prospect', 'query', 'required', 'saved', 'sms', 'status', 'string', 'summary', 'title', 'type', 'updated', 'updated_at', 'value', 'won']

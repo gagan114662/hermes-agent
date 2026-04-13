@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/environments/tool_call_parsers/mistral_parser.py
+# hypothesis_version: 6.151.12
+
+['[', '[TOOL_CALLS]', 'arguments', 'function', 'mistral', 'name', '{']

@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/hermes_cli/logs.py
+# hypothesis_version: 6.151.12
+
+[b'\n', 0.3, 1024, 2000, 3600, 8192, 65536, 86400, 1048576, '\n--- stopped ---', '%Y-%m-%d', '%Y-%m-%d %H:%M:%S', '.log', 'CRITICAL', 'DEBUG', 'ERROR', 'INFO', 'WARNING', '^(\\d+)\\s*([smhd])$', 'agent', 'agent.log', 'd', 'errors', 'errors.log', 'gateway', 'gateway.log', 'h', 'just now', 'latin-1', 'logs', 'm', 'r', 'rb', 'replace', 's', 'utf-8']

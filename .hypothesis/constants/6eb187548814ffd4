@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/tools/audit.py
+# hypothesis_version: 6.151.12
+
+[100, 200, 500, '.hermes', '<REDACTED>', 'HERMES_HOME', 'a', 'args', 'audit.jsonl', 'duration_ms', 'error', 'logs', 'milliseconds', 'outcome', 'platform', 'r', 'session_id', 'tool', 'ts', 'user_id', 'utf-8', '…']

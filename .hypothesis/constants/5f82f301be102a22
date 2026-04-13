@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/tools/vapi_tool.py
+# hypothesis_version: 6.151.12
+
+['Authorization', 'Content-Type', 'No calls found.', 'Recent calls:\n', 'VAPI_API_KEY', 'VAPI_API_KEY not set', 'VAPI_ASSISTANT_ID', 'VAPI_PHONE_ID', 'Vapi configured', '^\\+[1-9]\\d{1,14}$', 'application/json', 'assistantId', 'assistantOverrides', 'customer', 'default', 'description', 'duration', 'endedReason', 'firstMessage', 'https://api.vapi.ai', 'id', 'integer', 'limit', 'name', 'number', 'object', 'parameters', 'phoneNumberId', 'phone_number', 'properties', 'required', 'status', 'string', 'task', 'type', 'unknown', 'vapi_call', 'vapi_calls', 'voice', '📋', '📞']

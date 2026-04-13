@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/hermes_cli/clipboard.py
+# hypothesis_version: 6.151.12
+
+['--list-types', '--type', '-Command', '-NoProfile', '-NonInteractive', '-e', '-o', '-selection', '-t', '.bmp', '/proc/version', 'PNG', 'TARGETS', 'True', 'WAYLAND_DISPLAY', 'clipboard', 'clipboard info', 'convert', 'darwin', 'echo ok', 'fail', 'image/', 'image/bmp', 'image/gif', 'image/jpeg', 'image/png', 'image/webp', 'microsoft', 'ok', 'osascript', 'png:', 'pngpaste', 'pngpaste failed: %s', 'powershell', 'powershell.exe', 'pwsh', 'r', 'wb', 'win32', 'wl-paste', 'xclip', '«class PNGf»', '«class TIFF»']

@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/scripts/proactive_loop.py
+# hypothesis_version: 6.151.12
+
+['*.json', '+', '+00:00', '+1', '-', '- **', '.hermes', '.jsonl', '1', 'AI employee business', 'Completed %d actions', 'Entrepreneur', 'Error', 'HOME', 'SMS to %s failed: %s', 'TELEGRAM_BOT_TOKEN', 'TELEGRAM_OWNER_ID', 'Unknown', 'Z', '\\*\\*(.+?)\\*\\*', '\\+?1?\\d{10,14}', '__main__', 'a', 'action', 'action_log.json', 'amount', 'artificial', 'chat_id', 'client', 'client_name', 'client_phone', 'contact_hint', 'contacted', 'content', 'due_date', 'flagged', 'from', 'general', 'inbox', 'invoices.json', 'last_contact', 'leads', 'mailbox', 'money', 'name', 'new', 'pain_point', 'prospecting', 'prospects', 'prospects.json', 'queue', 'reddit', 'sales', 'smallbusiness', 'source_url', 'status', 'subject', 'text', 'timestamp', 'unpaid', 'unread', 'updated_at']

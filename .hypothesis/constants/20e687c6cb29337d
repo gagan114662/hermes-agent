@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/tools/second_brain_tool.py
+# hypothesis_version: 6.151.12
+
+[200, '%Y-%m-%d', '%Y-%m-%d %H:%M', '*', '*.md', '-', '.', '/', 'CLAUDE.md', 'Name of the vault', '[^a-z0-9-]', '\\[\\[([^\\]]+)\\]\\]', 'all', 'concepts', 'content', 'description', 'domain', 'entities', 'entry', 'enum', 'filename', 'index', 'index.md', 'log', 'log.md', 'name', 'object', 'output', 'page_name', 'parameters', 'properties', 'raw', 'required', 'second-brain', 'second_brain_lint', 'second_brain_list', 'section', 'sources', 'string', 'synthesis', 'type', 'unknown', 'utf-8', 'vault_name', 'wiki', 'wiki/', 'wiki/concepts', 'wiki/entities', 'wiki/sources', 'wiki/synthesis', '○ not yet ingested', '✓ ingested']

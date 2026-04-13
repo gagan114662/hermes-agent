@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/tools/booking_tool.py
+# hypothesis_version: 6.151.12
+
+[', ', 'Authorization', 'CALCOM_API_KEY', 'CALCOM_BASE_URL', 'CALCOM_EVENT_ID', 'Cal.com configured', 'Cancellation reason', 'Content-Type', 'Upcoming bookings:', 'apiKey', 'application/json', 'attendees', 'booking', 'booking_cancel', 'booking_create_link', 'booking_id', 'booking_list_slots', 'booking_reschedule', 'bookings', 'date', 'description', 'duration_minutes', 'endTime', 'eventTypeId', 'event_type', 'event_type_id', 'integer', 'limit', 'me', 'name', 'new_start_time', 'object', 'parameters', 'properties', 'reason', 'required', 'rescheduleReason', 'slots', 'slug', 'startTime', 'status', 'string', 'take', 'type', 'upcoming', 'username', 'users', '📅']

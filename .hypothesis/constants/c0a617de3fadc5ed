@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/tools/environments/docker.py
+# hypothesis_version: 6.151.12
+
+[120, '--cap-add', '--cap-drop', '--cpus', '--format', '--memory', '--name', '--network=none', '--pids-limit', '--security-opt', '--storage-opt', '--tmpfs', '-c', '-d', '-e', '-i', '-l', '-v', '-w', '/root', '256', '2h', ':', ':/workspace', 'ALL', 'CHOWN', 'DAC_OVERRIDE', 'FOWNER', 'bash', 'container_path', 'create', 'darwin', 'default', 'docker', 'exec', 'hello-world', 'home', 'host_path', 'info', 'no-new-privileges', 'overlay2', 'rm', 'run', 'size=1m', 'sleep', 'version', 'workspace', '{{.Driver}}', '~']

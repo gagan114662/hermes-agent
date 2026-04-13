@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/agent/stop_hooks.py
+# hypothesis_version: 6.151.12
+
+[200, 'AIAgent', '_tool_call_count', 'added contact', 'advanced to', 'closed lost', 'closed won', 'content', 'demo scheduled', 'moved to', 'new contact', 'noted', 'on_contact_update', 'on_conversation_end', 'progressed to', 'proposal sent', 'saved to memory', 'session_id', 'stage:', 'unknown', 'updated']

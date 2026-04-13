@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/toolset_distributions.py
+# hypothesis_version: 6.151.12
+
+[100, '   Toolsets:', ', ', '-', '=', '__main__', 'balanced', 'browser', 'browser_only', 'browser_tasks', 'browser_use', 'creative', 'default', 'description', 'development', 'file', 'image_gen', 'minimal', 'mixed_tasks', 'moa', 'reasoning', 'research', 'safe', 'science', 'terminal', 'terminal_only', 'terminal_tasks', 'terminal_web', 'toolsets', 'vision', 'web']

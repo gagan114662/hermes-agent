@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/tools/clarify_tool.py
+# hypothesis_version: 6.151.12
+
+['array', 'callback', 'choices', 'choices_offered', 'clarify', 'description', 'error', 'items', 'maxItems', 'name', 'object', 'parameters', 'properties', 'question', 'required', 'string', 'type', 'user_response', '❓']

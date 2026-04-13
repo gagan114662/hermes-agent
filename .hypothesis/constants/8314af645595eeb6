@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/gateway/platforms/homeassistant.py
+# hypothesis_version: 6.151.12
+
+[200, 300, 4096, '.', '/', '?', 'Auth failed: %s', 'Authorization', 'Content-Type', 'HASS_TOKEN', 'HASS_URL', 'Hermes Agent', 'Home Assistant', '[%s] Connected to %s', '[%s] Disconnected', '[%s] Reconnected', 'access_token', 'alarm_control_panel', 'application/json', 'attributes', 'auth', 'auth_ok', 'auth_required', 'binary_sensor', 'channel', 'climate', 'cooldown_seconds', 'current_temperature', 'data', 'entity_id', 'event', 'event_type', 'fan', 'friendly_name', 'ha_events', 'homeassistant', 'http://', 'https://', 'id', 'ignore_entities', 'light', 'message', 'name', 'new_state', 'old_state', 'sensor', 'state', 'state_changed', 'subscribe_events', 'success', 'switch', 'temperature', 'title', 'type', 'unit_of_measurement', 'unknown', 'url', 'watch_all', 'watch_domains', 'watch_entities', 'ws://', 'wss://']

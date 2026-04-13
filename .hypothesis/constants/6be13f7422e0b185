@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/tools/cron_tool.py
+# hypothesis_version: 6.151.12
+
+['.tmp', '0 * * * *', '0 9 * * *', '0 9 * * 1', '0 9 1 * *', 'List scheduled tasks', 'automation', 'count', 'created_at', 'cron_create', 'cron_delete', 'cron_list', 'daily', 'deleted', 'description', 'enabled', 'error', 'hourly', 'id', 'label', 'last_run', 'monthly', 'name', 'object', 'parameters', 'prompt', 'properties', 'required', 'schedule', 'string', 'success', 'task_id', 'tasks', 'type', 'w', 'weekly', '⏰', '📋', '🗑️']

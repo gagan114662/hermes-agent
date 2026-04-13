@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/agent/kairos.py
+# hypothesis_version: 6.151.12
+
+[3600, '.tmp', '0 * * * *', 'Assistant', 'KairosSettings', 'assistant', 'assistantName', 'content', 'createdAt', 'cron', 'id', 'kairos-cron', 'next_run', 'prompt', 'recurring', 'role', 'tasks', 'user', 'w']

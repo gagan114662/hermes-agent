@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/tools/easy_appointments_tool.py
+# hypothesis_version: 6.151.12
+
+['/', 'Appointments:', 'Available services:', 'EASYAPP_PASSWORD', 'EASYAPP_URL', 'EASYAPP_URL not set', 'EASYAPP_USERNAME', 'Providers:', 'Unknown', 'appointment_id', 'customer', 'customer_email', 'customer_name', 'customer_phone', 'date', 'description', 'duration', 'easy-appointments', 'email', 'end_datetime', 'first_name', 'id', 'integer', 'last_name', 'length', 'limit', 'name', 'notes', 'object', 'parameters', 'phone_number', 'price', 'properties', 'provider_id', 'q', 'required', 'service', 'service_id', 'sort', 'start_datetime', 'string', 'type', '📅']

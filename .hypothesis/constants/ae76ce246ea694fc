@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/plugins/memory/honcho/__init__.py
+# hypothesis_version: 6.151.12
+
+[0.3, 0.8, 3.0, 5.0, 10.0, -999, 800, 2000, 25000, ' …', '. ', 'HONCHO_API_KEY', 'Honcho API key', '[continued] ', 'add', 'agent_context', 'ai_card', 'ai_representation', 'api_key', 'assistant', 'baseUrl', 'card', 'cli', 'conclusion', 'context', 'contextCadence', 'cron', 'description', 'dialecticCadence', 'env_var', 'every-turn', 'first-turn', 'flush', 'hermes-default', 'high', 'honcho', 'honcho-memwrite', 'honcho-prefetch', 'honcho-sync', 'honcho.json', 'honcho_conclude', 'honcho_context', 'honcho_profile', 'honcho_search', 'hybrid', 'injectionFrequency', 'integer', 'key', 'low', 'max_tokens', 'memories', 'mid', 'minimal', 'name', 'object', 'parameters', 'peer', 'platform', 'properties', 'query', 'reasoningLevelCap', 'representation', 'required', 'result', 'secret', 'session_title', 'string', 'tools', 'type', 'url', 'user', 'user_id']

@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/tools/email_marketing_tool.py
+# hypothesis_version: 6.151.12
+
+[100, '/', 'Campaigns:', 'Email templates:', 'MAUTIC_BASE_URL', 'MAUTIC_PASSWORD', 'MAUTIC_USERNAME', 'Mautic campaign ID', 'Mautic email ID', 'Mautic segment ID', 'No campaigns found.', 'array', 'campaign_id', 'campaigns', 'clickCount', 'contact', 'contact_emails', 'contacts', 'description', 'email', 'email-marketing', 'emailType', 'email_broadcast_send', 'email_campaign_send', 'email_contact_add', 'email_id', 'email_list_campaigns', 'email_list_emails', 'email_stats', 'emails', 'failedCount', 'first_name', 'firstname', 'id', 'isPublished', 'items', 'last_name', 'lastname', 'limit', 'name', 'object', 'parameters', 'properties', 'readCount', 'required', 'search', 'segment_id', 'sentCount', 'string', 'tags', 'type', 'unknown', '⏸', '✅', '📧']
