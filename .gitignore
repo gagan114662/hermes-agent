@@ -67,3 +67,4 @@ mini-swe-agent/
 .direnv/
 result
 .gstack/
+.claude/

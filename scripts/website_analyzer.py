@@ -9,7 +9,9 @@ Crawls a user's business website and builds a rich business profile, including:
 - Social media presence
 - Contact information
 - Estimated team size and pain points
-- Recommended employee roles
+
+NOTE: Recommended employee roles are now generated dynamically by team_factory.py
+using LLM, not statically mapped here.
 
 Usage:
     python scripts/website_analyzer.py https://example.com
@@ -30,19 +32,9 @@ from urllib.parse import urlparse
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# Industry -> recommended_employees mapping
-INDUSTRY_ROLE_MAPPING = {
-    "restaurant": ["reservations_manager", "review_responder", "social_media_manager", "menu_updater"],
-    "saas": ["customer_support", "docs_writer", "lead_qualifier", "onboarding_specialist"],
-    "salon": ["appointment_scheduler", "review_responder", "social_media_manager", "loyalty_manager"],
-    "law_firm": ["intake_coordinator", "document_drafter", "client_communicator", "billing_assistant"],
-    "ecommerce": ["inventory_monitor", "customer_support", "social_media_manager", "review_responder"],
-    "agency": ["project_coordinator", "client_communicator", "content_creator", "lead_qualifier"],
-    "healthcare": ["appointment_scheduler", "patient_communicator", "billing_assistant", "review_responder"],
-    "real_estate": ["lead_qualifier", "listing_manager", "client_communicator", "social_media_manager"],
-    "fitness": ["class_scheduler", "member_communicator", "social_media_manager", "review_responder"],
-    "education": ["enrollment_coordinator", "student_communicator", "content_creator", "scheduling_assistant"],
-}
+# NOTE: Removed INDUSTRY_ROLE_MAPPING - employee roles are now generated dynamically
+# by team_factory.py using LLM. This allows ANY business to be supported, not just
+# these 10 industries.
 
 
 @dataclass
@@ -60,7 +52,6 @@ class BusinessProfile:
     social_media: Dict[str, str] = field(default_factory=dict)
     contact_info: Dict[str, str] = field(default_factory=dict)
     pain_points: List[str] = field(default_factory=list)
-    recommended_employees: List[str] = field(default_factory=list)
 
 
 def _get_exa_client():
@@ -357,10 +348,8 @@ async def analyze_website(website_url: str) -> BusinessProfile:
     industry = analysis.get("industry", "other")
     competitors = await _search_competitors(business_name, industry)
 
-    # Determine recommended employees based on industry
-    recommended_employees = INDUSTRY_ROLE_MAPPING.get(industry, INDUSTRY_ROLE_MAPPING["other"])
-
-    # Build the business profile
+    # Build the business profile (without recommended_employees)
+    # Employee roles are now generated dynamically by team_factory.py using LLM
     profile = BusinessProfile(
         business_name=analysis.get("business_name", business_name),
         website_url=website_url,
@@ -374,7 +363,6 @@ async def analyze_website(website_url: str) -> BusinessProfile:
         social_media=social_media,
         contact_info=contact_info,
         pain_points=analysis.get("pain_points", []),
-        recommended_employees=recommended_employees,
     )
 
     return profile
@@ -422,7 +410,7 @@ async def main():
         print(f"Team Size: {profile.team_size_estimate}")
         if profile.competitors:
             print(f"Competitors: {', '.join(profile.competitors[:3])}")
-        print(f"Recommended Employees: {', '.join(profile.recommended_employees)}")
+        print("\nNote: Employee roles will be generated dynamically by team_factory.py using LLM")
         print("=" * 60)
         print(f"Full profile saved to: {saved_path}")
 

@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 # Conversation states
 (BUSINESS_NAME, INDUSTRY, PRODUCT, TARGET_CUSTOMER,
- TONE, AGENT_NAME, HOURS, GOALS, WEBSITE_URL, CONFIRM) = range(10)
+ TONE, AGENT_NAME, HOURS, GOALS, WEBSITE_URL, OWNER_PHONE, CONTACT_METHOD, CONFIRM) = range(12)
 
 QUESTIONS = [
     (BUSINESS_NAME, "What's your business name?"),
@@ -36,6 +36,8 @@ QUESTIONS = [
     (HOURS, "What are your business hours? (e.g. Mon-Fri 9am-5pm EST, or 24/7)"),
     (GOALS, "Main goal: more leads, better customer support, or both?"),
     (WEBSITE_URL, "What's your website URL? (e.g. https://example.com, or skip if you don't have one)"),
+    (OWNER_PHONE, "What's your phone number? (for voice updates from Henry)"),
+    (CONTACT_METHOD, "What's your preferred contact method? (phone/telegram/email)"),
 ]
 
 STATE_KEYS = {
@@ -48,6 +50,8 @@ STATE_KEYS = {
     HOURS: "hours",
     GOALS: "goals",
     WEBSITE_URL: "website_url",
+    OWNER_PHONE: "owner_phone",
+    CONTACT_METHOD: "owner_contact_method",
 }
 
 
@@ -80,6 +84,8 @@ async def collect_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def show_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     d = context.user_data
     website_info = f"Website: {d.get('website_url')}\n" if d.get('website_url') else ""
+    phone_info = f"Phone: {d.get('owner_phone')}\n" if d.get('owner_phone') else ""
+    contact_info = f"Preferred contact: {d.get('owner_contact_method')}\n" if d.get('owner_contact_method') else ""
     summary = (
         "✅ Here's your AI employee setup:\n\n"
         f"Business: {d.get('business_name')}\n"
@@ -90,7 +96,9 @@ async def show_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         f"Agent name: {d.get('agent_name')}\n"
         f"Hours: {d.get('hours')}\n"
         f"Goal: {d.get('goals')}\n"
-        f"{website_info}\n"
+        f"{website_info}"
+        f"{phone_info}"
+        f"{contact_info}\n"
         "Type yes to confirm and launch, or no to start over."
     )
     await update.message.reply_text(summary)
@@ -130,6 +138,8 @@ def _write_business_profile(user_data: dict) -> Path:
         "target_customer": user_data.get("target_customer", ""),
         "hours": user_data.get("hours", ""),
         "goal": user_data.get("goals", ""),
+        "owner_phone": user_data.get("owner_phone", ""),
+        "owner_contact_method": user_data.get("owner_contact_method", ""),
     }
     profile_path = Path.home() / ".hermes" / "business_profile.json"
     profile_path.parent.mkdir(parents=True, exist_ok=True)
@@ -278,7 +288,6 @@ async def setup_team_from_onboarding(
                 "social_media": enriched_profile.social_media,
                 "contact_info": enriched_profile.contact_info,
                 "pain_points": enriched_profile.pain_points,
-                "recommended_employees": enriched_profile.recommended_employees,
             })
             business_profile_path.write_text(json.dumps(existing_profile, indent=2))
             enriched = True
@@ -290,9 +299,29 @@ async def setup_team_from_onboarding(
     try:
         from harness.team_factory import provision_team
         logger.info("Provisioning team from profile")
-        provision_result = provision_team(
+
+        # Load the profile to get owner contact info
+        profile_data = json.loads(business_profile_path.read_text())
+        owner_phone = profile_data.get("owner_phone", "")
+        owner_contact_method = profile_data.get("owner_contact_method", "")
+
+        # Determine which contact to use based on preferred method
+        user_contact = owner_phone  # Default to phone
+        if owner_contact_method and owner_contact_method.lower() == "telegram":
+            # If telegram is preferred, look for a telegram handle or use phone as fallback
+            user_contact = owner_phone or "owner"
+        elif owner_contact_method and owner_contact_method.lower() == "email":
+            # For email, use phone as fallback but could be enhanced with email field
+            user_contact = owner_phone or "owner"
+        else:
+            user_contact = owner_phone or "owner"
+
+        # provision_team is now async (uses LLM for team generation)
+        provision_result = await provision_team(
             profile_path=business_profile_path,
-            project_dir=project_dir
+            project_dir=project_dir,
+            user_contact=user_contact,
+            auto_start=True,  # Register cron schedules and start team
         )
         provision_result["enriched"] = enriched
         return provision_result
