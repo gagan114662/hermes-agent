@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/gateway/platforms/telegram_network.py
+# hypothesis_version: 6.151.12
+
+[4.0, 443, ',', ', ', '149.154.167.220', 'A', 'ALL_PROXY', 'Accept', 'Answer', 'HTTPS_PROXY', 'HTTP_PROXY', 'all_proxy', 'api.telegram.org', 'application/dns-json', 'data', 'headers', 'host', 'http_proxy', 'https_proxy', 'name', 'params', 'proxy', 'sni_hostname', 'type', 'unknown', 'url']

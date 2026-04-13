@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/tools/feedback_tool.py
+# hypothesis_version: 6.151.12
+
+[1500, '(No SOW found)', '/', 'Client name', 'Content-Type', 'Fix within SLA.', 'OLLAMA_BASE_URL', 'OLLAMA_MODEL', 'OPEN:', 'OUT_OF_SCOPE', 'Q2_TYPE: BUG', 'Q2_TYPE:BUG', '_', 'all', 'application/json', 'bug', 'change_request', 'client_name', 'created_at', 'crm', 'default', 'description', 'enum', 'feedback.json', 'feedback_id', 'feedback_list', 'feedback_log', 'feedback_resolve', 'feedback_type', 'gemma3:4b', 'id', 'items', 'model', 'name', 'object', 'open', 'parameters', 'prompt', 'properties', 'request', 'required', 'resolution', 'resolved', 'resolved_at', 'response', 'sow.md', 'status', 'stream', 'string', 'triage', 'type', '🐛', '🐛 BUG', '📋', '📋 CHANGE REQUEST']

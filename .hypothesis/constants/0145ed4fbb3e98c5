@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/tools/osv_check.py
+# hypothesis_version: 6.151.12
+
+[100, ', ', '-', '; ', '@', 'Content-Type', 'MAL-', 'OSV_ENDPOINT', 'POST', 'PyPI', 'User-Agent', 'application/json', 'ecosystem', 'id', 'latest', 'name', 'npm', 'npx', 'npx.cmd', 'package', 'pipx', 'summary', 'utf-8', 'uvx', 'uvx.cmd', 'version', 'vulns']

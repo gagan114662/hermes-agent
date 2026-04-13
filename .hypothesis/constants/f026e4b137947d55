@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/tools/environments/daytona.py
+# hypothesis_version: 6.151.12
+
+[120, 1024, 5120, 10240, '/home/daytona', '/root', '/root/.hermes', 'container_path', 'default', 'echo $HOME', 'heredoc', 'hermes_task_id', 'host_path', '~']

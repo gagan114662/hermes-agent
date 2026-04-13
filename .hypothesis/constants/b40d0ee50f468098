@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/environments/tool_context.py
+# hypothesis_version: 6.151.12
+
+[100, 180, 300, 60000, '*', '.', '/', '1', 'HERMES_QUIET', 'TERMINAL_ENV', 'ascii', 'browser_navigate', 'browser_snapshot', 'bytes', 'command', 'content', 'error', 'exit_code', 'local', 'output', 'path', 'pattern', 'query', 'read_file', 'search_files', 'success', 'terminal', 'timeout', 'url', 'urls', 'web_extract', 'web_search', 'write_file']

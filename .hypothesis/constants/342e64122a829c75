@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/tools/mcp_autoconfig.py
+# hypothesis_version: 6.151.12
+
+['-y', '.hermes', '.yaml.tmp', 'AIRTABLE_API_KEY', 'CALENDLY_API_KEY', 'GMAIL_USER', 'HERMES_HOME', 'HUBSPOT_ACCESS_TOKEN', 'NOTION_API_KEY', 'SHOPIFY_ACCESS_TOKEN', 'SHOPIFY_SHOP_DOMAIN', 'SLACK_BOT_TOKEN', 'SQUARE_ACCESS_TOKEN', 'STRIPE_SECRET_KEY', 'airtable', 'args', 'builtin', 'calendly', 'command', 'config.yaml', 'description', 'env', 'github', 'gmail', 'hubspot', 'mcp_autoconfig', 'mcp_servers', 'name', 'note', 'notion', 'npx', 'object', 'parameters', 'password', 'properties', 'quickbooks', 'required', 'service', 'shopify', 'slack', 'square', 'stripe', 'type', 'username', 'w', 'xero', '{password}', '{username}', '🔌']

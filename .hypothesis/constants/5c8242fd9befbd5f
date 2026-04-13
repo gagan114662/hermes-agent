@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/harness/employee.py
+# hypothesis_version: 6.151.12
+
+[0.0, '*.yaml', '.hermes', 'Employee', 'blocked', 'completed', 'dependencies', 'description', 'employees', 'employees_dir', 'error', 'file_path', 'id', 'idle', 'message', 'passes', 'sessions_run', 'status', 'test_cases', 'total_cost_usd', 'working']

@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/agent/subdirectory_hints.py
+# hypothesis_version: 6.151.12
+
+[8000, '-', '.', '.cursorrules', '/', 'AGENTS.md', 'CLAUDE.md', 'agents.md', 'claude.md', 'command', 'file_path', 'git@', 'http://', 'https://', 'path', 'terminal', 'utf-8', 'workdir', '~/']

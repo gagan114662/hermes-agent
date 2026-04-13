@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/agent/tool_hooks.py
+# hypothesis_version: 6.151.12
+
+[4000, 12000, '\\bmkfs\\b', '__name__', '_messages', 'append_file', 'bash', 'cmd', 'command', 'create_file', 'execute', 'fork bomb', 'messages', 'patch', 'run_command', 'shell', 'terminal', 'write_file']

@@ -336,10 +336,10 @@ def provision_team(
 
     # Add Henry PM (lazy import to avoid circular dependencies)
     try:
-        from harness.henry import create_henry_employee  # lazy import
+        from harness.henry import create_henry  # lazy import
 
-        henry = create_henry_employee(
-            business_name=business_name, employees_dir=employees_dir
+        henry = create_henry(
+            business_name=business_name, user_contact="owner"
         )
         employees.append(henry)
         henry_included = True

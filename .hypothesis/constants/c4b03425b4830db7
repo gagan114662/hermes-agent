@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/hermes_cli/plugins.py
+# hypothesis_version: 6.151.12
+
+[', ', '.hermes', 'PluginManager', '__file__', '__init__.py', '__name__', '_agent_running', 'author', 'description', 'disabled', 'disabled via config', 'enabled', 'entrypoint', 'error', 'handler_fn', 'help', 'hermes_agent.plugins', 'hermes_plugins', 'hooks', 'name', 'on_session_end', 'on_session_finalize', 'on_session_reset', 'on_session_start', 'plugin', 'plugin.yaml', 'plugin.yml', 'plugins', 'post_api_request', 'post_llm_call', 'post_tool_call', 'pre_api_request', 'pre_llm_call', 'pre_tool_call', 'project', 'provides_hooks', 'provides_tools', 'register', 'requires_env', 'select', 'setup_fn', 'source', 'tools', 'user', 'version']

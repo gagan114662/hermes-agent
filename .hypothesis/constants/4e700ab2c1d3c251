@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/plugins/memory/__init__.py
+# hypothesis_version: 6.151.12
+
+['*.py', '.', 'MemoryProvider', '_', '__init__.py', 'cli.py', 'description', 'handler_fn', 'help', 'honcho_command', 'memory', 'name', 'plugin', 'plugin.yaml', 'plugins', 'plugins.memory', 'provider', 'register', 'register_cli', 'setup_fn']

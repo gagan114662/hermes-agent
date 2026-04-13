@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/agent/rate_limit_tracker.py
+# hypothesis_version: 6.151.12
+
+[0.0, 100.0, 1000, 3600, 10000, 1000000, ' | ', '-1h', 'No rate limit data.', 'Provider', 'Requests/hr', 'Requests/min', 'Tokens/hr', 'Tokens/min', 'inf', 'just now', 'requests', 'requests/hr', 'requests/min', 'tokens', 'tokens/hr', 'tokens/min', 'x-ratelimit-']

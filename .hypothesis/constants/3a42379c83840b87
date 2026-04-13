@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/hermes_cli/model_normalize.py
+# hypothesis_version: 6.151.12
+
+['-', '.', '/', 'ai-gateway', 'alibaba', 'anthropic', 'arcee-ai', 'claude', 'copilot', 'copilot-acp', 'cot', 'custom', 'deepseek', 'deepseek-chat', 'deepseek-reasoner', 'gemini', 'gemma', 'glm', 'google', 'gpt', 'grok', 'huggingface', 'kilocode', 'kimi', 'kimi-coding', 'llama', 'meta-llama', 'mimo', 'minimax', 'minimax-cn', 'moonshotai', 'nemotron', 'nous', 'nvidia', 'o1', 'o3', 'o4', 'openai', 'openai-codex', 'opencode-zen', 'openrouter', 'qwen', 'qwen-oauth', 'r1', 'reasoner', 'reasoning', 'step', 'stepfun', 'think', 'trinity', 'x-ai', 'xiaomi', 'z-ai', 'zai']

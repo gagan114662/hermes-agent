@@ -77,8 +77,9 @@ async def _fetch_website_content(url: str) -> str:
     """Fetch website content using simple requests (fallback to firecrawl if available)."""
     try:
         import requests
+        import asyncio
         logger.info(f"Fetching {url}...")
-        response = requests.get(url, timeout=10)
+        response = await asyncio.to_thread(requests.get, url, timeout=10)
         response.raise_for_status()
         return response.text
     except Exception as e:

@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/agent/extract_memories.py
+# hypothesis_version: 6.151.12
+
+[500, '-_', 'AIAgent', 'MEMORY.md', '[]', '_', '```', 'a', 'assistant', 'content', 'extract-memories', 'fact', 'general', 'role', 'text', 'topic', 'user', 'w', '~/.hermes/memories']

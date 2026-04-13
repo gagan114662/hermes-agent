@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/tools/environments/modal.py
+# hypothesis_version: 6.151.12
+
+[120, 300, 600, 3600, '-c', '-l', '/root', 'ascii', 'bash', 'container_path', 'debian', 'default', 'direct', 'heredoc', 'hermes-agent', 'host_path', 'im-', 'infinity', 'modal_snapshots.json', 'mounts', 'replace', 'sleep', 'timeout', 'ubuntu', 'utf-8']

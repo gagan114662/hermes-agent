@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/tools/mcp_oauth.py
+# hypothesis_version: 6.151.12
+
+[0.0, 0.5, 300.0, 128, 200, 300, 384, '.hermes', '.tmp', '127.0.0.1', 'Content-Type', 'DISPLAY', 'Darwin', 'HERMES_HOME', 'Hermes Agent', 'OAuth callback: %s', 'OAuthToken', 'OAuthToken | None', 'SSH_CLIENT', 'SSH_TTY', 'WAYLAND_DISPLAY', '[^\\w\\-]', '_', 'auth_code', 'authorization_code', 'client_id', 'client_name', 'client_secret', 'client_secret_post', 'code', 'default', 'error', 'grant_types', 'mcp-tokens', 'none', 'nt', 'redirect_port', 'redirect_uris', 'refresh_token', 'response_types', 'scope', 'state', 'timeout', 'utf-8']

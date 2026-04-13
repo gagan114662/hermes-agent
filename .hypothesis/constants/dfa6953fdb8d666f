@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/agent/prompt_caching.py
+# hypothesis_version: 6.151.12
+
+['1h', '5m', 'cache_control', 'content', 'ephemeral', 'role', 'system', 'text', 'tool', 'ttl', 'type']

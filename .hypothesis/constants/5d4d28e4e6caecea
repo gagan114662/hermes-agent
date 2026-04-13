@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/agent/skill_quality.py
+# hypothesis_version: 6.151.12
+
+[100, 600, '  ✅ Passed:', ', ', '-', '-{2,}', 'A', 'B', 'C', 'D', 'F', 'SKILL.md', '[,;]', '[^a-z0-9-]', '\\*\\*input\\b|\\binput:', '^#+\\s*examples?', '^#+\\s*output.format', '^#+\\s*overview', '^#+\\s*workflow', '^(---\\n.*?\\n---)\\n', '^\\s*\\d+\\.', 'appropriately', 'as appropriate', 'as needed', 'as required', 'avoid.*when', 'consider', 'deal with', 'description', 'different from', 'do NOT', 'do not activate', 'do not trigger', 'do not use for', 'drifter', 'ensure that', 'error', 'examples', 'exclude', 'feel free', 'format nicely', 'fragile', 'handle', 'handle appropriately', 'hijacker', 'if necessary', 'info', 'make sure', 'my-skill', 'name', 'nicely', 'not for', 'output_format', 'overachiever', 'overview', 'properly', 'silent-skill', 'structure', 'unknown', 'utf-8', 'warning', 'work with', 'workflow']

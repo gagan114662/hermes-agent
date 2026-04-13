@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/tools/ansi_strip.py
+# hypothesis_version: 6.151.12
+
+['[\\x1b\\x80-\\x9f]']

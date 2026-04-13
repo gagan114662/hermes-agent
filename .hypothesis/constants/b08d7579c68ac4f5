@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/hermes_cli/banner.py
+# hypothesis_version: 6.151.12
+
+[0.05, 0.5, 1000, 3600, 1000000, '\x1b[0m', '\x1b[1;38;2;255;215;0m', '\x1b[1m', '\x1b[2m', '#8B8682', '#B8860B', '#CD7F32', '#FFBF00', '#FFD700', '#FFF8DC', ', ', '--count', '--quiet', '--short=8', '...', '.gguf', '.git', '.update_check', '/', '/help for commands', '0', 'HEAD', 'HEAD..origin/main', 'Hermes Agent', '[dim]...[/]', '_tools', 'agent_name', 'ahead', 'banner_accent', 'banner_border', 'banner_dim', 'banner_hero', 'banner_logo', 'banner_text', 'banner_title', 'behind', 'category', 'center', 'check_fn', 'commit', 'commits', 'connected', 'default', 'fetch', 'function', 'general', 'git', 'hermes-agent', 'id', 'left', 'local', 'name', 'origin', 'origin/main', 'origin/main..HEAD', 'other', 'rev-list', 'rev-parse', 'right', 'session_border', 'tools', 'ts', 'unknown', 'upstream']

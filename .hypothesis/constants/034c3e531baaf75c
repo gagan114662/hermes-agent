@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/hermes_cli/plugins_cmd.py
+# hypothesis_version: 6.151.12
+
+['(none)', '*.example', ', ', '--depth', '--ff-only', '.', '..', '.git', '/', '1', ':', 'Already up to date', 'Description', 'Installed Plugins', 'Name', 'Source', 'Status', 'Version', '[red]disabled[/red]', '\\', '__init__.py', 'after-install.md', 'bold', 'clone', 'description', 'dim', 'disable', 'disabled', 'enable', 'file://', 'force', 'git', 'git@', 'green', 'http://', 'https://', 'install', 'list', 'local', 'ls', 'manifest_version', 'name', 'plugin', 'plugin.yaml', 'plugins', 'plugins_action', 'pull', 'remove', 'requires_env', 'rm', 'secret', 'ssh://', 'this plugin', 'uninstall', 'update', 'url', 'utf-8', 'version', '✓ Installed']

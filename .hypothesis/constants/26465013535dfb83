@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/tools/discovery_tool.py
+# hypothesis_version: 6.151.12
+
+['(not answered)', '---\n\n', '/', 'Client name', 'Content-Type', 'Error', 'OLLAMA_BASE_URL', 'OLLAMA_MODEL', '_', 'answers', 'application/json', 'client_name', 'crm', 'description', 'discovery.md', 'discovery_read', 'discovery_run', 'gemma3:4b', 'model', 'name', 'object', 'parameters', 'prompt', 'properties', 'required', 'response', 'stated_problem', 'stream', 'string', 'type', '|||']

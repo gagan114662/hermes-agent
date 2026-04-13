@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/tools/tool_backend_helpers.py
+# hypothesis_version: 6.151.12
+
+['.modal.toml', 'MODAL_TOKEN_ID', 'MODAL_TOKEN_SECRET', 'OPENAI_API_KEY', 'auto', 'direct', 'has_direct', 'local', 'managed', 'managed_mode_blocked', 'managed_ready', 'mode', 'requested_mode', 'selected_backend']

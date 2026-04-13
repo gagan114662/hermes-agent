@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/plugins/memory/mem0/__init__.py
+# hypothesis_version: 6.151.12
+
+[0.0, 3.0, 5.0, 120, 'Agent identifier', 'Fact stored.', 'MEM0_AGENT_ID', 'MEM0_API_KEY', 'MEM0_USER_ID', 'Mem0 sync failed: %s', 'The fact to store.', 'User identifier', 'What to search for.', 'agent_id', 'api_key', 'assistant', 'boolean', 'choices', 'conclusion', 'content', 'count', 'default', 'description', 'env_var', 'error', 'false', 'hermes', 'hermes-user', 'https://app.mem0.ai', 'integer', 'key', 'keyword_search', 'mem0', 'mem0-prefetch', 'mem0-sync', 'mem0.json', 'mem0_conclude', 'mem0_profile', 'mem0_search', 'memory', 'name', 'object', 'parameters', 'properties', 'query', 'required', 'rerank', 'result', 'results', 'role', 'score', 'secret', 'string', 'top_k', 'true', 'type', 'url', 'user', 'user_id', 'utf-8']

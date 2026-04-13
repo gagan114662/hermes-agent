@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/agent/smart_model_routing.py
+# hypothesis_version: 6.151.12
+
+[160, '.,:;!?()[]{}"\'`', '`', '```', 'analysis', 'analyze', 'api_key', 'api_key_env', 'api_mode', 'architecture', 'args', 'base_url', 'benchmark', 'cheap_model', 'command', 'compare', 'credential_pool', 'cron', 'debug', 'debugging', 'delegate', 'design', 'docker', 'enabled', 'error', 'exception', 'https?://|www\\.', 'implement', 'implementation', 'investigate', 'kubernetes', 'label', 'max_simple_chars', 'max_simple_words', 'model', 'optimise', 'optimize', 'patch', 'plan', 'planning', 'provider', 'pytest', 'refactor', 'review', 'routing_reason', 'runtime', 'shell', 'signature', 'simple_turn', 'stacktrace', 'subagent', 'terminal', 'test', 'tests', 'tool', 'tools', 'traceback']

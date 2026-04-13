@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/harness/session_orchestrator.py
+# hypothesis_version: 6.151.12
+
+['base_url', 'command', 'completed', 'cost_limit', 'cost_limit_reached', 'enabled_toolsets', 'error', 'features_completed', 'halted_on_error', 'message', 'project_dir', 'response', 'result', 'session_number', 'sessions_run', 'status', 'success', 'terminal', 'total_cost_usd', 'usage']

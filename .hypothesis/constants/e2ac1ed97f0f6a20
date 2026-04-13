@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/environments/tool_call_parsers/deepseek_v3_1_parser.py
+# hypothesis_version: 6.151.12
+
+['<｜tool▁calls▁begin｜>', 'deepseek_v31', 'deepseek_v3_1', 'function']

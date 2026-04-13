@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/hermes_cli/codex_models.py
+# hypothesis_version: 6.151.12
+
+[200, 10000, '.codex', 'Authorization', 'CODEX_HOME', 'config.toml', 'gpt-5.1-codex-max', 'gpt-5.1-codex-mini', 'gpt-5.2-codex', 'gpt-5.3-codex', 'gpt-5.3-codex-spark', 'gpt-5.4', 'gpt-5.4-mini', 'hidden', 'hide', 'model', 'models', 'models_cache.json', 'priority', 'slug', 'supported_in_api', 'utf-8', 'visibility']

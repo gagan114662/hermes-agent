@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/hermes_cli/callbacks.py
+# hypothesis_version: 6.151.12
+
+[120, '_app', '_approval_lock', '_secret_deadline', '_secret_state', 'always', 'approvals', 'cancelled', 'choices', 'clarify', 'command', 'deny', 'description', 'message', 'metadata', 'once', 'prompt', 'question', 'reason', 'response_queue', 'selected', 'session', 'skipped', 'stored_as', 'success', 'timeout', 'validated', 'var_name', 'view']

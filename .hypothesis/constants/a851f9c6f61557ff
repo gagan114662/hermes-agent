@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/gateway/session.py
+# hypothesis_version: 6.151.12
+
+[0.0, 120, ', ', '.sessions_', '.tmp', ':', 'CLI terminal', 'SessionEntry', 'SessionSource', '^\\+?\\d[\\d\\-\\s]{6,}$', 'a', 'agent:main', 'assistant', 'both', 'cache_read_tokens', 'cache_write_tokens', 'channel', 'chat_id', 'chat_id_alt', 'chat_name', 'chat_topic', 'chat_type', 'cli', 'connected_platforms', 'content', 'cost_status', 'created_at', 'daily', 'display_name', 'dm', 'estimated_cost_usd', 'group', 'home_channels', 'idle', 'input_tokens', 'last_prompt_tokens', 'memory_flushed', 'none', 'origin', 'output_tokens', 'platform', 'r', 'reasoning', 'reasoning_details', 'role', 'session_id', 'session_key', 'session_reset', 'session_switch', 'sessions.json', 'source', 'thread_id', 'tool_call_id', 'tool_calls', 'tool_name', 'total_tokens', 'unknown', 'updated_at', 'user', 'user_id', 'user_id_alt', 'user_name', 'utf-8', 'w']

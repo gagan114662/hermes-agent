@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/optional-skills/productivity/memento-flashcards/scripts/youtube_quiz.py
+# hypothesis_version: 6.151.12
+
+['YouTube video ID', '\\s+', '__main__', 'command', 'empty_transcript', 'en', 'en-AU', 'en-CA', 'en-GB', 'en-US', 'error', 'error_type', 'fetch', 'message', 'missing_dependency', 'ok', 'text', 'to_raw_data', 'transcript', 'video_id']

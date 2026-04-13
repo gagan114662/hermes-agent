@@ -1,0 +1,4 @@
+# file: /usr/lib/python3/dist-packages/more_itertools/recipes.py
+# hypothesis_version: 6.151.12
+
+['all_equal', 'consume', 'convolve', 'dotproduct', 'first_true', 'flatten', 'grouper', 'iter_except', 'ncycles', 'nth', 'nth_combination', 'pad_none', 'padnone', 'pairwise', 'partition', 'powerset', 'prepend', 'quantify', 'random_combination', 'random_permutation', 'random_product', 'repeatfunc', 'roundrobin', 'tabulate', 'tail', 'take', 'unique_everseen', 'unique_justseen']

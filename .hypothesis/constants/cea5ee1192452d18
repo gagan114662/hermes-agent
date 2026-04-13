@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/gateway/status.py
+# hypothesis_version: 6.151.12
+
+[b'\x00', b' ', '*.lock', '.local', 'State:', 'T', 'XDG_STATE_HOME', 'argv', 'error_code', 'error_message', 'exit_reason', 'gateway-locks', 'gateway.pid', 'gateway/run.py', 'gateway_state', 'gateway_state.json', 'hermes', 'hermes gateway', 'hermes-gateway', 'identity_hash', 'ignore', 'kind', 'metadata', 'pid', 'platforms', 'scope', 'start_time', 'starting', 'state', 't', 'updated_at', 'utf-8', 'w']

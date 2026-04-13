@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/gateway/process_registry.py
+# hypothesis_version: 6.151.12
+
+[5.0, 3600, '--session-id', '--transport', 'agent', 'hermes', 'serve', 'stdio']

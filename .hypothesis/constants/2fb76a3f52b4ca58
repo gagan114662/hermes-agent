@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/tools/tirith_security.py
+# hypothesis_version: 6.151.12
+
+[500, 8192, 86400, '--', '--certificate', '--json', '--non-interactive', '--shell', '--signature', '..', '/tirith', '1', 'Authorization', 'Darwin', 'GITHUB_TOKEN', 'Linux', 'SHA-256 only', 'TIRITH_BIN', 'TIRITH_ENABLED', 'TIRITH_FAIL_OPEN', 'TIRITH_TIMEOUT', 'aarch64', 'action', 'allow', 'amd64', 'apple-darwin', 'arm64', 'bin', 'block', 'check', 'checksum_failed', 'checksums.txt', 'checksums.txt.pem', 'checksums.txt.sig', 'cosign', 'cosign + SHA-256', 'cosign_missing', 'download_failed', 'findings', 'log_failures', 'posix', 'r', 'r:gz', 'rb', 'security', 'sheeki03/tirith', 'summary', 'tirith', 'tirith-install-', 'tirith_enabled', 'tirith_fail_open', 'tirith_path', 'tirith_timeout', 'true', 'unknown-linux-gnu', 'unsupported_platform', 'verify-blob', 'w', 'warn', 'wb', 'x86_64', 'yes']

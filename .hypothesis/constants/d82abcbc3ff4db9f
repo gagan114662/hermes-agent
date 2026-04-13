@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/agent/telemetry.py
+# hypothesis_version: 6.151.12
+
+[500, '/', '/v1/traces', 'HONEYCOMB_API_KEY', 'OTEL_SERVICE_NAME', 'config.yaml', 'enabled', 'hermes', 'hermes-agent', 'honeycomb_api_key', 'honeycomb_dataset', 'otlp_endpoint', 'service_name', 'telemetry', 'utf-8', 'x-honeycomb-dataset', 'x-honeycomb-team']

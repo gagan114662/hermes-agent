@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/agent/redact.py
+# hypothesis_version: 6.151.12
+
+['%', '(?<![A-Za-z0-9_-])(', ')(?![A-Za-z0-9_-])', '***', '****', '0', 'AKIA[A-Z0-9]{16}', 'brv_[A-Za-z0-9]{10,}', 'exa_[A-Za-z0-9]{10,}', 'false', 'fc-[A-Za-z0-9]{10,}', 'gho_[A-Za-z0-9]{10,}', 'ghp_[A-Za-z0-9]{10,}', 'ghr_[A-Za-z0-9]{10,}', 'ghs_[A-Za-z0-9]{10,}', 'ghu_[A-Za-z0-9]{10,}', 'gsk_[A-Za-z0-9]{10,}', 'hf_[A-Za-z0-9]{10,}', 'hsk-[A-Za-z0-9]{10,}', 'no', 'npm_[A-Za-z0-9]{10,}', 'off', 'r8_[A-Za-z0-9]{10,}', 'sk_[A-Za-z0-9_]{10,}', 'syt_[A-Za-z0-9]{10,}', '|']

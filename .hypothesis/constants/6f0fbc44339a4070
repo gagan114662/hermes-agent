@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/agent/skill_utils.py
+# hypothesis_version: 6.151.12
+
+['${', '\'"', '---', '.', '...', '.git', '.github', '.hub', ':', 'CSafeLoader', 'HERMES_PLATFORM', 'SKILL.md', '\\n---\\s*\\n', 'config', 'config.yaml', 'darwin', 'default', 'description', 'disabled', 'external_dirs', 'fallback_for_tools', 'hermes', 'key', 'linux', 'macos', 'metadata', 'name', 'platform_disabled', 'platforms', 'prompt', 'requires_tools', 'requires_toolsets', 'skill', 'skills', 'skills.config', 'utf-8', 'win32', 'windows', '~']

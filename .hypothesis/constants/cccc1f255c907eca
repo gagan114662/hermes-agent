@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/environments/agent_loop.py
+# hypothesis_version: 6.151.12
+
+[1.0, 128, 200, 500, '<tool_call>', 'BudgetConfig', 'TERMINAL_ENV', '[%s] $ %s', 'arguments', 'assistant', 'command', 'content', 'error', 'exit_code', 'extra_body', 'function', 'get_state', 'hermes', 'id', 'local', 'max_tokens', 'memory', 'merge', 'messages', 'n', 'name', 'reasoning', 'reasoning_content', 'reasoning_details', 'role', 'session_search', 'temperature', 'terminal', 'text', 'todo', 'todos', 'tool', 'tool_call_id', 'tool_calls', 'tools', 'type', 'user', '{}']

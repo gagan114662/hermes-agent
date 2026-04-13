@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/harness/context_manager.py
+# hypothesis_version: 6.151.12
+
+[100, 1024, '# Harness Session\n', '## Session', '%Y-%m-%d %H:%M UTC', '(?=^## Session \\d+)', 'a', 'completed_features', 'description', 'file_path', 'id', 'ignore', 'next_steps', 'session_history', 'task_spec', 'test_cases', 'utf-8']

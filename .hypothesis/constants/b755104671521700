@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/tools/project_tool.py
+# hypothesis_version: 6.151.12
+
+[100, '\n📋 Due today:', '\n🚫 BLOCKED:', '  (none)', ' ⚠️ SLIPPING', ' ✅', '%Y-%m-%d', ',', '/', 'Client name', 'New status', 'Unnamed Phase', '_', 'blocked', 'client', 'client_name', 'completed_at', 'created_at', 'crm', 'description', 'done', 'due', 'enum', 'id', 'in_progress', 'name', 'notes', 'object', 'overdue', 'parameters', 'phase', 'phases', 'project_create', 'project_list', 'project_standup', 'project_update', 'properties', 'required', 'status', 'string', 'task_id', 'tasks', 'tasks.json', 'todo', 'total', 'type', '✅', '⬜', '🔄', '🚫']

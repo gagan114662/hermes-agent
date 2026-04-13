@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/tools/sms_android_tool.py
+# hypothesis_version: 6.151.12
+
+['/', 'SMS message text', 'android_sms_health', 'android_sms_send', 'android_sms_status', 'array', 'description', 'id', 'integer', 'items', 'message', 'message_id', 'name', 'numbers', 'object', 'parameters', 'phoneNumbers', 'properties', 'recipients', 'required', 'simNumber', 'sim_number', 'sms-android', 'state', 'string', 'to', 'type', 'unknown', 'user', '📱']

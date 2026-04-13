@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/tools/fonoster_tool.py
+# hypothesis_version: 6.151.12
+
+['/', 'FONOSTER_API_URL', 'FONOSTER_APP_REF', 'FONOSTER_FROM_NUMBER', 'Fonoster numbers:', 'No recent calls.', 'Recent calls:', 'Voice applications:', 'appRef', 'applications', 'callId', 'calls', 'description', 'direction', 'duration', 'e164Number', 'endpoint', 'fonoster_app_list', 'fonoster_call_list', 'fonoster_call_make', 'fonoster_number_list', 'from', 'from_number', 'integer', 'items', 'limit', 'metadata', 'name', 'number', 'numbers', 'object', 'pageSize', 'parameters', 'properties', 'ref', 'required', 'secret', 'status', 'string', 'task', 'to', 'type', 'username', 'voice', '📞']

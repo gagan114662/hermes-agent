@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/tools/email_delivery.py
+# hypothesis_version: 6.151.12
+
+['587', '=', '@', 'Authorization', 'Content-Type', 'EMAIL_ADDRESS', 'EMAIL_FROM_ADDRESS', 'EMAIL_PASSWORD', 'EMAIL_SMTP_HOST', 'EMAIL_SMTP_PORT', 'From', 'In-Reply-To', 'Message-ID', 'POST', 'RESEND_API_KEY', 'RESEND_API_KEY=', 'References', 'Subject', 'To', 'application/json', 'error', 'from', 'headers', 'hermes.local', 'html', 'id', 'message_id', 'name', 'plain', 'provider', 'reply_to', 'resend', 'smtp', 'subject', 'success', 'text', 'to', 'urllib not available', 'utf-8', 'value', '~/.hermes/.env']

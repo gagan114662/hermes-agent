@@ -1,0 +1,4 @@
+# file: /sessions/pensive-optimistic-wright/mnt/hermes-agent/hermes_cli/webhook.py
+# hypothesis_version: 6.151.12
+
+[8644, '  Events: (all)', '%Y-%m-%dT%H:%M:%SZ', '(all)', ',', ', ', '-', '...', '.tmp', '0.0.0.0', 'Content-Type', 'Created', 'POST', 'Updated', 'X-GitHub-Event', 'X-Hub-Signature-256', 'add', 'application/json', 'chat_id', 'created_at', 'deliver', 'deliver_extra', 'description', 'enabled', 'events', 'extra', 'host', 'list', 'localhost', 'log', 'ls', 'platforms', 'port', 'prompt', 'remove', 'rm', 'secret', 'sha256=', 'skills', 'subscribe', 'test', 'utf-8', 'webhook', 'webhook_action']
