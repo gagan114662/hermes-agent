@@ -103,6 +103,12 @@ _HERMES_CORE_TOOLS = [
     "twitter_post", "linkedin_post", "social_post_auto", "social_content",
     # MCP Auto-Configurator
     "mcp_autoconfig",
+    # Git operations
+    "git_status", "git_diff", "git_log", "git_commit", "git_branch",
+    # Database queries (SQLite)
+    "sqlite_query", "sqlite_schema",
+    # Image editing (Pillow)
+    "image_resize", "image_crop", "image_annotate", "image_convert",
 ]
 
 
@@ -263,6 +269,24 @@ TOOLSETS = {
     "file": {
         "description": "File manipulation tools: read, write, patch (with fuzzy matching), and search (content + files)",
         "tools": ["read_file", "write_file", "patch", "search_files"],
+        "includes": []
+    },
+
+    "git": {
+        "description": "Git version control: status, diff, log, commit, and branch management",
+        "tools": ["git_status", "git_diff", "git_log", "git_commit", "git_branch"],
+        "includes": []
+    },
+
+    "database": {
+        "description": "Database tools: query SQLite databases and inspect schemas",
+        "tools": ["sqlite_query", "sqlite_schema"],
+        "includes": []
+    },
+
+    "image_edit": {
+        "description": "Image editing: resize, crop, annotate text, and convert between formats (PNG, JPEG, WEBP, etc.)",
+        "tools": ["image_resize", "image_crop", "image_annotate", "image_convert"],
         "includes": []
     },
     
