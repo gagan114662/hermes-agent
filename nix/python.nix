@@ -35,8 +35,13 @@ let
       };
     };
 
-  pythonPackageOverrides = final: _prev:
-    if isAarch64Darwin then {
+  pythonPackageOverrides = final: prev:
+    {
+      # sgmllib3k ships only as sdist and needs setuptools to build
+      sgmllib3k = prev.sgmllib3k.overrideAttrs (old: {
+        nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ final.setuptools ];
+      });
+    } // (if isAarch64Darwin then {
       numpy = mkPrebuiltOverride final python311.pkgs.numpy { };
 
       av = mkPrebuiltOverride final python311.pkgs.av { };
@@ -66,7 +71,7 @@ let
         tokenizers = [ ];
         tqdm = [ ];
       };
-    } else {};
+    } else {});
 
   pythonSet =
     (callPackage pyproject-nix.build.packages {
