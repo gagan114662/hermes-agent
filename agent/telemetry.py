@@ -196,3 +196,49 @@ def span(name: str, **attributes):
             return False  # don't suppress exceptions
 
     return _ManagedSpan()
+
+
+def start_span(name: str, attributes: Optional[dict] = None):
+    """
+    Start a span and return it directly (not as a context manager).
+
+    Caller is responsible for calling end_span() in a finally block.
+    Used by run_agent.py for the agent.llm_call span where the context
+    manager pattern doesn't fit the threading model.
+    """
+    tracer = get_tracer("hermes")
+    try:
+        from opentelemetry import trace as _trace_mod
+        _span = tracer.start_span(name)
+        if attributes:
+            for k, v in attributes.items():
+                if v is not None:
+                    try:
+                        _span.set_attribute(k, v)
+                    except Exception:
+                        pass
+        return _span
+    except Exception:
+        return _NoopSpan()
+
+
+def end_span(span_obj, error: Optional[Exception] = None):
+    """
+    End a span started by start_span().
+
+    If error is provided, records the exception and sets ERROR status
+    so Honeycomb's error detection panels populate correctly.
+    """
+    if span_obj is None:
+        return
+    try:
+        if error is not None:
+            try:
+                from opentelemetry.trace import StatusCode
+                span_obj.record_exception(error)
+                span_obj.set_status(StatusCode.ERROR, str(error)[:500])
+            except Exception:
+                pass
+        span_obj.end()
+    except Exception:
+        pass

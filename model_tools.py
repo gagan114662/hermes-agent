@@ -535,6 +535,13 @@ def handle_function_call(
                 _tel_span.set_attribute("error_message", str(e)[:200])
                 if _tel_start_time is not None:
                     _tel_span.set_attribute("duration_ms", round((_time_mod.monotonic() - _tel_start_time) * 1000, 1))
+                # record_exception + StatusCode.ERROR so Honeycomb error panels populate
+                try:
+                    from opentelemetry.trace import StatusCode
+                    _tel_span.record_exception(e)
+                    _tel_span.set_status(StatusCode.ERROR, str(e)[:200])
+                except Exception:
+                    pass
             if _tel_ctx is not None:
                 _tel_ctx.__exit__(None, None, None)
         except Exception:
