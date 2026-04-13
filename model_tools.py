@@ -183,6 +183,9 @@ def _discover_tools():
         "tools.prd_tool",
         "tools.project_tool",
         "tools.feedback_tool",
+        "tools.git_tool",
+        "tools.database_tool",
+        "tools.image_edit_tool",
         # "tools.google_workspace_tool",  # disabled: triggers gogcli keychain popup on every startup
     ]
     import importlib

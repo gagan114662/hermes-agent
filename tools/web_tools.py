@@ -47,7 +47,12 @@ import re
 import asyncio
 from typing import List, Dict, Any, Optional
 import httpx
-from firecrawl import Firecrawl
+# firecrawl is optional — import it if available so tests can patch it,
+# but don't fail if the SDK is not installed.
+try:
+    from firecrawl import Firecrawl
+except ImportError:
+    Firecrawl = None  # type: ignore[misc,assignment]
 from agent.auxiliary_client import (
     async_call_llm,
     extract_content_or_reasoning,
@@ -235,6 +240,11 @@ def _get_firecrawl_client():
     if _firecrawl_client is not None and _firecrawl_client_config == client_config:
         return _firecrawl_client
 
+    if Firecrawl is None:
+        raise ImportError(
+            "firecrawl SDK is not installed. "
+            "Install with: pip install 'firecrawl-py>=4.16.0'"
+        )
     _firecrawl_client = Firecrawl(**kwargs)
     _firecrawl_client_config = client_config
     return _firecrawl_client
