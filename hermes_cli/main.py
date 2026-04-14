@@ -4614,9 +4614,25 @@ def cmd_logs(args):
 
 def _cmd_harness_dispatch(args) -> None:
     """Dispatch `hermes harness` subcommands."""
-    from harness.cli_commands import cmd_harness_run
     if args.harness_command == "run":
+        from harness.cli_commands import cmd_harness_run
         sys.exit(cmd_harness_run(spec_file=args.spec_file))
+    elif args.harness_command == "start":
+        from hermes_cli.harness_commands import cmd_start
+        import click
+        # Build a Click standalone context and invoke
+        ctx = click.Context(cmd_start)
+        kwargs = {
+            "website": args.website,
+            "contact": getattr(args, "contact", "owner"),
+            "chat_id": getattr(args, "chat_id", None),
+        }
+        ctx.invoke(cmd_start, **kwargs)
+    elif args.harness_command == "status":
+        from hermes_cli.harness_commands import cmd_status
+        import click
+        ctx = click.Context(cmd_status)
+        ctx.invoke(cmd_status)
     else:
         args._harness_parser.print_help()
         sys.exit(1)
@@ -6219,6 +6235,14 @@ Examples:
     harness_subparsers = harness_parser.add_subparsers(dest="harness_command")
     harness_run = harness_subparsers.add_parser("run", help="Run a harness from a YAML/JSON spec file")
     harness_run.add_argument("spec_file", help="Path to harness spec YAML/JSON")
+
+    harness_start = harness_subparsers.add_parser("start", help="Onboard a business: analyze website, build team, install crons")
+    harness_start.add_argument("--website", required=True, help="Business website URL to analyze")
+    harness_start.add_argument("--contact", default="owner", help="Owner contact (Telegram handle, phone, or email)")
+    harness_start.add_argument("--chat-id", dest="chat_id", type=int, default=None, help="Telegram chat ID for gateway notifications")
+
+    harness_subparsers.add_parser("status", help="Show current team status and recent activity")
+
     harness_parser.set_defaults(func=_cmd_harness_dispatch, _harness_parser=harness_parser)
 
     # ── employee ──────────────────────────────────────────────────────
