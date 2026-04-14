@@ -381,33 +381,53 @@ class HenryPM:
             logger.warning("Could not read blocker mailbox: %s", exc)
         return reports
 
-    async def evening_report(self) -> None:
+    async def evening_report(self) -> dict:
         """Run at 5pm: compile digest and CALL the owner via Vapi.
 
         Voice is the default — the whole point is the owner doesn't need to
         open an app or read anything.  Falls back to text if Vapi is not
         configured or the call fails.
+
+        Returns
+        -------
+        dict with keys: method_used, status, delivered_at, detail
         """
         logger.info("🌆 Evening report starting...")
 
-        # Compile the day's work summary
-        digest = await self.compile_daily_digest()
+        from harness.henry_voice import compile_daily_briefing, deliver_evening_report
+        from gateway.team_chat import post_update
 
-        # Also pull in proactive loop actions from today
+        # Collect structured briefing from team updates + experiments
+        briefing = await compile_daily_briefing(hours=24)
+
+        # Also count proactive loop actions and surface in tomorrow plan
         try:
             from scripts.proactive_loop import load_action_log
             actions = load_action_log()
             if actions:
-                digest += f"\n\nPlus {len(actions)} proactive actions today "
-                digest += "(lead follow-ups, inbox replies, prospecting)."
+                briefing["tomorrow_plan"].append(
+                    f"Follow up on {len(actions)} proactive actions (leads, inbox, prospecting)"
+                )
         except Exception:
             pass
 
-        # Default to voice — that's the Hermes way.  Owner gets a CALL.
-        voice = self._vapi_available()
-        await self.send_update_to_owner(digest, voice=voice)
+        # Deliver via voice call (Vapi) or Telegram/file fallback
+        result = await deliver_evening_report(self.user_contact, briefing)
 
-        logger.info("✅ Evening report complete — %s", "voice call" if voice else "text fallback")
+        # Post to team chat so everyone knows the report went out
+        post_update(
+            employee_name="henry",
+            role="Project Manager",
+            message=f"📊 Evening report sent to owner via {result['method_used']} ({result['status']})",
+            channel="henry",
+        )
+
+        logger.info(
+            "✅ Evening report complete — method=%s status=%s",
+            result["method_used"],
+            result["status"],
+        )
+        return result
 
     def _vapi_available(self) -> bool:
         """Check if Vapi credentials are configured."""
