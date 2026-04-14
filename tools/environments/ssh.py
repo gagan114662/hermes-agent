@@ -225,6 +225,15 @@ class SSHEnvironment(BaseEnvironment):
         if result.returncode != 0:
             raise RuntimeError(f"remote rm failed: {result.stderr.strip()}")
 
+    def _sync_skills_and_credentials(self) -> None:
+        """Sync skills and credentials to the remote host.
+
+        Delegates to the FileSyncManager which handles rate-limiting,
+        delta detection, and bulk uploads via tar-over-SSH.  Retained as a
+        named method so callers and tests can patch or invoke it explicitly.
+        """
+        self._sync_manager.sync(force=True)
+
     def _before_execute(self) -> None:
         """Sync files to remote via FileSyncManager (rate-limited internally)."""
         self._sync_manager.sync()

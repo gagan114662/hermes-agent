@@ -293,11 +293,13 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
                 # Found match by provider key
                 base_url = entry.get("api") or entry.get("url") or entry.get("base_url") or ""
                 if base_url:
+                    literal_key = str(entry.get("api_key", "") or "").strip()
                     return {
                         "name": entry.get("name", ep_name),
                         "base_url": base_url.strip(),
-                        "api_key": resolved_api_key,
+                        "api_key": resolved_api_key or literal_key,
                         "model": entry.get("default_model", ""),
+                        "api_mode": entry.get("api_mode") or entry.get("transport", ""),
                     }
             # Also check the 'name' field if present
             display_name = entry.get("name", "")
@@ -307,11 +309,13 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
                     # Found match by display name
                     base_url = entry.get("api") or entry.get("url") or entry.get("base_url") or ""
                     if base_url:
+                        literal_key = str(entry.get("api_key", "") or "").strip()
                         return {
                             "name": display_name,
                             "base_url": base_url.strip(),
-                            "api_key": resolved_api_key,
+                            "api_key": resolved_api_key or literal_key,
                             "model": entry.get("default_model", ""),
+                            "api_mode": entry.get("api_mode") or entry.get("transport", ""),
                         }
 
     # Fall back to custom_providers: list (legacy format)
