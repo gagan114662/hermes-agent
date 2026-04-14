@@ -4146,15 +4146,6 @@ class GatewayRunner:
             self.session_store.get_or_create_session(source, force_new=True)
             header = "✨ New session started!"
 
-        # Fire plugin on_session_reset hook (new session guaranteed to exist)
-        try:
-            from hermes_cli.plugins import invoke_hook as _invoke_hook
-            _new_sid = new_entry.session_id if new_entry else None
-            _invoke_hook("on_session_reset", session_id=_new_sid,
-                         platform=source.platform.value if source.platform else "")
-        except Exception:
-            pass
-
         # Append a random tip to the reset message
         try:
             from hermes_cli.tips import get_random_tip
