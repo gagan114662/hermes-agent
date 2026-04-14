@@ -15,6 +15,7 @@ def _make_agent():
     )
     mock_client = MagicMock()
     agent.client = mock_client
+    agent._disable_streaming = True  # Use non-streaming path so MagicMock works as response
     return agent, mock_client
 
 

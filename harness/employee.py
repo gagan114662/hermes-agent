@@ -111,6 +111,83 @@ class Employee:
                 logger.warning("Could not load employee %s: %s", yaml_file.stem, exc)
         return result
 
+    # ── Blocker feedback (employee → Henry) ────────────────────────────
+
+    def report_blocker(self, issue: str) -> None:
+        """Report a blocker to Henry's mailbox.
+
+        Writes to ~/.hermes/blocker_mailbox.jsonl so Henry picks it up
+        at next standup.  Also sends an immediate Telegram notification
+        if the environment is configured.
+        """
+        import json
+        from datetime import datetime, timezone
+
+        mailbox = Path.home() / ".hermes" / "blocker_mailbox.jsonl"
+        mailbox.parent.mkdir(parents=True, exist_ok=True)
+
+        entry = json.dumps({
+            "employee": self.name,
+            "role": self.role,
+            "issue": issue,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+
+        with open(mailbox, "a") as f:
+            f.write(entry + "\n")
+
+        self.status = "blocked"
+        self.save()
+        logger.warning("Employee %s reported blocker: %s", self.name, issue)
+
+        # Best-effort Telegram ping to owner
+        self._notify_blocker(issue)
+
+    def _notify_blocker(self, issue: str) -> None:
+        """Send immediate Telegram notification about a blocker."""
+        import os
+        bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+        owner_id = os.environ.get("TELEGRAM_OWNER_ID", "")
+        if not bot_token or not owner_id:
+            return
+        try:
+            import httpx
+            httpx.post(
+                f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                json={
+                    "chat_id": owner_id,
+                    "text": f"🚨 {self.name.title()} ({self.role}) is blocked:\n{issue}",
+                },
+                timeout=10,
+            )
+        except Exception:
+            pass
+
+    def post_update(self, message: str, channel: str = "team") -> None:
+        """Post a status update to the team group chat.
+
+        This feeds into the WhatsApp/Telegram group UX where all employee
+        updates appear as a team conversation.
+        """
+        import json
+        from datetime import datetime, timezone
+
+        updates_path = Path.home() / ".hermes" / "team_updates.jsonl"
+        updates_path.parent.mkdir(parents=True, exist_ok=True)
+
+        entry = json.dumps({
+            "employee": self.name,
+            "role": self.role,
+            "message": message,
+            "channel": channel,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+
+        with open(updates_path, "a") as f:
+            f.write(entry + "\n")
+
+        logger.info("[%s] %s: %s", channel, self.name, message[:80])
+
     # ── Harness integration ───────────────────────────────────────────
 
     def to_harness_config(self, project_dir: Path, **overrides) -> HarnessConfig:
@@ -129,6 +206,9 @@ class Employee:
     def start_shift(self, project_dir: Path, **harness_overrides) -> dict:
         """Begin a harness-orchestrated work session toward this employee's goal.
 
+        Integrates the experiment loop: each shift is an experiment.  The employee
+        gets a strategy variant to try, works the shift, then results are evaluated.
+
         Parameters
         ----------
         project_dir      : Working directory for the agent.
@@ -142,6 +222,17 @@ class Employee:
 
         self.status = "working"
         self.save()
+        self.post_update(f"Starting shift — working on: {self.goal[:80]}")
+
+        # ── Experiment loop: propose strategy variant for this shift ──
+        experiment = None
+        try:
+            from harness.experiment_loop import integrate_with_employee_shift
+            experiment = integrate_with_employee_shift(self.name, self.goal, self.kpis)
+            logger.info("Experiment %s: %s", experiment["id"], experiment.get("hypothesis", ""))
+            self.post_update(f"Testing: {experiment.get('hypothesis', 'new strategy')[:60]}")
+        except Exception as exc:
+            logger.debug("Experiment loop not available: %s", exc)
 
         cfg = self.to_harness_config(project_dir, **harness_overrides)
         orch = SessionOrchestrator(cfg)
@@ -149,8 +240,13 @@ class Employee:
         try:
             result = orch.run_harness()
             self.status = "completed" if result["status"] == "completed" else "idle"
+            self.post_update(
+                f"Shift complete — {result.get('sessions_run', 0)} sessions, "
+                f"status: {result['status']}"
+            )
         except Exception as exc:
             self.status = "blocked"
+            self.report_blocker(str(exc))
             logger.exception("Employee %s shift failed: %s", self.name, exc)
             result = {
                 "status": "error",
@@ -160,6 +256,21 @@ class Employee:
             }
         finally:
             self.save()
+
+        # ── Experiment loop: record results and evaluate ─────────────
+        if experiment:
+            try:
+                from harness.experiment_loop import finalize_employee_shift
+                # Extract metrics from the shift result
+                metrics = {
+                    "sessions_run": result.get("sessions_run", 0),
+                    "cost_usd": result.get("total_cost_usd", 0.0),
+                    "status": 1.0 if result.get("status") == "completed" else 0.0,
+                }
+                decision = finalize_employee_shift(self.name, experiment["id"], metrics)
+                self.post_update(f"Experiment result: {decision} — {experiment.get('hypothesis', '')[:50]}")
+            except Exception as exc:
+                logger.debug("Experiment finalize failed: %s", exc)
 
         return result
 

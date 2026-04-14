@@ -1,18 +1,22 @@
-"""Team Factory — Creates Employee instances from business profiles.
+"""Team Factory — Dynamic LLM-powered team generation from business profiles.
 
-This module reads a business_profile.json and automatically instantiates the
-right Employee instances for that business. It bridges website analysis and
-the employee system.
+This module replaces static templates with an LLM-powered system that:
+1. Takes a business profile from website_analyzer
+2. Calls the z.ai LLM (glm-4.5-flash, OpenAI-compatible) to design the perfect team
+3. Generates roles, goals, KPIs, schedules, and tool assignments dynamically
+4. Falls back to lightweight rule-based generation if LLM is unavailable
+
+This means Hermes works for ANY business, not just hardcoded industries.
 
 Usage
 -----
     from harness.team_factory import create_team_from_profile, provision_team
 
-    # Create employees from profile
-    employees = create_team_from_profile(Path("~/.hermes/business_profile.json"))
+    # Create employees from profile (now uses LLM)
+    employees = await create_team_from_profile(Path("~/.hermes/business_profile.json"))
 
     # Full provisioning (includes Henry PM)
-    summary = provision_team(
+    summary = await provision_team(
         profile_path=Path("~/.hermes/business_profile.json"),
         project_dir=Path("./my_project")
     )
@@ -21,7 +25,8 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
+import os
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -30,187 +35,236 @@ from harness.employee import Employee
 logger = logging.getLogger(__name__)
 
 
-# ── Employee Templates ─────────────────────────────────────────────────────
-# Maps role slugs to full Employee configuration (with {business_name} placeholders)
+async def generate_team_with_llm(business_profile: dict) -> list[dict]:
+    """Generate team specs using z.ai LLM.
 
-EMPLOYEE_TEMPLATES = {
-    "reservations_manager": {
-        "role": "Reservations Manager",
-        "goal": "Manage and optimize reservation bookings for {business_name}. Handle customer inquiries, confirm bookings, update availability calendars, and maintain organized reservation records.",
-        "kpis": [
-            "Confirmation rate of booking requests",
-            "Average time to respond to inquiries",
-            "Reservation accuracy and no-show rate",
-            "Customer satisfaction score",
-        ],
-        "schedule": "0 9,14 * * *",  # 9 AM and 2 PM daily
-    },
-    "review_responder": {
-        "role": "Review Response Manager",
-        "goal": "Monitor and respond to customer reviews across platforms for {business_name}. Craft thoughtful replies to feedback, address concerns, and build positive reputation.",
-        "kpis": [
-            "Response rate to new reviews",
-            "Average response time",
-            "Sentiment improvement after responses",
-            "Review platform engagement rate",
-        ],
-        "schedule": "0 */2 * * *",  # Every 2 hours
-    },
-    "social_media_manager": {
-        "role": "Social Media Manager",
-        "goal": "Develop and execute social media content strategy for {business_name}. Create engaging posts, manage community interactions, track metrics, and grow followers.",
-        "kpis": [
-            "Monthly post engagement rate",
-            "Follower growth percentage",
-            "Click-through rate on promotional posts",
-            "Community sentiment and comment quality",
-        ],
-        "schedule": "0 9 * * *",  # 9 AM daily
-    },
-    "customer_support": {
-        "role": "Customer Support Specialist",
-        "goal": "Provide exceptional customer support for {business_name}. Respond to inquiries, resolve issues, handle complaints, and maintain customer satisfaction.",
-        "kpis": [
-            "First response time",
-            "Issue resolution rate",
-            "Customer satisfaction (CSAT) score",
-            "Ticket volume handled per day",
-        ],
-        "schedule": "0 */4 * * *",  # Every 4 hours
-    },
-    "docs_writer": {
-        "role": "Documentation Writer",
-        "goal": "Create and maintain comprehensive documentation for {business_name}. Write guides, FAQs, knowledge base articles, and process documentation.",
-        "kpis": [
-            "Documentation completion percentage",
-            "Avg time to document new processes",
-            "Article clarity and helpfulness rating",
-            "Documentation view/usage metrics",
-        ],
-        "schedule": "0 10 * * 1",  # 10 AM every Monday
-    },
-    "lead_qualifier": {
-        "role": "Lead Qualification Specialist",
-        "goal": "Identify and qualify sales leads for {business_name}. Analyze inbound prospects, assess fit, prioritize high-value opportunities, and route to sales.",
-        "kpis": [
-            "Leads qualified per week",
-            "Qualification accuracy rate",
-            "Average lead response time",
-            "Sales conversion rate from qualified leads",
-        ],
-        "schedule": "0 8,12,16 * * *",  # 8 AM, 12 PM, 4 PM daily
-    },
-    "email_marketer": {
-        "role": "Email Marketing Manager",
-        "goal": "Execute email marketing campaigns for {business_name}. Design campaigns, manage lists, track opens/clicks, and optimize conversion rates.",
-        "kpis": [
-            "Email open rate",
-            "Click-through rate",
-            "Conversion rate per campaign",
-            "List growth rate",
-        ],
-        "schedule": "0 11 * * *",  # 11 AM daily
-    },
-    "content_strategist": {
-        "role": "Content Strategy Lead",
-        "goal": "Develop comprehensive content strategy for {business_name}. Plan editorial calendars, research topics, optimize for SEO, and manage content publishing.",
-        "kpis": [
-            "Articles published per month",
-            "Avg page views per article",
-            "Organic search traffic growth",
-            "Time on page / engagement metrics",
-        ],
-        "schedule": "0 10 * * 2",  # 10 AM every Tuesday
-    },
-    "appointment_scheduler": {
-        "role": "Appointment Scheduler",
-        "goal": "Manage appointment scheduling and calendar optimization for {business_name}. Book appointments, manage cancellations, send reminders, and optimize scheduling.",
-        "kpis": [
-            "Appointments booked per day",
-            "Cancellation rate",
-            "No-show rate",
-            "Average booking lead time",
-        ],
-        "schedule": "0 */3 * * *",  # Every 3 hours
-    },
-    "seo_specialist": {
-        "role": "SEO Specialist",
-        "goal": "Improve search engine visibility for {business_name}. Conduct keyword research, optimize content, build backlinks, and track rankings.",
-        "kpis": [
-            "Keyword ranking improvements",
-            "Organic traffic growth percentage",
-            "Domain authority increase",
-            "Click-through rate from search results",
-        ],
-        "schedule": "0 9 * * 1",  # 9 AM every Monday
-    },
-    "inventory_manager": {
-        "role": "Inventory Manager",
-        "goal": "Optimize inventory levels and stock management for {business_name}. Track stock, forecast demand, manage reorders, and prevent stockouts.",
-        "kpis": [
-            "Inventory turnover rate",
-            "Stockout incidents per month",
-            "Inventory accuracy percentage",
-            "Days inventory outstanding",
-        ],
-        "schedule": "0 8 * * *",  # 8 AM daily
-    },
-    "quality_assurance": {
-        "role": "Quality Assurance Manager",
-        "goal": "Ensure product/service quality standards for {business_name}. Conduct audits, document issues, implement improvements, and track quality metrics.",
-        "kpis": [
-            "Defect identification rate",
-            "Issue resolution time",
-            "Quality score improvement",
-            "Customer quality complaints per month",
-        ],
-        "schedule": "0 10 * * 3",  # 10 AM every Wednesday
-    },
-    "event_coordinator": {
-        "role": "Event Coordinator",
-        "goal": "Plan and execute events for {business_name}. Manage logistics, coordinate vendors, promote events, and ensure successful execution.",
-        "kpis": [
-            "Events planned per quarter",
-            "Attendee count per event",
-            "Event satisfaction rating",
-            "Lead generation per event",
-        ],
-        "schedule": "0 9 * * 0",  # 9 AM every Sunday
-    },
-    "copywriter": {
-        "role": "Copywriter",
-        "goal": "Create compelling marketing copy for {business_name}. Write website content, ad copy, email subject lines, and promotional materials.",
-        "kpis": [
-            "Copy completion rate",
-            "Click-through rate on copy",
-            "Conversion rate improvement",
-            "A/B test win rate",
-        ],
-        "schedule": "0 11 * * 2",  # 11 AM every Tuesday
-    },
-    "partnership_developer": {
-        "role": "Partnership Developer",
-        "goal": "Identify and develop strategic partnerships for {business_name}. Research potential partners, negotiate terms, manage relationships, and track outcomes.",
-        "kpis": [
-            "New partnerships established per quarter",
-            "Partnership revenue contribution",
-            "Partner satisfaction score",
-            "Co-marketing campaign reach",
-        ],
-        "schedule": "0 10 * * 4",  # 10 AM every Thursday
-    },
-}
+    Calls glm-4.5-flash (OpenAI-compatible) with the business profile and
+    available tools list. Returns a JSON array of employee specs that can
+    be converted to Employee instances.
+
+    Parameters
+    ----------
+    business_profile : dict
+        Business profile from website_analyzer containing:
+        - business_name, industry, description, services, pain_points, etc.
+
+    Returns
+    -------
+    list[dict]
+        List of employee specs: [{name, role, goal, kpis, schedule, tools}]
+        Each employee is designed for THIS business, not generic.
+
+    Raises
+    ------
+    Exception
+        If LLM call fails. Caller should fall back to _fallback_generate_team.
+    """
+    try:
+        from openai import AsyncOpenAI
+    except ImportError:
+        logger.warning("openai package not available. Falling back to rule-based generation.")
+        return _fallback_generate_team(business_profile)
+
+    # Get LLM config from env
+    base_url = os.getenv("GLM_BASE_URL", "https://api.z.ai/api/paas/v4")
+    api_key = os.getenv("GLM_API_KEY")
+
+    if not api_key:
+        logger.warning("GLM_API_KEY not set. Falling back to rule-based generation.")
+        return _fallback_generate_team(business_profile)
+
+    try:
+        # Initialize OpenAI-compatible client for z.ai
+        client = AsyncOpenAI(base_url=base_url, api_key=api_key)
+
+        # Get list of available tools
+        available_tools = _get_available_tools()
+
+        # Build a smart prompt
+        prompt = _build_llm_prompt(business_profile, available_tools)
+
+        # Call the LLM
+        response = await client.chat.completions.create(
+            model="glm-4.5-flash",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an expert workforce architect designing AI agents. "
+                        "Each employee is an autonomous agent that will work independently. "
+                        "Return ONLY valid JSON, no markdown or extra text."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.7,
+            max_tokens=2000,
+        )
+
+        # Parse the response
+        response_text = response.choices[0].message.content
+        logger.info(f"LLM response: {response_text[:200]}...")
+
+        # Extract JSON from response
+        json_match = re.search(r"\[\s*\{.*\}\s*\]", response_text, re.DOTALL)
+        if not json_match:
+            logger.warning("Could not find JSON in LLM response. Using fallback.")
+            return _fallback_generate_team(business_profile)
+
+        employee_specs = json.loads(json_match.group(0))
+        logger.info(f"Generated {len(employee_specs)} employee specs via LLM")
+
+        return employee_specs
+
+    except Exception as exc:
+        logger.warning(f"LLM generation failed: {exc}. Falling back to rule-based generation.")
+        return _fallback_generate_team(business_profile)
 
 
-def create_team_from_profile(
+def _build_llm_prompt(business_profile: dict, available_tools: list[str]) -> str:
+    """Build a smart prompt for the LLM to design the team."""
+    business_name = business_profile.get("business_name", "the business")
+    industry = business_profile.get("industry", "unknown")
+    description = business_profile.get("description", "")
+    services = business_profile.get("services", [])
+    pain_points = business_profile.get("pain_points", [])
+    team_size = business_profile.get("team_size_estimate", "small")
+
+    services_str = ", ".join(services[:5]) if services else "N/A"
+    pain_points_str = ", ".join(pain_points[:4]) if pain_points else "N/A"
+    tools_str = ", ".join(available_tools[:30])  # List first 30 tools to keep prompt concise
+
+    prompt = f"""Design an AI workforce for this business:
+
+BUSINESS PROFILE:
+- Name: {business_name}
+- Industry: {industry}
+- Description: {description}
+- Services/Products: {services_str}
+- Key Pain Points: {pain_points_str}
+- Estimated Team Size: {team_size}
+
+AVAILABLE TOOLS (pick 2-4 per employee):
+{tools_str}
+
+YOUR TASK:
+Create 3-6 specialized AI employees for this business. For each, design:
+1. **name** (memorable slug, not generic): e.g. "alex_outreach", "jordan_support"
+2. **role** (job title): e.g. "Customer Support Specialist"
+3. **goal** (specific to THIS business): What they work toward daily
+4. **kpis** (3-4 measurable success criteria)
+5. **schedule** (cron expression): When they work (e.g. "0 9 * * *" for 9am daily)
+6. **tools** (2-4 tool names from AVAILABLE TOOLS): What they use
+
+Make the roles complementary and cover the pain points. Each employee should be autonomous
+and have a clear, specific goal tied to THIS business.
+
+RETURN ONLY THIS JSON FORMAT (no markdown, no extra text):
+[
+  {{"name": "...", "role": "...", "goal": "...", "kpis": [...], "schedule": "...", "tools": [...]}},
+  ...
+]
+"""
+    return prompt
+
+
+def _get_available_tools() -> list[str]:
+    """Read tool names from the tools/ directory."""
+    tools_dir = Path(__file__).parent.parent / "tools"
+    tool_names = []
+
+    if tools_dir.exists():
+        for py_file in sorted(tools_dir.glob("*.py")):
+            # Skip internal files
+            if py_file.name.startswith("_"):
+                continue
+            # Convert booking_tool.py -> booking_tool
+            tool_name = py_file.stem
+            tool_names.append(tool_name)
+
+    # Hardcoded list if directory doesn't exist
+    if not tool_names:
+        tool_names = [
+            "booking_tool",
+            "browser_tool",
+            "crm_tool",
+            "cron_tool",
+            "database_tool",
+            "email_delivery",
+            "email_marketing_tool",
+            "google_workspace_tool",
+            "image_generation_tool",
+            "invoicing_tool",
+            "memory_tool",
+            "outreach_tool",
+            "prospect_tool",
+            "send_message_tool",
+            "social_media_tool",
+            "sms_android_tool",
+            "vapi_tool",
+            "web_tools",
+            "whatsapp_evolution_tool",
+            "wiki_tool",
+        ]
+
+    return tool_names
+
+
+def _fallback_generate_team(business_profile: dict) -> list[dict]:
+    """Lightweight rule-based team generation when LLM is unavailable.
+
+    Creates 3-4 generic employees based on business pain points.
+    This is NOT the same as the old static templates — much simpler fallback.
+    """
+    business_name = business_profile.get("business_name", "the business")
+    industry = business_profile.get("industry", "general")
+    pain_points = business_profile.get("pain_points", [])
+
+    employees = []
+
+    # Determine roles based on pain points (very basic heuristic)
+    role_keywords = {
+        "support": ("Customer Support Agent", "Respond to customer inquiries and resolve issues", "support_agent"),
+        "marketing": ("Marketing Specialist", "Drive customer engagement and growth", "marketing_agent"),
+        "sales": ("Sales Agent", "Qualify leads and close deals", "sales_agent"),
+        "operations": ("Operations Manager", "Optimize business processes", "ops_agent"),
+    }
+
+    # Pick 2-3 roles based on pain points
+    selected_roles = ["support", "marketing"]  # Default
+    if any(word in " ".join(pain_points).lower() for word in ["lead", "sales"]):
+        selected_roles.append("sales")
+    if any(word in " ".join(pain_points).lower() for word in ["schedule", "booking", "appointment"]):
+        selected_roles = ["support", "sales", "operations"]
+
+    for role_key in selected_roles[:3]:
+        if role_key not in role_keywords:
+            continue
+
+        role_title, goal_template, name_slug = role_keywords[role_key]
+        goal = f"{goal_template} for {business_name}."
+
+        employees.append({
+            "name": f"{name_slug}_{business_name[:5].lower()}",
+            "role": role_title,
+            "goal": goal,
+            "kpis": ["Task completion rate", "Customer satisfaction", "Response time"],
+            "schedule": "0 9 * * *",  # 9 AM daily
+            "tools": ["browser_tool", "send_message_tool"],  # Generic tools
+        })
+
+    logger.info(f"Fallback generated {len(employees)} employees for {business_name}")
+    return employees
+
+
+async def create_team_from_profile(
     profile_path: Path,
     employees_dir: Optional[Path] = None,
 ) -> list[Employee]:
-    """Create Employee instances from a business profile JSON.
+    """Create Employee instances from a business profile JSON using LLM.
 
-    Reads the business_profile.json file, extracts the recommended_employees list,
-    looks up each role in EMPLOYEE_TEMPLATES, and creates Employee instances with
-    the business name substituted into the goal template.
+    Reads the business_profile.json file, calls generate_team_with_llm to
+    design the team, and creates Employee instances from the LLM output.
 
     Parameters
     ----------
@@ -230,7 +284,7 @@ def create_team_from_profile(
     FileNotFoundError
         If profile_path does not exist.
     ValueError
-        If profile JSON is malformed or missing required fields.
+        If profile JSON is malformed.
     """
     profile_path = Path(profile_path).expanduser()
 
@@ -243,68 +297,53 @@ def create_team_from_profile(
         raise ValueError(f"Invalid JSON in business profile: {exc}") from exc
 
     business_name = profile_data.get("business_name", "Unknown Business")
-    recommended_roles = profile_data.get("suggested_employees", [])
+    logger.info(f"Creating team for {business_name} using LLM...")
 
-    if not recommended_roles:
-        logger.warning(
-            "No recommended employees found in profile for %s", business_name
-        )
+    # Generate team specs using LLM
+    employee_specs = await generate_team_with_llm(profile_data)
+
+    if not employee_specs:
+        logger.warning(f"No employee specs generated for {business_name}")
         return []
 
     created_employees = []
 
-    for role_entry in recommended_roles:
-        # role_entry can be a dict with "role" key or just a string
-        if isinstance(role_entry, dict):
-            role_slug = role_entry.get("role", "").lower().replace(" ", "_")
-        else:
-            role_slug = str(role_entry).lower().replace(" ", "_")
+    for spec in employee_specs:
+        try:
+            # Create Employee from spec
+            employee = Employee(
+                name=spec.get("name", f"agent_{len(created_employees)}"),
+                role=spec.get("role", "AI Agent"),
+                goal=spec.get("goal", f"Support {business_name}"),
+                kpis=spec.get("kpis", []),
+                schedule=spec.get("schedule"),
+                memory_scope=spec.get("name"),
+                employees_dir=employees_dir,
+            )
 
-        if role_slug not in EMPLOYEE_TEMPLATES:
-            logger.warning("No template found for role: %s", role_slug)
+            # Save to YAML
+            employee.save()
+            created_employees.append(employee)
+            logger.info(f"Created employee: {employee.name} ({employee.role})")
+
+        except Exception as exc:
+            logger.warning(f"Could not create employee from spec {spec}: {exc}")
             continue
-
-        template = EMPLOYEE_TEMPLATES[role_slug]
-
-        # Substitute business_name into the goal template
-        goal = template["goal"].format(business_name=business_name)
-
-        # Create unique employee name from role slug and business
-        employee_name = _create_employee_name(role_slug, business_name)
-
-        # Create the Employee instance
-        employee = Employee(
-            name=employee_name,
-            role=template["role"],
-            goal=goal,
-            kpis=template["kpis"],
-            schedule=template.get("schedule"),
-            memory_scope=employee_name,
-            employees_dir=employees_dir,
-        )
-
-        # Save to YAML
-        employee.save()
-        created_employees.append(employee)
-        logger.info(
-            "Created employee: %s (%s) for %s",
-            employee_name,
-            template["role"],
-            business_name,
-        )
 
     return created_employees
 
 
-def provision_team(
+async def provision_team(
     profile_path: Path,
     project_dir: Path,
     employees_dir: Optional[Path] = None,
+    user_contact: Optional[str] = None,
+    auto_start: bool = False,
 ) -> dict:
     """Full team provisioning: create employees from profile + add Henry PM.
 
-    Creates a complete team for a business project. Includes all recommended
-    employees from the business profile plus the Henry project manager.
+    Creates a complete team for a business project using LLM-powered design.
+    Includes all generated employees plus the Henry project manager.
 
     Parameters
     ----------
@@ -314,6 +353,12 @@ def provision_team(
         Project working directory.
     employees_dir : Optional[Path]
         Directory for Employee YAML configs.
+    user_contact : Optional[str]
+        Owner's contact info (phone, email, or handle) for Henry's communications.
+        Defaults to "owner" if not provided.
+    auto_start : bool
+        If True, register employee schedules in cron after creation.
+        Defaults to False.
 
     Returns
     -------
@@ -323,6 +368,7 @@ def provision_team(
         - employee_count: int
         - employees: list of {name, role, status}
         - henry_included: bool
+        - schedules_registered: bool (only if auto_start=True)
         - summary: human-readable summary
     """
     profile_path = Path(profile_path).expanduser()
@@ -331,21 +377,20 @@ def provision_team(
     profile_data = json.loads(profile_path.read_text())
     business_name = profile_data.get("business_name", "Unknown Business")
 
-    # Create employees from profile
-    employees = create_team_from_profile(profile_path, employees_dir=employees_dir)
+    # Create employees from profile (now using LLM)
+    employees = await create_team_from_profile(profile_path, employees_dir=employees_dir)
 
     # Add Henry PM (lazy import to avoid circular dependencies)
     try:
         from harness.henry import create_henry  # lazy import
 
-        henry = create_henry(
-            business_name=business_name, user_contact="owner"
-        )
+        contact = user_contact or "owner"
+        henry = create_henry(business_name=business_name, user_contact=contact)
         employees.append(henry)
         henry_included = True
-        logger.info("Henry PM provisioned for %s", business_name)
+        logger.info(f"Henry PM provisioned for {business_name} with contact: {contact}")
     except (ImportError, Exception) as exc:
-        logger.warning("Could not provision Henry PM: %s", exc)
+        logger.warning(f"Could not provision Henry PM: {exc}")
         henry_included = False
 
     # Build summary
@@ -358,7 +403,7 @@ def provision_team(
         f"Team includes: {', '.join(emp['role'] for emp in employee_summaries)}."
     )
 
-    return {
+    result = {
         "business_name": business_name,
         "employee_count": len(employees),
         "employees": employee_summaries,
@@ -366,31 +411,20 @@ def provision_team(
         "summary": summary_text,
     }
 
+    # Optionally register cron schedules for all employees
+    if auto_start:
+        try:
+            from harness.team_scheduler import register_team_schedules
 
-def _create_employee_name(role_slug: str, business_name: str) -> str:
-    """Generate a unique, stable employee name from role slug and business.
+            schedule_summary = register_team_schedules(
+                employees_dir=employees_dir or Path.home() / ".hermes" / "employees",
+                project_dir=project_dir,
+            )
+            result["schedules_registered"] = True
+            result["schedule_summary"] = schedule_summary
+            logger.info(f"Team schedules registered: {schedule_summary}")
+        except Exception as exc:
+            logger.warning(f"Could not register team schedules: {exc}")
+            result["schedules_registered"] = False
 
-    Combines the role slug with a shortened business identifier to create
-    memorable, collision-resistant names like "reservations_acme" or "social_media_techco".
-
-    Parameters
-    ----------
-    role_slug : str
-        The role identifier (e.g., "review_responder").
-    business_name : str
-        The business name (e.g., "ACME Inc.").
-
-    Returns
-    -------
-    str
-        A clean employee name suitable for filesystem use.
-    """
-    # Extract first meaningful word from business name, lowercase, alphanumeric only
-    business_part = business_name.split()[0].lower()
-    business_part = "".join(c for c in business_part if c.isalnum())
-
-    # Limit to reasonable length and avoid collisions
-    if len(business_part) > 10:
-        business_part = business_part[:10]
-
-    return f"{role_slug}_{business_part}"
+    return result

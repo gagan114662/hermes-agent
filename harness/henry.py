@@ -327,34 +327,92 @@ class HenryPM:
             logger.error("Could not send text update: %s", exc)
 
     async def morning_briefing(self) -> None:
-        """Run at 9am: standup, plan the day, delegate initial tasks."""
+        """Run at 9am: standup, check blocker mailbox, plan the day, delegate tasks."""
         logger.info("🌅 Morning briefing starting...")
+
+        # Check the blocker mailbox first — employees may have reported issues overnight
+        blocker_reports = self._drain_blocker_mailbox()
+        for report in blocker_reports:
+            logger.warning("Blocker report from %s: %s", report.get("employee"), report.get("issue"))
 
         # Run standup and capture status
         standup = await self.run_daily_standup()
+
+        # Merge mailbox blockers into standup blockers
+        for report in blocker_reports:
+            standup["blockers"].append({
+                "employee": report["employee"],
+                "issue": report["issue"],
+            })
 
         # Escalate any blockers immediately
         for blocker in standup.get("blockers", []):
             await self.handle_escalation(blocker["employee"], blocker["issue"])
 
-        # If we have a task queue or opportunity pipeline, delegate early-day tasks
-        # (This would integrate with a task queue system in a real implementation)
+        # Check experiment results and apply learnings
+        try:
+            from harness.experiment_loop import ExperimentLoop
+            loop = ExperimentLoop()
+            loop.apply_overnight_results()
+            logger.info("Experiment results applied")
+        except Exception as exc:
+            logger.debug("Experiment loop not ready: %s", exc)
 
         logger.info("✅ Morning briefing complete")
 
+    def _drain_blocker_mailbox(self) -> list[dict]:
+        """Read and clear the blocker mailbox (~/.hermes/blocker_mailbox.jsonl).
+
+        Returns list of dicts: {"employee": str, "issue": str, "timestamp": str}
+        """
+        mailbox_path = Path.home() / ".hermes" / "blocker_mailbox.jsonl"
+        if not mailbox_path.exists():
+            return []
+
+        reports = []
+        try:
+            for line in mailbox_path.read_text().splitlines():
+                line = line.strip()
+                if line:
+                    reports.append(json.loads(line))
+            # Clear after reading
+            mailbox_path.write_text("")
+        except Exception as exc:
+            logger.warning("Could not read blocker mailbox: %s", exc)
+        return reports
+
     async def evening_report(self) -> None:
-        """Run at 5pm: compile digest and send to owner."""
+        """Run at 5pm: compile digest and CALL the owner via Vapi.
+
+        Voice is the default — the whole point is the owner doesn't need to
+        open an app or read anything.  Falls back to text if Vapi is not
+        configured or the call fails.
+        """
         logger.info("🌆 Evening report starting...")
 
         # Compile the day's work summary
         digest = await self.compile_daily_digest()
 
-        # Decide whether to send voice or text
-        # (For now, default to text; could be smarter based on time/context)
-        voice = False
+        # Also pull in proactive loop actions from today
+        try:
+            from scripts.proactive_loop import load_action_log
+            actions = load_action_log()
+            if actions:
+                digest += f"\n\nPlus {len(actions)} proactive actions today "
+                digest += "(lead follow-ups, inbox replies, prospecting)."
+        except Exception:
+            pass
+
+        # Default to voice — that's the Hermes way.  Owner gets a CALL.
+        voice = self._vapi_available()
         await self.send_update_to_owner(digest, voice=voice)
 
-        logger.info("✅ Evening report complete")
+        logger.info("✅ Evening report complete — %s", "voice call" if voice else "text fallback")
+
+    def _vapi_available(self) -> bool:
+        """Check if Vapi credentials are configured."""
+        import os
+        return all(os.environ.get(k) for k in ("VAPI_API_KEY", "VAPI_PHONE_ID", "VAPI_ASSISTANT_ID"))
 
     async def handle_escalation(self, employee_name: str, issue: str) -> None:
         """When an employee is blocked, decide: fix, reassign, or escalate to owner.
