@@ -57,7 +57,8 @@ def test_kimi_for_coding_alias():
 # -- Generic slug mismatch providers -----------------------------------------
 
 @patch.dict(os.environ, {"KIMI_API_KEY": "fake-key"}, clear=False)
-def test_kimi_for_coding_overlay_uses_hermes_slug():
+@patch("agent.models_dev.fetch_models_dev", return_value={"kimi-for-coding": {"name": "Kimi", "env": ["KIMI_API_KEY"]}})
+def test_kimi_for_coding_overlay_uses_hermes_slug(mock_fetch):
     """kimi-for-coding overlay should resolve to slug='kimi-coding'."""
     providers = list_authenticated_providers(current_provider="kimi-coding")
 

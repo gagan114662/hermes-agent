@@ -973,7 +973,17 @@ def _try_anthropic() -> Tuple[Optional[Any], Optional[str]]:
         pass
 
     from agent.anthropic_adapter import _is_oauth_token
-    is_oauth = _is_oauth_token(token)
+    if pool_present:
+        # Pool entries carry auth_type='oauth' when seeded from OAuth sources
+        # (CLAUDE_CODE_OAUTH_TOKEN, Claude Code credential files, etc.).
+        entry_auth_type = getattr(entry, "auth_type", "") if entry else ""
+        is_oauth = entry_auth_type == "oauth" or _is_oauth_token(token)
+    else:
+        # Tokens from resolve_anthropic_token() come from OAuth sources
+        # (ANTHROPIC_TOKEN, CLAUDE_CODE_OAUTH_TOKEN, Claude Code credentials)
+        # or from ANTHROPIC_API_KEY (regular console key, starts with "sk-ant-api").
+        # Any token that is NOT a regular console API key is OAuth.
+        is_oauth = _is_oauth_token(token) or not token.startswith("sk-ant-api")
     model = _API_KEY_PROVIDER_AUX_MODELS.get("anthropic", "claude-haiku-4-5-20251001")
     logger.debug("Auxiliary client: Anthropic native (%s) at %s (oauth=%s)", model, base_url, is_oauth)
     try:

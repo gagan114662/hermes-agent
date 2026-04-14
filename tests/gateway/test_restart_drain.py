@@ -13,7 +13,10 @@ from tests.gateway.restart_test_helpers import make_restart_runner, make_restart
 
 
 @pytest.mark.asyncio
-async def test_restart_command_while_busy_requests_drain_without_interrupt():
+async def test_restart_command_while_busy_requests_drain_without_interrupt(monkeypatch):
+    # GitHub Actions sets INVOCATION_ID (systemd env var) which switches the
+    # restart path to via_service=True.  Clear it so we test the detached path.
+    monkeypatch.delenv("INVOCATION_ID", raising=False)
     runner, _adapter = make_restart_runner()
     runner.request_restart = MagicMock(return_value=True)
     event = MessageEvent(
